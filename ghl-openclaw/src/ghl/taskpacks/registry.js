@@ -244,6 +244,8 @@ function googleAdMutationRequestFrom(event) {
 
   const campaign = normalizePlainObject(request.campaign || request.campaignBody || request.googleCampaign);
   const query = normalizePlainObject(request.query);
+  const sourcePost = normalizePlainObject(request.sourcePost || request.socialPost || request.post);
+  const promotion = normalizePlainObject(request.promotion || request.bundle || request.adBundle);
   const publish = normalizeBoolean(request.publishAfterCreate ?? request.publish ?? request.pushLive);
 
   return {
@@ -252,6 +254,13 @@ function googleAdMutationRequestFrom(event) {
     adId: normalizeString(request.adId) || normalizeString(request.googleAdId) || normalizeString(request.campaignId) || normalizeString(campaign?.id),
     entityType: normalizeString(request.entityType) || normalizeString(query?.entityType),
     campaign,
+    sourcePost,
+    promotion,
+    websiteUrl: normalizeString(request.websiteUrl) || normalizeString(request.link) || normalizeString(promotion?.websiteUrl) || normalizeString(promotion?.link),
+    mediaUrls: normalizeStringArray(request.mediaUrls || request.imageUrls || promotion?.mediaUrls || promotion?.imageUrls),
+    headline: normalizeString(request.headline) || normalizeString(promotion?.headline),
+    description: normalizeString(request.description) || normalizeString(promotion?.description),
+    cta: normalizeString(request.cta) || normalizeString(request.callToAction) || normalizeString(promotion?.cta) || normalizeString(promotion?.callToAction),
     query: query || {},
     publish: publish === true
   };
@@ -772,6 +781,22 @@ function googleEntityListResumeData(liveResult, context) {
   };
 }
 
+function googleIntegrationResumeData(liveResult) {
+  const data = liveResult?.data || null;
+  return {
+    integration: data && typeof data === 'object'
+      ? {
+          locationId: data.locationId || null,
+          status: data.status || null,
+          connected: data.status === 'connected',
+          adAccountId: data.adAccountId || null,
+          createdAt: data.createdAt || null,
+          updatedAt: data.updatedAt || null
+        }
+      : null
+  };
+}
+
 function googleCampaignResumeData(liveResult) {
   const campaign = liveResult?.data?.campaign || liveResult?.data?.results?.campaign || liveResult?.data || null;
   return {
@@ -818,6 +843,9 @@ function resolvedGoogleAdId(context, mutationRequest) {
 }
 
 function googleCampaignBody(mutationRequest) {
+  if (googlePromotionRequested(mutationRequest)) {
+    return googlePromotionCampaignBody(mutationRequest);
+  }
   const campaign = mutationRequest?.campaign;
   if (!campaign || Object.keys(campaign).length === 0) {
     throw new Error('Google campaign upsert requires a campaign object.');
@@ -833,6 +861,45 @@ function googleEntityQuery(mutationRequest) {
     ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
     ...(normalizeString(mutationRequest?.entityType) ? { entityType: normalizeString(mutationRequest.entityType) } : {}),
     ...(normalizePlainObject(mutationRequest?.query) || {})
+  };
+}
+
+function googlePromotionRequested(mutationRequest) {
+  return ['promote_social_post_to_google_ad', 'promote_social_post', 'build_google_ad_from_social_post'].includes(mutationRequest?.action);
+}
+
+function googlePromotionMediaUrls(mutationRequest) {
+  return [...new Set([...(mutationRequest?.mediaUrls || []), ...sourcePostMediaUrls(mutationRequest?.sourcePost)])];
+}
+
+function inferredGoogleAdvertisingChannelType(mutationRequest) {
+  return normalizeString(mutationRequest?.promotion?.advertisingChannelType)
+    || normalizeString(mutationRequest?.campaign?.advertisingChannelType)
+    || normalizeString(mutationRequest?.promotion?.channelType)
+    || normalizeString(mutationRequest?.campaign?.channelType)
+    || 'SEARCH';
+}
+
+function googlePromotionCampaignBody(mutationRequest) {
+  const mediaUrls = googlePromotionMediaUrls(mutationRequest);
+  const websiteUrl = mutationRequest?.websiteUrl || normalizeString(mutationRequest?.sourcePost?.websiteUrl) || normalizeString(mutationRequest?.sourcePost?.link) || null;
+  const headline = inferredPromotionHeadline(mutationRequest);
+  const description = inferredPromotionDescription(mutationRequest);
+  const dailyBudget = normalizeNumber(mutationRequest?.promotion?.dailyBudget);
+
+  return {
+    ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
+    name: inferredPromotionCampaignName(mutationRequest),
+    status: inferredPromotionStatus(mutationRequest),
+    advertisingChannelType: inferredGoogleAdvertisingChannelType(mutationRequest),
+    ...(websiteUrl ? { finalUrl: websiteUrl } : {}),
+    ...(headline ? { headline } : {}),
+    ...(description ? { description } : {}),
+    ...(normalizeString(mutationRequest?.cta) ? { callToAction: normalizeString(mutationRequest.cta) } : {}),
+    ...(dailyBudget === null ? {} : { dailyBudget }),
+    ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+    ...(mutationRequest?.promotion?.campaign || {}),
+    ...(mutationRequest?.campaign || {})
   };
 }
 
@@ -2381,17 +2448,40 @@ function taskPackHandlers() {
       trigger_events: ['ManualRun'],
       buildExecutionPlan(context) {
         const mutationRequest = googleAdMutationRequestFrom(context.event);
+        const explicitIntegrationStatus = mutationRequest?.action === 'get_google_integration_status';
+        const explicitPromoteSocialPost = googlePromotionRequested(mutationRequest)
+          && Boolean(sourcePostSummary(mutationRequest?.sourcePost))
+          && (googlePromotionMediaUrls(mutationRequest).length > 0 || Boolean(mutationRequest?.websiteUrl));
         const explicitEntityList = mutationRequest?.action === 'list_google_ad_entities'
           && Boolean(mutationRequest?.entityType || mutationRequest?.query?.entityType);
         const explicitCampaignFetch = mutationRequest?.action === 'get_google_campaign'
           && Boolean(mutationRequest?.adId);
-        const explicitCampaignUpsert = ['upsert_google_campaign', 'build_google_ad_campaign'].includes(mutationRequest?.action)
+        const explicitCampaignUpsert = explicitPromoteSocialPost || (
+          ['upsert_google_campaign', 'build_google_ad_campaign'].includes(mutationRequest?.action)
           && Boolean(mutationRequest?.campaign)
-          && Object.keys(mutationRequest.campaign).length > 0;
+          && Object.keys(mutationRequest.campaign).length > 0
+        );
         const explicitPublish = mutationRequest?.action === 'publish_google_ad'
-          || ((mutationRequest?.action === 'build_google_ad_campaign') && mutationRequest?.publish === true);
+          || ((mutationRequest?.action === 'build_google_ad_campaign' || explicitPromoteSocialPost) && mutationRequest?.publish === true);
 
         return [
+          {
+            name: 'get_google_integration_status',
+            kind: 'adapter_call',
+            adapter: 'GoogleAdsAdapter',
+            method: 'getIntegration',
+            pathHint: '/ad-publishing/google/integration',
+            args: () => [context.credentialRef || defaultLocationCredential(context), { locationId: mutationRequest?.locationId || context.event.locationId || null }],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: googleIntegrationResumeData,
+            details: {
+              action: 'get_google_integration_status',
+              locationId: mutationRequest?.locationId || context.event.locationId || null
+            },
+            skipIf: () => !explicitIntegrationStatus
+          },
           {
             name: 'list_google_ad_entities',
             kind: 'adapter_call',
@@ -2444,9 +2534,11 @@ function taskPackHandlers() {
               action: 'upsert_google_campaign',
               locationId: mutationRequest?.locationId || context.event.locationId || null,
               adId: mutationRequest?.adId || null,
-              name: mutationRequest?.campaign?.name || null,
-              status: mutationRequest?.campaign?.status || null,
-              advertisingChannelType: mutationRequest?.campaign?.advertisingChannelType || mutationRequest?.campaign?.channelType || null
+              name: mutationRequest?.campaign?.name || inferredPromotionCampaignName(mutationRequest),
+              status: mutationRequest?.campaign?.status || inferredPromotionStatus(mutationRequest),
+              advertisingChannelType: mutationRequest?.campaign?.advertisingChannelType || mutationRequest?.campaign?.channelType || inferredGoogleAdvertisingChannelType(mutationRequest),
+              websiteUrl: mutationRequest?.websiteUrl || null,
+              mediaUrls: googlePromotionMediaUrls(mutationRequest)
             },
             skipIf: () => !explicitCampaignUpsert
           },
@@ -2480,7 +2572,7 @@ function taskPackHandlers() {
               locationId: mutationRequest?.locationId || context.event.locationId || null,
               requestedAction: mutationRequest?.action || null
             },
-            skipIf: () => explicitEntityList || explicitCampaignFetch || explicitCampaignUpsert || explicitPublish
+            skipIf: () => explicitIntegrationStatus || explicitEntityList || explicitCampaignFetch || explicitCampaignUpsert || explicitPublish || explicitPromoteSocialPost
           }
         ];
       }

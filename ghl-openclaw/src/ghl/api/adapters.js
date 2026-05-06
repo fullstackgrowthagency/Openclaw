@@ -573,6 +573,10 @@ export class GoogleAdsAdapter {
     this.client = client;
   }
 
+  getIntegration(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/google/integration', query });
+  }
+
   listEntities(credentialRef, query = {}) {
     return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/google/entity', query });
   }

@@ -298,6 +298,11 @@ export const EXAMPLE_CALLS = {
     method: 'listEntities',
     args: ['location-oauth', { locationId: 'LOCATION_ID', entityType: 'CAMPAIGN' }]
   },
+  getGoogleIntegration: {
+    adapter: 'GoogleAdsAdapter',
+    method: 'getIntegration',
+    args: ['location-oauth', { locationId: 'LOCATION_ID' }]
+  },
   getGoogleCampaign: {
     adapter: 'GoogleAdsAdapter',
     method: 'getCampaign',
@@ -312,6 +317,36 @@ export const EXAMPLE_CALLS = {
     adapter: 'GoogleAdsAdapter',
     method: 'publishAd',
     args: ['location-oauth', 'GOOGLE_AD_ID', {}]
+  },
+  promoteSocialPostToGoogleAd: {
+    adapter: 'TaskPackExecutor',
+    method: 'execute',
+    args: [{
+      taskPackName: 'google_ad_pack',
+      agentId: 'ghl-marketing-agent-LOCATION_ID',
+      credentialRef: 'location-oauth',
+      mode: 'dry_run',
+      event: {
+        type: 'ManualRun',
+        locationId: 'LOCATION_ID',
+        payload: {
+          mutationRequest: {
+            action: 'promote_social_post_to_google_ad',
+            websiteUrl: 'https://example.com/landing-page',
+            sourcePost: {
+              theme: 'analytics clarity',
+              summary: 'If your marketing feels busy but not measurable, the fix is almost never more noise.',
+              media: [{ url: 'https://assets.example.com/post-image.png' }]
+            },
+            promotion: {
+              advertisingChannelType: 'SEARCH',
+              dailyBudget: 20,
+              status: 'PAUSED'
+            }
+          }
+        }
+      }
+    }]
   },
   promoteSocialPostToFacebookAd: {
     adapter: 'TaskPackExecutor',
