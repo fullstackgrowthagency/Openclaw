@@ -139,6 +139,11 @@ export const EXAMPLE_CALLS = {
     method: 'updateOpportunity',
     args: ['location-oauth', 'OPPORTUNITY_ID', { name: 'Updated Deal', monetaryValue: 2500, status: 'open' }]
   },
+  updateOpportunityStatus: {
+    adapter: 'OpportunitiesAdapter',
+    method: 'updateOpportunityStatus',
+    args: ['location-oauth', 'OPPORTUNITY_ID', { status: 'won' }]
+  },
   deleteOpportunity: {
     adapter: 'OpportunitiesAdapter',
     method: 'deleteOpportunity',

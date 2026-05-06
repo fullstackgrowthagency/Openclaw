@@ -358,6 +358,9 @@ function taskPackHandlers() {
             || Boolean(mutationRequest.pipelineStageId)
             || mutationRequest.monetaryValue !== null
           );
+        const explicitOpportunityStatusUpdate = mutationRequest?.action === 'update_opportunity_status'
+          && Boolean(mutationRequest.opportunityId)
+          && Boolean(mutationRequest.status);
         const explicitOpportunityDelete = mutationRequest?.action === 'delete_opportunity' && Boolean(mutationRequest.opportunityId);
         return [
           {
@@ -433,6 +436,25 @@ function taskPackHandlers() {
             skipIf: () => !explicitOpportunityUpdate
           },
           {
+            name: 'update_opportunity_status',
+            kind: 'adapter_call',
+            adapter: 'OpportunitiesAdapter',
+            method: 'updateOpportunityStatus',
+            httpMethod: 'PUT',
+            pathHint: '/opportunities/:id/status',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.opportunityId, { status: mutationRequest.status }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'update_opportunity_status',
+              opportunityId: mutationRequest?.opportunityId || null,
+              status: mutationRequest?.status || null
+            },
+            skipIf: () => !explicitOpportunityStatusUpdate
+          },
+          {
             name: 'delete_opportunity',
             kind: 'adapter_call',
             adapter: 'OpportunitiesAdapter',
@@ -453,7 +475,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             details: { action: 'evaluate_staleness_and_forecast', opportunityId, mutationRequest },
-            skipIf: () => explicitOpportunityCreate || explicitOpportunityUpdate || explicitOpportunityDelete
+            skipIf: () => explicitOpportunityCreate || explicitOpportunityUpdate || explicitOpportunityStatusUpdate || explicitOpportunityDelete
           }
         ];
       }
