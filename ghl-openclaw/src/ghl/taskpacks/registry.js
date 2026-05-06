@@ -349,6 +349,15 @@ function taskPackHandlers() {
           && Boolean(mutationRequest.pipelineStageId)
           && Boolean(mutationRequest.status)
           && Boolean(mutationRequest.name);
+        const explicitOpportunityUpdate = mutationRequest?.action === 'update_opportunity'
+          && Boolean(mutationRequest.opportunityId)
+          && (
+            Boolean(mutationRequest.name)
+            || Boolean(mutationRequest.status)
+            || Boolean(mutationRequest.pipelineId)
+            || Boolean(mutationRequest.pipelineStageId)
+            || mutationRequest.monetaryValue !== null
+          );
         const explicitOpportunityDelete = mutationRequest?.action === 'delete_opportunity' && Boolean(mutationRequest.opportunityId);
         return [
           {
@@ -395,6 +404,35 @@ function taskPackHandlers() {
             skipIf: () => !explicitOpportunityCreate
           },
           {
+            name: 'update_opportunity',
+            kind: 'adapter_call',
+            adapter: 'OpportunitiesAdapter',
+            method: 'updateOpportunity',
+            httpMethod: 'PUT',
+            pathHint: '/opportunities/:id',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.opportunityId, {
+              ...(mutationRequest.name ? { name: mutationRequest.name } : {}),
+              ...(mutationRequest.status ? { status: mutationRequest.status } : {}),
+              ...(mutationRequest.pipelineId ? { pipelineId: mutationRequest.pipelineId } : {}),
+              ...(mutationRequest.pipelineStageId ? { pipelineStageId: mutationRequest.pipelineStageId } : {}),
+              ...(mutationRequest.monetaryValue === null ? {} : { monetaryValue: mutationRequest.monetaryValue })
+            }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'update_opportunity',
+              opportunityId: mutationRequest?.opportunityId || null,
+              name: mutationRequest?.name || null,
+              status: mutationRequest?.status || null,
+              pipelineId: mutationRequest?.pipelineId || null,
+              pipelineStageId: mutationRequest?.pipelineStageId || null,
+              monetaryValue: mutationRequest?.monetaryValue
+            },
+            skipIf: () => !explicitOpportunityUpdate
+          },
+          {
             name: 'delete_opportunity',
             kind: 'adapter_call',
             adapter: 'OpportunitiesAdapter',
@@ -415,7 +453,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             details: { action: 'evaluate_staleness_and_forecast', opportunityId, mutationRequest },
-            skipIf: () => explicitOpportunityCreate || explicitOpportunityDelete
+            skipIf: () => explicitOpportunityCreate || explicitOpportunityUpdate || explicitOpportunityDelete
           }
         ];
       }
