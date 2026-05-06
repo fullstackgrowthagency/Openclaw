@@ -1,8 +1,15 @@
 {
-  "generatedAt": "2026-05-06T03:41:22.395Z",
-  "docsVersion": "2023-02-21",
-  "capabilityCount": 357,
-  "fetchErrors": [],
-  "liveSnapshotCount": 21,
-  "usingFallbackSnapshots": false
+  "ok": true,
+  "project": "ghl-openclaw",
+  "cwd": "/data/.openclaw/workspace/ghl-openclaw",
+  "dataDir": "/data/.openclaw/workspace/ghl-openclaw/data",
+  "apiBaseUrl": "https://services.leadconnectorhq.com",
+  "docsBaseUrl": "https://marketplace.gohighlevel.com/docs",
+  "webhookHost": "127.0.0.1",
+  "webhookPort": 8787,
+  "approvalBulkThreshold": 25,
+  "hasClientId": false,
+  "hasClientSecret": false,
+  "hasAgencyPit": false,
+  "hasSecretKey": false
 }

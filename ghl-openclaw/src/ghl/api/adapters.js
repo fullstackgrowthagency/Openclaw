@@ -218,6 +218,220 @@ export class ProductsAdapter {
   }
 }
 
+export class BusinessesAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listBusinesses(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/businesses/', query });
+  }
+
+  getBusiness(credentialRef, businessId) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/businesses/${businessId}` });
+  }
+
+  createBusiness(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: '/businesses/', body });
+  }
+
+  updateBusiness(credentialRef, businessId, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: `/businesses/${businessId}`, body });
+  }
+
+  deleteBusiness(credentialRef, businessId) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/businesses/${businessId}` });
+  }
+}
+
+export class FormsAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listForms(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/forms/', query });
+  }
+
+  listFormSubmissions(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/forms/submissions', query });
+  }
+}
+
+export class SurveysAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listSurveys(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/surveys/', query });
+  }
+
+  listSurveySubmissions(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/surveys/submissions', query });
+  }
+}
+
+export class CustomMenusAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listCustomMenus(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/custom-menus/', query });
+  }
+
+  getCustomMenu(credentialRef, customMenuId) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/custom-menus/${customMenuId}` });
+  }
+
+  createCustomMenu(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: '/custom-menus/', body });
+  }
+
+  updateCustomMenu(credentialRef, customMenuId, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: `/custom-menus/${customMenuId}`, body });
+  }
+
+  deleteCustomMenu(credentialRef, customMenuId) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/custom-menus/${customMenuId}` });
+  }
+}
+
+export class LocationCustomFieldsAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listCustomFields(credentialRef, locationId, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/locations/${locationId}/customFields`, query });
+  }
+
+  getCustomField(credentialRef, locationId, id) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/locations/${locationId}/customFields/${id}` });
+  }
+
+  createCustomField(credentialRef, locationId, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: `/locations/${locationId}/customFields`, body });
+  }
+
+  updateCustomField(credentialRef, locationId, id, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: `/locations/${locationId}/customFields/${id}`, body });
+  }
+
+  deleteCustomField(credentialRef, locationId, id) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/locations/${locationId}/customFields/${id}` });
+  }
+}
+
+export class LocationCustomValuesAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listCustomValues(credentialRef, locationId, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/locations/${locationId}/customValues`, query });
+  }
+
+  getCustomValue(credentialRef, locationId, id) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/locations/${locationId}/customValues/${id}` });
+  }
+
+  createCustomValue(credentialRef, locationId, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: `/locations/${locationId}/customValues`, body });
+  }
+
+  updateCustomValue(credentialRef, locationId, id, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: `/locations/${locationId}/customValues/${id}`, body });
+  }
+
+  deleteCustomValue(credentialRef, locationId, id) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/locations/${locationId}/customValues/${id}` });
+  }
+}
+
+export class AssociationsAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  createRelation(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: '/associations/relations', body });
+  }
+
+  listRelationsByRecord(credentialRef, recordId, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/associations/relations/${recordId}`, query });
+  }
+
+  deleteRelation(credentialRef, relationId) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/associations/relations/${relationId}` });
+  }
+}
+
+export class TriggerLinksAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  searchTriggerLinks(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/links/search', query });
+  }
+}
+
+export class MediaStorageAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listMedia(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/medias/files', query });
+  }
+
+  uploadFile(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: '/medias/upload-file', body });
+  }
+
+  deleteMediaObject(credentialRef, id) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/medias/${id}` });
+  }
+
+  updateMediaObject(credentialRef, id, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: `/medias/${id}`, body });
+  }
+
+  createFolder(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: '/medias/folder', body });
+  }
+}
+
+export class PhoneSystemAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listNumberPools(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/phone-system/number-pools', query });
+  }
+}
+
+export class SaasAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  enableLocation(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: '/enable-saas/', body });
+  }
+
+  bulkDisable(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: '/bulk-disable-saas/', body });
+  }
+
+  updateSubscription(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: '/update-saas-subscription/', body });
+  }
+}
+
 export class SnapshotsAdapter {
   constructor({ client = new GhlApiClient() } = {}) {
     this.client = client;
