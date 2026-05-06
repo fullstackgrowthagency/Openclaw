@@ -23,6 +23,22 @@ function leadMutationRequestFrom(event) {
   };
 }
 
+function opportunityMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+  return {
+    action: request.action || null,
+    opportunityId: request.opportunityId || objectIdFrom(event),
+    contactId: request.contactId || null,
+    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    pipelineId: request.pipelineId || null,
+    pipelineStageId: request.pipelineStageId || null,
+    status: request.status || null,
+    name: request.name || null,
+    monetaryValue: typeof request.monetaryValue === 'number' ? request.monetaryValue : null
+  };
+}
+
 function taskPackHandlers() {
   return {
     sub_account_onboarding_pack: {
@@ -213,9 +229,18 @@ function taskPackHandlers() {
       }
     },
     sales_pipeline_pack: {
-      trigger_events: ['OpportunityCreate', 'OpportunityUpdate', 'OpportunityStatusUpdate'],
+      trigger_events: ['OpportunityCreate', 'OpportunityUpdate', 'OpportunityStatusUpdate', 'ManualRun'],
       buildExecutionPlan(context) {
-        const opportunityId = objectIdFrom(context.event);
+        const mutationRequest = opportunityMutationRequestFrom(context.event);
+        const opportunityId = mutationRequest?.opportunityId || objectIdFrom(context.event);
+        const explicitOpportunityCreate = mutationRequest?.action === 'create_opportunity'
+          && Boolean(mutationRequest.contactId)
+          && Boolean(mutationRequest.locationId)
+          && Boolean(mutationRequest.pipelineId)
+          && Boolean(mutationRequest.pipelineStageId)
+          && Boolean(mutationRequest.status)
+          && Boolean(mutationRequest.name);
+        const explicitOpportunityDelete = mutationRequest?.action === 'delete_opportunity' && Boolean(mutationRequest.opportunityId);
         return [
           {
             name: 'fetch_opportunity',
@@ -227,14 +252,61 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             requiresCredential: true,
-            skipIf: () => !opportunityId
+            skipIf: () => !opportunityId || explicitOpportunityCreate
+          },
+          {
+            name: 'create_opportunity',
+            kind: 'adapter_call',
+            adapter: 'OpportunitiesAdapter',
+            method: 'createOpportunity',
+            httpMethod: 'POST',
+            pathHint: '/opportunities',
+            args: () => [context.credentialRef || defaultLocationCredential(context), {
+              locationId: mutationRequest.locationId,
+              contactId: mutationRequest.contactId,
+              pipelineId: mutationRequest.pipelineId,
+              pipelineStageId: mutationRequest.pipelineStageId,
+              status: mutationRequest.status,
+              name: mutationRequest.name,
+              ...(mutationRequest.monetaryValue === null ? {} : { monetaryValue: mutationRequest.monetaryValue })
+            }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'create_opportunity',
+              locationId: mutationRequest?.locationId || null,
+              contactId: mutationRequest?.contactId || null,
+              pipelineId: mutationRequest?.pipelineId || null,
+              pipelineStageId: mutationRequest?.pipelineStageId || null,
+              status: mutationRequest?.status || null,
+              name: mutationRequest?.name || null
+            },
+            skipIf: () => !explicitOpportunityCreate
+          },
+          {
+            name: 'delete_opportunity',
+            kind: 'adapter_call',
+            adapter: 'OpportunitiesAdapter',
+            method: 'deleteOpportunity',
+            httpMethod: 'DELETE',
+            pathHint: '/opportunities/:id',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.opportunityId],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: { action: 'delete_opportunity', opportunityId: mutationRequest?.opportunityId || null },
+            skipIf: () => !explicitOpportunityDelete
           },
           {
             name: 'evaluate_pipeline_risk',
             kind: 'intent',
             safe: true,
             mutation: false,
-            details: { action: 'evaluate_staleness_and_forecast', opportunityId }
+            details: { action: 'evaluate_staleness_and_forecast', opportunityId, mutationRequest },
+            skipIf: () => explicitOpportunityCreate || explicitOpportunityDelete
           }
         ];
       }

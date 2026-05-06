@@ -120,7 +120,7 @@ export class OpportunitiesAdapter {
   }
 
   createOpportunity(credentialRef, body) {
-    return this.client.request({ credentialRef, method: 'POST', path: '/opportunities', body });
+    return this.client.request({ credentialRef, method: 'POST', path: '/opportunities/', body });
   }
 
   updateOpportunity(credentialRef, id, body) {

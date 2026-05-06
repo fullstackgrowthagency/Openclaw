@@ -102,7 +102,12 @@ export const EXAMPLE_CALLS = {
   createOpportunity: {
     adapter: 'OpportunitiesAdapter',
     method: 'createOpportunity',
-    args: ['location-oauth', { name: 'New Deal', pipelineId: 'PIPELINE_ID' }]
+    args: ['location-oauth', { locationId: 'LOCATION_ID', contactId: 'CONTACT_ID', name: 'New Deal', pipelineId: 'PIPELINE_ID', pipelineStageId: 'STAGE_ID', status: 'open' }]
+  },
+  deleteOpportunity: {
+    adapter: 'OpportunitiesAdapter',
+    method: 'deleteOpportunity',
+    args: ['location-oauth', 'OPPORTUNITY_ID']
   },
   createAppointment: {
     adapter: 'CalendarsAdapter',
