@@ -191,6 +191,11 @@ export const EXAMPLE_CALLS = {
     method: 'getAppointment',
     args: ['location-oauth', 'APPOINTMENT_ID']
   },
+  listAppointments: {
+    adapter: 'CalendarsAdapter',
+    method: 'listEvents',
+    args: ['location-oauth', { locationId: 'LOCATION_ID', calendarId: 'CALENDAR_ID', startTime: '2026-05-14T00:00:00-05:00', endTime: '2026-05-15T00:00:00-05:00' }]
+  },
   getFreeSlots: {
     adapter: 'CalendarsAdapter',
     method: 'getFreeSlots',
@@ -204,6 +209,15 @@ export const EXAMPLE_CALLS = {
       endTime: '2026-05-07T16:30:00Z',
       title: 'Updated OpenClaw validation appointment',
       appointmentStatus: 'confirmed'
+    }]
+  },
+  rescheduleAppointment: {
+    adapter: 'CalendarsAdapter',
+    method: 'updateAppointment',
+    args: ['location-oauth', 'APPOINTMENT_ID', {
+      startTime: '2026-05-07T17:00:00Z',
+      endTime: '2026-05-07T17:30:00Z',
+      title: 'Rescheduled OpenClaw validation appointment'
     }]
   },
   deleteEvent: {

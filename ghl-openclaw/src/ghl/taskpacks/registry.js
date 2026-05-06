@@ -180,6 +180,13 @@ function appointmentFetchResumeData(liveResult) {
   };
 }
 
+function appointmentListResumeData(liveResult) {
+  return {
+    appointments: collectAppointmentRecords(liveResult?.data).slice(0, 100),
+    raw: liveResult?.data || null
+  };
+}
+
 function appointmentFreeSlotsResumeData(liveResult) {
   return {
     slots: collectAppointmentSlotStartTimes(liveResult?.data).slice(0, 200),
@@ -197,6 +204,30 @@ function resolvedAppointmentCalendarId(context, mutationRequest) {
 
 function resolvedAppointmentAssignedUserId(context, mutationRequest) {
   return mutationRequest?.assignedUserId || fetchedAppointment(context)?.assignedUserId || null;
+}
+
+function resolvedAppointmentListContactId(context, mutationRequest) {
+  if (mutationRequest?.contactId) return mutationRequest.contactId;
+  if (mutationRequest?.contactName) {
+    return resolvedSingleContactId(context, 'search_appointment_contact_by_name', mutationRequest?.contactName);
+  }
+  return null;
+}
+
+function appointmentListQuery(context, mutationRequest) {
+  const computedEndTimeValue = mutationRequest?.endTime || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes);
+  const startDate = mutationRequest?.startDate ?? (mutationRequest?.startTime ? new Date(mutationRequest.startTime).getTime() : null);
+  const endDate = mutationRequest?.endDate ?? (computedEndTimeValue ? new Date(computedEndTimeValue).getTime() : null);
+  const startTime = mutationRequest?.startTime || (startDate !== null ? new Date(startDate).toISOString() : null);
+  const endTime = computedEndTimeValue || (endDate !== null ? new Date(endDate).toISOString() : null);
+  return {
+    ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
+    ...(mutationRequest?.calendarId ? { calendarId: mutationRequest.calendarId } : {}),
+    ...(resolvedAppointmentAssignedUserId(context, mutationRequest) ? { userId: resolvedAppointmentAssignedUserId(context, mutationRequest) } : {}),
+    ...(mutationRequest?.appointmentStatus ? { appointmentStatus: mutationRequest.appointmentStatus } : {}),
+    ...(startTime ? { startTime } : {}),
+    ...(endTime ? { endTime } : {})
+  };
 }
 
 function appointmentUpdateBody(context, mutationRequest, { forceCancelled = false } = {}) {
@@ -271,6 +302,42 @@ function collectAppointmentSlotStartTimes(value, output = []) {
   if (typeof value === 'string' && !Number.isNaN(new Date(value).getTime())) {
     output.push(value);
   }
+  return output;
+}
+
+function collectAppointmentRecords(value, output = []) {
+  if (!value) return output;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectAppointmentRecords(item, output));
+    return output;
+  }
+  if (typeof value !== 'object') return output;
+
+  const looksLikeAppointment = typeof value.id === 'string'
+    && (
+      typeof value.startTime === 'string'
+      || typeof value.endTime === 'string'
+      || typeof value.calendarId === 'string'
+      || typeof value.contactId === 'string'
+      || typeof value.appointmentStatus === 'string'
+      || typeof value.appoinmentStatus === 'string'
+    );
+
+  if (looksLikeAppointment) {
+    output.push({
+      id: value.id,
+      calendarId: value.calendarId || null,
+      locationId: value.locationId || null,
+      contactId: value.contactId || null,
+      assignedUserId: value.assignedUserId || null,
+      appointmentStatus: value.appointmentStatus || value.appoinmentStatus || null,
+      startTime: value.startTime || null,
+      endTime: value.endTime || null,
+      title: value.title || null
+    });
+  }
+
+  Object.values(value).forEach((item) => collectAppointmentRecords(item, output));
   return output;
 }
 
@@ -401,6 +468,19 @@ function resolvedAppointmentMutationDetails(context, mutationRequest, action, ex
     appointmentStatus: mutationRequest?.appointmentStatus || null,
     toNotify: mutationRequest?.toNotify,
     ...extra
+  };
+}
+
+function resolvedAppointmentListDetails(context, mutationRequest) {
+  return {
+    action: 'list_appointments',
+    locationId: mutationRequest?.locationId || null,
+    calendarId: mutationRequest?.calendarId || null,
+    contactId: mutationRequest?.contactId || null,
+    contactName: mutationRequest?.contactName || null,
+    assignedUserId: resolvedAppointmentAssignedUserId(context, mutationRequest),
+    appointmentStatus: mutationRequest?.appointmentStatus || null,
+    query: appointmentListQuery(context, mutationRequest)
   };
 }
 
@@ -1019,6 +1099,9 @@ function taskPackHandlers() {
       trigger_events: ['AppointmentCreate', 'AppointmentUpdate', 'AppointmentDelete', 'ManualRun'],
       buildExecutionPlan(context) {
         const mutationRequest = appointmentMutationRequestFrom(context.event);
+        const explicitListAppointments = mutationRequest?.action === 'list_appointments';
+        const explicitGetAppointment = mutationRequest?.action === 'get_appointment'
+          && Boolean(mutationRequest.appointmentId);
         const explicitAppointmentCreate = mutationRequest?.action === 'create_appointment'
           && Boolean(mutationRequest.locationId)
           && Boolean(mutationRequest.calendarId)
@@ -1027,6 +1110,10 @@ function taskPackHandlers() {
         const explicitGetFreeSlots = mutationRequest?.action === 'get_free_slots'
           && Boolean(mutationRequest.calendarId || mutationRequest.appointmentId)
           && appointmentFreeSlotsRequested(mutationRequest);
+        const explicitAppointmentReschedule = mutationRequest?.action === 'reschedule_appointment'
+          && Boolean(mutationRequest.appointmentId)
+          && Boolean(mutationRequest.startTime)
+          && Object.keys(appointmentUpdateBody(context, mutationRequest)).length > 0;
         const explicitAppointmentUpdate = mutationRequest?.action === 'update_appointment'
           && Boolean(mutationRequest.appointmentId)
           && Object.keys(appointmentUpdateBody(context, mutationRequest)).length > 0;
@@ -1034,7 +1121,7 @@ function taskPackHandlers() {
           && Boolean(mutationRequest.appointmentId);
         const explicitAppointmentDelete = mutationRequest?.action === 'delete_appointment'
           && Boolean(mutationRequest.appointmentId);
-        const explicitAppointmentAvailabilityCheck = explicitAppointmentUpdate && appointmentAvailabilityRequested(mutationRequest);
+        const explicitAppointmentAvailabilityCheck = (explicitAppointmentUpdate || explicitAppointmentReschedule) && appointmentAvailabilityRequested(mutationRequest);
         return [
           {
             name: 'search_appointment_contact_by_name',
@@ -1068,7 +1155,25 @@ function taskPackHandlers() {
             mutation: false,
             requiresCredential: true,
             resumeData: appointmentFetchResumeData,
-            skipIf: () => !mutationRequest?.appointmentId || explicitAppointmentCreate
+            details: {
+              action: explicitGetAppointment ? 'get_appointment' : 'fetch_appointment',
+              appointmentId: mutationRequest?.appointmentId || null
+            },
+            skipIf: () => !mutationRequest?.appointmentId || explicitAppointmentCreate || explicitListAppointments
+          },
+          {
+            name: 'list_appointments',
+            kind: 'adapter_call',
+            adapter: 'CalendarsAdapter',
+            method: 'listEvents',
+            pathHint: '/calendars/events',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), appointmentListQuery(runtimeContext, mutationRequest)],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: appointmentListResumeData,
+            details: (runtimeContext) => resolvedAppointmentListDetails(runtimeContext, mutationRequest),
+            skipIf: () => !explicitListAppointments
           },
           {
             name: 'check_requested_appointment_slot',
@@ -1128,7 +1233,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             requiresCredential: true,
-            skipIf: () => explicitAppointmentCreate || explicitGetFreeSlots || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
+            skipIf: () => explicitListAppointments || explicitGetAppointment || explicitAppointmentCreate || explicitGetFreeSlots || explicitAppointmentReschedule || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
           },
           {
             name: 'create_appointment',
@@ -1144,6 +1249,26 @@ function taskPackHandlers() {
             requiresCredential: true,
             details: (runtimeContext) => resolvedAppointmentDetails(runtimeContext, mutationRequest),
             skipIf: () => !explicitAppointmentCreate
+          },
+          {
+            name: 'reschedule_appointment',
+            kind: 'adapter_call',
+            adapter: 'CalendarsAdapter',
+            method: 'updateAppointment',
+            httpMethod: 'PUT',
+            pathHint: '/calendars/events/appointments/:eventId',
+            args: (runtimeContext) => {
+              ensureRequestedAppointmentSlotAvailable(runtimeContext, mutationRequest);
+              return [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), mutationRequest.appointmentId, appointmentUpdateBody(runtimeContext, mutationRequest)];
+            },
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => resolvedAppointmentMutationDetails(runtimeContext, mutationRequest, 'reschedule_appointment', {
+              availabilityCheck: ensureRequestedAppointmentSlotAvailable(runtimeContext, mutationRequest)
+            }),
+            skipIf: () => !explicitAppointmentReschedule
           },
           {
             name: 'update_appointment',
@@ -1201,7 +1326,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             details: { action: 'evaluate_booking_followups', locationId: context.event.locationId, mutationRequest },
-            skipIf: () => explicitAppointmentCreate || explicitGetFreeSlots || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
+            skipIf: () => explicitListAppointments || explicitGetAppointment || explicitAppointmentCreate || explicitGetFreeSlots || explicitAppointmentReschedule || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
           }
         ];
       }
