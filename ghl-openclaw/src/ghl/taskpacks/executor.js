@@ -117,13 +117,15 @@ export class TaskPackExecutor {
   }
 
   async executeExistingRun(run, taskPack) {
+    const runtime = { stepOutputs: {} };
     const context = {
       taskPack,
       event: run.event,
       agentId: run.agentId,
       credentialRef: run.credentialRef,
       mode: run.mode,
-      queueId: run.queueId
+      queueId: run.queueId,
+      runtime
     };
     const plan = taskPack.buildExecutionPlan(context) || [];
 
@@ -136,6 +138,10 @@ export class TaskPackExecutor {
         const existing = currentRun?.steps?.[index] || null;
 
         if (existing && FINAL_STEP_STATUSES.has(existing.status)) {
+          const restoredOutput = restoreStepOutput(existing);
+          if (restoredOutput) {
+            runtime.stepOutputs[step.name] = restoredOutput;
+          }
           continue;
         }
 
@@ -199,7 +205,7 @@ export class TaskPackExecutor {
                 pathHint: step.pathHint || null,
                 riskLevel: approvalPolicy.riskLevel,
                 reviewHint: approvalPolicy.reviewHint,
-                plannedDetails: step.details || null
+                plannedDetails: typeof step.details === 'function' ? step.details(context) : (step.details || null)
               }
             });
             await this.runStore.setStep(run.id, index, stepResult(step, 'awaiting_approval', {
@@ -213,7 +219,7 @@ export class TaskPackExecutor {
 
         if (step.kind === 'intent') {
           await this.runStore.setStep(run.id, index, stepResult(step, 'planned', {
-            details: step.details || null,
+            details: typeof step.details === 'function' ? step.details(context) : (step.details || null),
             approval: approvalSnapshot(resolvedApproval)
           }, index));
           continue;
@@ -228,6 +234,7 @@ export class TaskPackExecutor {
 
             const args = step.args ? step.args(context) : [];
             const liveResult = await adapter[step.method](...args);
+            runtime.stepOutputs[step.name] = liveResult;
             await this.runStore.setStep(run.id, index, stepResult(step, 'executed', {
               ...sanitizeLiveResult(liveResult),
               approval: approvalSnapshot(resolvedApproval)
@@ -321,6 +328,18 @@ function sanitizeLiveResult(result) {
     headers: sanitizeHeaders(result?.headers || {}),
     dataPreview: previewData(result?.data)
   };
+}
+
+function restoreStepOutput(step) {
+  if (step?.status !== 'executed') return null;
+  const preview = step?.payload?.dataPreview;
+  if (typeof preview !== 'string' || !preview) return null;
+  if (preview.endsWith('...')) return null;
+  try {
+    return { data: JSON.parse(preview) };
+  } catch {
+    return null;
+  }
 }
 
 function sanitizeHeaders(headers) {

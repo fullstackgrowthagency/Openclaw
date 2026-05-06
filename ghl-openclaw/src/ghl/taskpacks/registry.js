@@ -53,15 +53,50 @@ function conversationMutationRequestFrom(event) {
   const normalizedMessageType = typeof request.messageType === 'string' && request.messageType.trim()
     ? request.messageType.trim()
     : (typeof request.type === 'string' && request.type.trim() ? request.type.trim() : null);
+  const normalizedContactName = typeof request.contactName === 'string' && request.contactName.trim()
+    ? request.contactName.trim()
+    : (typeof request.name === 'string' && request.name.trim() ? request.name.trim() : null);
   return {
     action: request.action || null,
     conversationId: request.conversationId || objectIdFrom(event),
     contactId: request.contactId || null,
+    contactName: normalizedContactName,
     message: typeof request.message === 'string' && request.message.trim() ? request.message : null,
     messageType: normalizedMessageType,
     channel: typeof request.channel === 'string' && request.channel.trim() ? request.channel.trim() : null,
     fromNumber: typeof request.fromNumber === 'string' && request.fromNumber.trim() ? request.fromNumber.trim() : null,
     toNumber: typeof request.toNumber === 'string' && request.toNumber.trim() ? request.toNumber.trim() : null
+  };
+}
+
+function resolvedConversationContactId(context, mutationRequest) {
+  if (mutationRequest?.contactId) return mutationRequest.contactId;
+  const contacts = context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts;
+  if (!Array.isArray(contacts) || contacts.length === 0) {
+    throw new Error(`No contact matched \"${mutationRequest?.contactName || 'unknown'}\".`);
+  }
+  if (contacts.length > 1) {
+    const options = contacts
+      .slice(0, 5)
+      .map((contact) => contact.name || contact.firstName || contact.email || contact.phone || contact.id)
+      .join(', ');
+    throw new Error(`Multiple contacts matched \"${mutationRequest?.contactName || 'unknown'}\": ${options}`);
+  }
+  return contacts[0].id;
+}
+
+function resolvedConversationContactDetails(context, mutationRequest) {
+  const resolvedContactId = mutationRequest?.contactId || context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts?.[0]?.id || null;
+  return {
+    action: 'send_conversation_message',
+    conversationId: mutationRequest?.conversationId || null,
+    contactId: resolvedContactId,
+    contactName: mutationRequest?.contactName || null,
+    messageType: mutationRequest?.messageType || null,
+    channel: mutationRequest?.channel || null,
+    fromNumber: mutationRequest?.fromNumber || null,
+    toNumber: mutationRequest?.toNumber || null,
+    messagePreview: mutationRequest?.message ? mutationRequest.message.slice(0, 120) : null
   };
 }
 
@@ -549,7 +584,7 @@ function taskPackHandlers() {
         const mutationRequest = conversationMutationRequestFrom(context.event);
         const conversationId = mutationRequest?.conversationId || objectIdFrom(context.event);
         const explicitConversationSend = mutationRequest?.action === 'send_conversation_message'
-          && Boolean(mutationRequest.contactId)
+          && (Boolean(mutationRequest.contactId) || Boolean(mutationRequest.contactName))
           && Boolean(mutationRequest.message)
           && Boolean(mutationRequest.messageType);
         return [
@@ -563,7 +598,27 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             requiresCredential: true,
-            skipIf: () => !conversationId
+            skipIf: () => !conversationId || explicitConversationSend
+          },
+          {
+            name: 'search_contacts_by_name',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'listContacts',
+            pathHint: '/contacts/',
+            args: () => [context.credentialRef || defaultLocationCredential(context), {
+              locationId: context.event.locationId || mutationRequest?.locationId || null,
+              query: mutationRequest.contactName,
+              limit: 5
+            }],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            details: {
+              action: 'search_contacts_by_name',
+              contactName: mutationRequest?.contactName || null
+            },
+            skipIf: () => !explicitConversationSend || Boolean(mutationRequest.contactId) || !mutationRequest.contactName
           },
           {
             name: 'send_conversation_message',
@@ -572,8 +627,8 @@ function taskPackHandlers() {
             method: 'sendMessage',
             httpMethod: 'POST',
             pathHint: '/conversations/messages',
-            args: () => [context.credentialRef || defaultLocationCredential(context), {
-              contactId: mutationRequest.contactId,
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), {
+              contactId: resolvedConversationContactId(runtimeContext, mutationRequest),
               message: mutationRequest.message,
               type: mutationRequest.messageType,
               ...(mutationRequest.channel ? { channel: mutationRequest.channel } : {}),
@@ -584,16 +639,7 @@ function taskPackHandlers() {
             mutation: true,
             requiresApproval: true,
             requiresCredential: true,
-            details: {
-              action: 'send_conversation_message',
-              conversationId: mutationRequest?.conversationId || null,
-              contactId: mutationRequest?.contactId || null,
-              messageType: mutationRequest?.messageType || null,
-              channel: mutationRequest?.channel || null,
-              fromNumber: mutationRequest?.fromNumber || null,
-              toNumber: mutationRequest?.toNumber || null,
-              messagePreview: mutationRequest?.message ? mutationRequest.message.slice(0, 120) : null
-            },
+            details: (runtimeContext) => resolvedConversationContactDetails(runtimeContext, mutationRequest),
             skipIf: () => !explicitConversationSend
           },
           {
