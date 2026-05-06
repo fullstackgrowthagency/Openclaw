@@ -40,6 +40,17 @@ function formatTarget(details = {}) {
   return 'workflow step';
 }
 
+function formatPlannedValue(value) {
+  if (value == null) return null;
+  if (Array.isArray(value)) return value.length ? value.join(', ') : null;
+  if (typeof value === 'object') {
+    const serialized = JSON.stringify(value);
+    return serialized.length > 160 ? `${serialized.slice(0, 160)}...` : serialized;
+  }
+  const stringValue = String(value);
+  return stringValue.length > 160 ? `${stringValue.slice(0, 160)}...` : stringValue;
+}
+
 export function enrichApproval(approval, nowIso = new Date().toISOString()) {
   const ageMinutes = minutesBetween(approval.createdAt, nowIso);
   const decisionLatencyMinutes = approval.decidedAt ? minutesBetween(approval.createdAt, approval.decidedAt) : null;
@@ -109,5 +120,57 @@ export function buildApprovalStatusView(approvals, nowIso = new Date().toISOStri
   return {
     summary: summarizeApprovalMetrics(approvals, nowIso),
     approvals: enriched
+  };
+}
+
+export function buildApprovalChatPrompt(approval, nowIso = new Date().toISOString()) {
+  const enriched = enrichApproval(approval, nowIso);
+  const planned = approval?.details?.plannedDetails || {};
+  const lines = [
+    `Approval needed: ${enriched.actionSummary}`,
+    `ID: ${enriched.id}`,
+    `Risk: ${enriched.riskLevel}`,
+    `Target: ${enriched.target}`
+  ];
+
+  const fieldOrder = [
+    ['contactName', 'Contact'],
+    ['contactId', 'Contact ID'],
+    ['conversationId', 'Conversation ID'],
+    ['opportunityId', 'Opportunity ID'],
+    ['workflowId', 'Workflow ID'],
+    ['pipelineId', 'Pipeline ID'],
+    ['pipelineStageId', 'Stage ID'],
+    ['status', 'Status'],
+    ['messageType', 'Message type'],
+    ['channel', 'Channel'],
+    ['fromNumber', 'From number'],
+    ['toNumber', 'To number'],
+    ['followers', 'Followers'],
+    ['tags', 'Tags'],
+    ['name', 'Name'],
+    ['website', 'Website'],
+    ['messagePreview', 'Preview']
+  ];
+
+  for (const [key, label] of fieldOrder) {
+    const formatted = formatPlannedValue(planned[key]);
+    if (formatted) {
+      lines.push(`${label}: ${formatted}`);
+    }
+  }
+
+  if (enriched.reviewHint) {
+    lines.push(`Review: ${enriched.reviewHint}`);
+  }
+
+  lines.push(`Reply with approve ${enriched.id} or reject ${enriched.id}.`);
+
+  return {
+    id: enriched.id,
+    title: `Approval needed: ${enriched.actionSummary}`,
+    text: lines.join('\n'),
+    suggestedReplies: [`approve ${enriched.id}`, `reject ${enriched.id}`],
+    approval: enriched
   };
 }

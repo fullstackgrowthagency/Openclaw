@@ -10,7 +10,7 @@ import { renderAgentManifests } from '../ghl/agents/definitions.js';
 import { renderTaskPacks } from '../ghl/taskpacks/definitions.js';
 import { TaskPackRunStore } from '../ghl/taskpacks/run-store.js';
 import { TaskPackExecutor } from '../ghl/taskpacks/executor.js';
-import { buildApprovalStatusView, enrichApproval } from '../ghl/approvals/presenter.js';
+import { buildApprovalChatPrompt, buildApprovalStatusView, enrichApproval } from '../ghl/approvals/presenter.js';
 import { ApprovalStore } from '../ghl/approvals/store.js';
 import { CredentialBroker } from '../ghl/auth/credential-broker.js';
 import { GhlApiClient } from '../ghl/api/client.js';
@@ -74,7 +74,7 @@ async function main() {
     case 'taskpack:resume': {
       const runId = requireArg(args, '--run-id');
       const result = await taskPackExecutor.resumeRun({ runId });
-      console.log(JSON.stringify(result, null, 2));
+      console.log(JSON.stringify(await withApprovalPrompt(result, approvalStore), null, 2));
       return;
     }
     case 'approval:status': {
@@ -94,7 +94,7 @@ async function main() {
     case 'approval:show': {
       const id = requireArg(args, '--id');
       const approval = await approvalStore.get(id);
-      console.log(JSON.stringify({ ok: Boolean(approval), approval: approval ? enrichApproval(approval) : null }, null, 2));
+      console.log(JSON.stringify({ ok: Boolean(approval), approval: approval ? enrichApproval(approval) : null, approvalPrompt: approval ? buildApprovalChatPrompt(approval) : null }, null, 2));
       return;
     }
     case 'approval:approve': {
@@ -156,7 +156,7 @@ async function main() {
         }
       };
       const result = await taskPackExecutor.execute({ taskPackName, agentId, event, credentialRef, mode });
-      console.log(JSON.stringify(result, null, 2));
+      console.log(JSON.stringify(await withApprovalPrompt(result, approvalStore), null, 2));
       return;
     }
     case 'auth:status': {
@@ -396,6 +396,17 @@ function previewData(data) {
   if (data == null) return null;
   const serialized = typeof data === 'string' ? data : JSON.stringify(data);
   return serialized.length > 1000 ? `${serialized.slice(0, 1000)}...` : serialized;
+}
+
+async function withApprovalPrompt(result, approvalStore) {
+  if (!result || result.status !== 'awaiting_approval' || !result.approvalId) {
+    return result;
+  }
+  const approval = await approvalStore.get(result.approvalId);
+  return {
+    ...result,
+    approvalPrompt: approval ? buildApprovalChatPrompt(approval) : null
+  };
 }
 
 function inferCredentialRef(userType) {
