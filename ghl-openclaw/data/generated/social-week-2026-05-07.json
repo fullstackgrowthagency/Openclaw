@@ -1,0 +1,66 @@
+{
+  "locationId": "zO0CeZsgcBbBsOgRCaJq",
+  "locationName": "Full Stack Growth Agency",
+  "timezone": "America/Denver",
+  "accountId": "69fb8f554eda2642fe77f6fb_zO0CeZsgcBbBsOgRCaJq_527265980479986_page",
+  "imageAssets": [
+    "/data/.openclaw/media/tool-image-generation/image-1---b8a257ce-ad7c-4647-b667-89c63be846e1.png",
+    "/data/.openclaw/media/tool-image-generation/image-2---74f4bec0-298d-4f3d-8614-672a432833a7.png",
+    "/data/.openclaw/media/tool-image-generation/image-3---965c6ebb-5320-4e19-b8a8-79ebc33ea48d.png",
+    "/data/.openclaw/media/tool-image-generation/image-4---73d0e065-b0ea-4f1f-8369-c375cda40b79.png",
+    "/data/.openclaw/media/tool-image-generation/image-1---58cbefe7-107a-4313-8b46-8340a8051bcd.png",
+    "/data/.openclaw/media/tool-image-generation/image-2---3432d8da-def9-47f5-8d2d-5ae3cd261a42.png",
+    "/data/.openclaw/media/tool-image-generation/image-3---9f8af48f-a566-43f2-9b78-ad0b44b3a592.png"
+  ],
+  "posts": [
+    {
+      "day": 1,
+      "scheduleDate": "2026-05-07T16:00:00.000Z",
+      "theme": "analytics clarity",
+      "summary": "If your marketing feels busy but not measurable, the fix is almost never more noise. It is better tracking, better offers, and a cleaner path from click to client.\n\nAt Full Stack Growth Agency, we help businesses turn scattered activity into clear growth decisions.\n\n#MarketingStrategy #LeadGeneration #BusinessGrowth",
+      "imagePrompt": "business owner reviewing analytics dashboard in bright modern office"
+    },
+    {
+      "day": 2,
+      "scheduleDate": "2026-05-08T16:00:00.000Z",
+      "theme": "website conversion",
+      "summary": "A pretty website is nice. A website that books calls, captures leads, and moves people to action is better.\n\nGood design should make the next step obvious. Great design makes it easy.\n\n#WebDesign #ConversionRateOptimization #DigitalMarketing",
+      "imagePrompt": "polished website mockup on desktop and phone"
+    },
+    {
+      "day": 3,
+      "scheduleDate": "2026-05-09T16:00:00.000Z",
+      "theme": "social consistency",
+      "summary": "Most brands do not need to go viral. They need to show up consistently with the right message, for the right audience, at the right time.\n\nConsistency compounds.\n\n#SocialMediaMarketing #BrandGrowth #ContentStrategy",
+      "imagePrompt": "team planning social media campaign with coffee and notebooks"
+    },
+    {
+      "day": 4,
+      "scheduleDate": "2026-05-10T16:00:00.000Z",
+      "theme": "automation",
+      "summary": "Automation should make your business feel more human, not less.\n\nWhen the repetitive work is handled well, your team gets more time for real conversations, faster follow-up, and better service.\n\n#BusinessAutomation #CRM #Operations",
+      "imagePrompt": "automation and CRM concept with clean modern workspace"
+    },
+    {
+      "day": 5,
+      "scheduleDate": "2026-05-11T16:00:00.000Z",
+      "theme": "lead follow-up",
+      "summary": "A lot of lost revenue is not a traffic problem. It is a follow-up problem.\n\nFast response, clear messaging, and a simple pipeline can change everything.\n\n#SalesProcess #LeadFollowUp #SmallBusinessMarketing",
+      "imagePrompt": "happy business owner celebrating qualified leads on phone"
+    },
+    {
+      "day": 6,
+      "scheduleDate": "2026-05-12T16:00:00.000Z",
+      "theme": "reporting",
+      "summary": "Reporting should answer three questions fast:\n1. What is working?\n2. What is not?\n3. What do we change next?\n\nIf your dashboard cannot do that, it is probably too complicated.\n\n#MarketingAnalytics #Reporting #Growth",
+      "imagePrompt": "close-up of polished marketing report with charts and coffee"
+    },
+    {
+      "day": 7,
+      "scheduleDate": "2026-05-13T16:00:00.000Z",
+      "theme": "full-stack growth",
+      "summary": "Real growth usually comes from the stack working together: strategy, site, content, automation, and follow-up.\n\nThat is where momentum starts to feel predictable.\n\n#GrowthAgency #MarketingSystems #FullStackGrowth",
+      "imagePrompt": "web development and SEO concept with code and fast website preview"
+    }
+  ]
+}
