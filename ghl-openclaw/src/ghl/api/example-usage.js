@@ -74,6 +74,11 @@ export const EXAMPLE_CALLS = {
     method: 'addTags',
     args: ['location-oauth', 'CONTACT_ID', { tags: ['openclaw-validation'] }]
   },
+  updateContact: {
+    adapter: 'ContactsAdapter',
+    method: 'updateContact',
+    args: ['location-oauth', 'CONTACT_ID', { website: 'https://openclaw-validation.invalid' }]
+  },
   removeContactTag: {
     adapter: 'ContactsAdapter',
     method: 'removeTags',
