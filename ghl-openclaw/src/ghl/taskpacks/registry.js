@@ -144,17 +144,56 @@ function appointmentMutationRequestFrom(event) {
   };
 }
 
-function appointmentUpdateBody(mutationRequest, { forceCancelled = false } = {}) {
+function appointmentFetchResumeData(liveResult) {
+  const appointment = liveResult?.data?.appointment || liveResult?.data || null;
+  if (!appointment || typeof appointment !== 'object') {
+    return { appointment: null };
+  }
+  return {
+    appointment: {
+      id: appointment.id || null,
+      calendarId: appointment.calendarId || null,
+      locationId: appointment.locationId || null,
+      contactId: appointment.contactId || null,
+      assignedUserId: appointment.assignedUserId || null,
+      appointmentStatus: appointment.appointmentStatus || appointment.appoinmentStatus || null,
+      startTime: appointment.startTime || null,
+      endTime: appointment.endTime || null,
+      title: appointment.title || null
+    }
+  };
+}
+
+function appointmentFreeSlotsResumeData(liveResult) {
+  return {
+    slots: collectAppointmentSlotStartTimes(liveResult?.data).slice(0, 200),
+    raw: liveResult?.data || null
+  };
+}
+
+function fetchedAppointment(context) {
+  return context?.runtime?.stepOutputs?.fetch_appointment?.data?.appointment || null;
+}
+
+function resolvedAppointmentCalendarId(context, mutationRequest) {
+  return mutationRequest?.calendarId || fetchedAppointment(context)?.calendarId || null;
+}
+
+function resolvedAppointmentAssignedUserId(context, mutationRequest) {
+  return mutationRequest?.assignedUserId || fetchedAppointment(context)?.assignedUserId || null;
+}
+
+function appointmentUpdateBody(context, mutationRequest, { forceCancelled = false } = {}) {
   const endTime = mutationRequest?.endTime || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes);
   return {
-    ...(mutationRequest?.calendarId ? { calendarId: mutationRequest.calendarId } : {}),
-    ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
-    ...(mutationRequest?.contactId ? { contactId: mutationRequest.contactId } : {}),
+    ...(resolvedAppointmentCalendarId(context, mutationRequest) ? { calendarId: resolvedAppointmentCalendarId(context, mutationRequest) } : {}),
+    ...(mutationRequest?.locationId || fetchedAppointment(context)?.locationId ? { locationId: mutationRequest?.locationId || fetchedAppointment(context)?.locationId } : {}),
+    ...(mutationRequest?.contactId || fetchedAppointment(context)?.contactId ? { contactId: mutationRequest?.contactId || fetchedAppointment(context)?.contactId } : {}),
     ...(mutationRequest?.startTime ? { startTime: mutationRequest.startTime } : {}),
     ...(endTime ? { endTime } : {}),
     ...(mutationRequest?.title ? { title: mutationRequest.title } : {}),
     ...(mutationRequest?.address ? { address: mutationRequest.address } : {}),
-    ...(mutationRequest?.assignedUserId ? { assignedUserId: mutationRequest.assignedUserId } : {}),
+    ...(resolvedAppointmentAssignedUserId(context, mutationRequest) ? { assignedUserId: resolvedAppointmentAssignedUserId(context, mutationRequest) } : {}),
     ...(mutationRequest?.description ? { description: mutationRequest.description } : {}),
     ...(mutationRequest?.meetingLocationType ? { meetingLocationType: mutationRequest.meetingLocationType } : {}),
     ...(mutationRequest?.meetingLocationId ? { meetingLocationId: mutationRequest.meetingLocationId } : {}),
@@ -164,6 +203,62 @@ function appointmentUpdateBody(mutationRequest, { forceCancelled = false } = {})
     ...(mutationRequest?.ignoreDateRange === null ? {} : { ignoreDateRange: mutationRequest.ignoreDateRange }),
     ...(mutationRequest?.ignoreFreeSlotValidation === null ? {} : { ignoreFreeSlotValidation: mutationRequest.ignoreFreeSlotValidation }),
     ...(mutationRequest?.rrule ? { rrule: mutationRequest.rrule } : {})
+  };
+}
+
+function appointmentAvailabilityRequested(mutationRequest) {
+  return Boolean(mutationRequest?.startTime || mutationRequest?.endTime || mutationRequest?.durationMinutes !== null);
+}
+
+function appointmentAvailabilityQuery(context, mutationRequest) {
+  const startTime = mutationRequest?.startTime;
+  const endTime = mutationRequest?.endTime || computedEndTime(startTime, mutationRequest?.durationMinutes);
+  if (!startTime || !endTime) {
+    throw new Error('Availability check requires startTime and endTime (or durationMinutes).');
+  }
+  return {
+    startDate: new Date(startTime).getTime(),
+    endDate: new Date(endTime).getTime(),
+    userId: resolvedAppointmentAssignedUserId(context, mutationRequest)
+  };
+}
+
+function collectAppointmentSlotStartTimes(value, output = []) {
+  if (!value) return output;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectAppointmentSlotStartTimes(item, output));
+    return output;
+  }
+  if (typeof value === 'object') {
+    if (typeof value.startTime === 'string') output.push(value.startTime);
+    if (typeof value.dateTime === 'string') output.push(value.dateTime);
+    if (typeof value.time === 'string') output.push(value.time);
+    Object.values(value).forEach((item) => collectAppointmentSlotStartTimes(item, output));
+    return output;
+  }
+  if (typeof value === 'string' && !Number.isNaN(new Date(value).getTime())) {
+    output.push(value);
+  }
+  return output;
+}
+
+function ensureRequestedAppointmentSlotAvailable(context, mutationRequest) {
+  const requestedStartTime = mutationRequest?.startTime;
+  if (!requestedStartTime) return { requestedStartTime: null, available: true, reason: 'no_time_change_requested' };
+  const slotCheck = context?.runtime?.stepOutputs?.check_requested_appointment_slot?.data || null;
+  const slotValues = Array.from(new Set(collectAppointmentSlotStartTimes(slotCheck)));
+  const requestedMs = new Date(requestedStartTime).getTime();
+  const available = slotValues.some((slot) => new Date(slot).getTime() === requestedMs);
+  if (!available) {
+    const availablePreview = slotValues.slice(0, 10).join(', ');
+    throw new Error(availablePreview
+      ? `Requested appointment slot is not available. Available starts in range: ${availablePreview}`
+      : 'Requested appointment slot is not available according to free-slots lookup.');
+  }
+  return {
+    requestedStartTime,
+    available: true,
+    matchingSlot: requestedStartTime
   };
 }
 
@@ -258,19 +353,19 @@ function resolvedAppointmentDetails(context, mutationRequest) {
   };
 }
 
-function resolvedAppointmentMutationDetails(mutationRequest, action, extra = {}) {
+function resolvedAppointmentMutationDetails(context, mutationRequest, action, extra = {}) {
   return {
     action,
     appointmentId: mutationRequest?.appointmentId || null,
-    locationId: mutationRequest?.locationId || null,
-    calendarId: mutationRequest?.calendarId || null,
-    contactId: mutationRequest?.contactId || null,
+    locationId: mutationRequest?.locationId || fetchedAppointment(context)?.locationId || null,
+    calendarId: resolvedAppointmentCalendarId(context, mutationRequest),
+    contactId: mutationRequest?.contactId || fetchedAppointment(context)?.contactId || null,
     startTime: mutationRequest?.startTime || null,
     endTime: mutationRequest?.endTime || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes),
     durationMinutes: mutationRequest?.durationMinutes ?? null,
     title: mutationRequest?.title || null,
     address: mutationRequest?.address || null,
-    assignedUserId: mutationRequest?.assignedUserId || null,
+    assignedUserId: resolvedAppointmentAssignedUserId(context, mutationRequest),
     appointmentStatus: mutationRequest?.appointmentStatus || null,
     toNotify: mutationRequest?.toNotify,
     ...extra
@@ -899,11 +994,12 @@ function taskPackHandlers() {
           && Boolean(mutationRequest.startTime);
         const explicitAppointmentUpdate = mutationRequest?.action === 'update_appointment'
           && Boolean(mutationRequest.appointmentId)
-          && Object.keys(appointmentUpdateBody(mutationRequest)).length > 0;
+          && Object.keys(appointmentUpdateBody(context, mutationRequest)).length > 0;
         const explicitAppointmentCancel = mutationRequest?.action === 'cancel_appointment'
           && Boolean(mutationRequest.appointmentId);
         const explicitAppointmentDelete = mutationRequest?.action === 'delete_appointment'
           && Boolean(mutationRequest.appointmentId);
+        const explicitAppointmentAvailabilityCheck = explicitAppointmentUpdate && appointmentAvailabilityRequested(mutationRequest);
         return [
           {
             name: 'search_appointment_contact_by_name',
@@ -936,7 +1032,33 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             requiresCredential: true,
+            resumeData: appointmentFetchResumeData,
             skipIf: () => !mutationRequest?.appointmentId || explicitAppointmentCreate
+          },
+          {
+            name: 'check_requested_appointment_slot',
+            kind: 'adapter_call',
+            adapter: 'CalendarsAdapter',
+            method: 'getFreeSlots',
+            pathHint: '/calendars/:calendarId/free-slots',
+            args: (runtimeContext) => [
+              runtimeContext.credentialRef || defaultLocationCredential(runtimeContext),
+              resolvedAppointmentCalendarId(runtimeContext, mutationRequest),
+              appointmentAvailabilityQuery(runtimeContext, mutationRequest)
+            ],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: appointmentFreeSlotsResumeData,
+            details: (runtimeContext) => ({
+              action: 'check_requested_appointment_slot',
+              appointmentId: mutationRequest?.appointmentId || null,
+              calendarId: resolvedAppointmentCalendarId(runtimeContext, mutationRequest),
+              requestedStartTime: mutationRequest?.startTime || null,
+              requestedEndTime: mutationRequest?.endTime || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes),
+              assignedUserId: resolvedAppointmentAssignedUserId(runtimeContext, mutationRequest)
+            }),
+            skipIf: () => !explicitAppointmentAvailabilityCheck
           },
           {
             name: 'refresh_calendar_event_window',
@@ -972,12 +1094,17 @@ function taskPackHandlers() {
             method: 'updateAppointment',
             httpMethod: 'PUT',
             pathHint: '/calendars/events/appointments/:eventId',
-            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), mutationRequest.appointmentId, appointmentUpdateBody(mutationRequest)],
+            args: (runtimeContext) => {
+              ensureRequestedAppointmentSlotAvailable(runtimeContext, mutationRequest);
+              return [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), mutationRequest.appointmentId, appointmentUpdateBody(runtimeContext, mutationRequest)];
+            },
             safe: false,
             mutation: true,
             requiresApproval: true,
             requiresCredential: true,
-            details: () => resolvedAppointmentMutationDetails(mutationRequest, 'update_appointment'),
+            details: (runtimeContext) => resolvedAppointmentMutationDetails(runtimeContext, mutationRequest, 'update_appointment', {
+              availabilityCheck: ensureRequestedAppointmentSlotAvailable(runtimeContext, mutationRequest)
+            }),
             skipIf: () => !explicitAppointmentUpdate
           },
           {
@@ -987,12 +1114,12 @@ function taskPackHandlers() {
             method: 'updateAppointment',
             httpMethod: 'PUT',
             pathHint: '/calendars/events/appointments/:eventId',
-            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), mutationRequest.appointmentId, appointmentUpdateBody(mutationRequest, { forceCancelled: true })],
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), mutationRequest.appointmentId, appointmentUpdateBody(runtimeContext, mutationRequest, { forceCancelled: true })],
             safe: false,
             mutation: true,
             requiresApproval: true,
             requiresCredential: true,
-            details: () => resolvedAppointmentMutationDetails(mutationRequest, 'cancel_appointment', { appointmentStatus: 'cancelled' }),
+            details: (runtimeContext) => resolvedAppointmentMutationDetails(runtimeContext, mutationRequest, 'cancel_appointment', { appointmentStatus: 'cancelled' }),
             skipIf: () => !explicitAppointmentCancel
           },
           {
@@ -1007,7 +1134,7 @@ function taskPackHandlers() {
             mutation: true,
             requiresApproval: true,
             requiresCredential: true,
-            details: () => resolvedAppointmentMutationDetails(mutationRequest, 'delete_appointment'),
+            details: (runtimeContext) => resolvedAppointmentMutationDetails(runtimeContext, mutationRequest, 'delete_appointment'),
             skipIf: () => !explicitAppointmentDelete
           },
           {

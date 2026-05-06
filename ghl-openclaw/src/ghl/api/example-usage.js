@@ -191,6 +191,11 @@ export const EXAMPLE_CALLS = {
     method: 'getAppointment',
     args: ['location-oauth', 'APPOINTMENT_ID']
   },
+  getFreeSlots: {
+    adapter: 'CalendarsAdapter',
+    method: 'getFreeSlots',
+    args: ['location-oauth', 'CALENDAR_ID', { startDate: 1778716800000, endDate: 1778803200000, userId: 'USER_ID' }]
+  },
   updateAppointment: {
     adapter: 'CalendarsAdapter',
     method: 'updateAppointment',

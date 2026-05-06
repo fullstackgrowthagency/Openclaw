@@ -199,6 +199,16 @@ export class CalendarsAdapter {
     return this.client.request({ credentialRef, method: 'GET', path: '/calendars/', query });
   }
 
+  getFreeSlots(credentialRef, calendarId, query = {}) {
+    return this.client.request({
+      credentialRef,
+      method: 'GET',
+      path: `/calendars/${calendarId}/free-slots`,
+      query,
+      version: '2023-02-21'
+    });
+  }
+
   createCalendar(credentialRef, body) {
     return this.client.request({ credentialRef, method: 'POST', path: '/calendars/', body });
   }

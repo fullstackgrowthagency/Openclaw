@@ -89,6 +89,12 @@ export class ApprovalStore {
     return state.approvals.find((item) => item.id === id) || null;
   }
 
+  async findLatestByDedupeKey(dedupeKey) {
+    const state = await this.load();
+    const matches = state.approvals.filter((item) => item.dedupeKey === dedupeKey);
+    return matches.length ? matches[matches.length - 1] : null;
+  }
+
   async decide(id, { decision, decider = 'human_admin', note = null }) {
     const state = await this.load();
     const approval = state.approvals.find((item) => item.id === id);

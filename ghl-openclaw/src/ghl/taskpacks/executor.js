@@ -145,12 +145,64 @@ export class TaskPackExecutor {
           continue;
         }
 
+        if (step.skipIf?.(context)) {
+          await this.runStore.setStep(run.id, index, stepResult(step, 'skipped', { reason: 'skip_condition' }, index));
+          continue;
+        }
+
         let resolvedApproval = null;
-        if (existing?.status === 'awaiting_approval') {
-          const approval = await this.approvalStore.get(existing.payload?.approvalId);
-          if (!approval || approval.status === 'pending') {
-            return this.pauseForApproval(run.id, taskPack, run.mode, run.event, existing.payload?.approvalId);
+        const approvalPolicy = evaluateApprovalRequirement({ step, mode: run.mode, taskPack, event: run.event });
+        if (approvalPolicy.requiresApproval) {
+          const approvalDedupeKey = buildApprovalDedupeKey(run.id, index, step.name, approvalPolicy.reason);
+          const approval = existing?.payload?.approvalId
+            ? await this.approvalStore.get(existing.payload.approvalId)
+            : await this.approvalStore.findLatestByDedupeKey(approvalDedupeKey);
+
+          if (!approval) {
+            const createdApproval = await this.approvalStore.createRequest({
+              runId: run.id,
+              queueId: run.queueId,
+              taskPackName: taskPack.name,
+              stepName: step.name,
+              stepIndex: index,
+              agentId: run.agentId,
+              companyId: run.event.companyId || null,
+              locationId: run.event.locationId || null,
+              eventType: run.event.type,
+              mode: run.mode,
+              reason: approvalPolicy.reason,
+              key: approvalDedupeKey,
+              details: {
+                stepKind: step.kind,
+                mutation: Boolean(step.mutation),
+                safe: Boolean(step.safe),
+                adapter: step.adapter || null,
+                adapterMethod: step.method || null,
+                pathHint: step.pathHint || null,
+                riskLevel: approvalPolicy.riskLevel,
+                reviewHint: approvalPolicy.reviewHint,
+                plannedDetails: typeof step.details === 'function' ? step.details(context) : (step.details || null)
+              }
+            });
+            await this.runStore.setStep(run.id, index, stepResult(step, 'awaiting_approval', {
+              approvalId: createdApproval.id,
+              reason: approvalPolicy.reason,
+              reasons: approvalPolicy.reasons
+            }, index));
+            return this.pauseForApproval(run.id, taskPack, run.mode, run.event, createdApproval.id);
           }
+
+          if (approval.status === 'pending') {
+            if (existing?.status !== 'awaiting_approval' || existing?.payload?.approvalId !== approval.id) {
+              await this.runStore.setStep(run.id, index, stepResult(step, 'awaiting_approval', {
+                approvalId: approval.id,
+                reason: approvalPolicy.reason,
+                reasons: approvalPolicy.reasons
+              }, index));
+            }
+            return this.pauseForApproval(run.id, taskPack, run.mode, run.event, approval.id);
+          }
+
           if (approval.status === 'rejected') {
             const rejectedStep = stepResult(step, 'rejected', {
               approvalId: approval.id,
@@ -173,48 +225,8 @@ export class TaskPackExecutor {
               approvalId: approval.id
             };
           }
+
           resolvedApproval = approval;
-        }
-
-        if (step.skipIf?.(context)) {
-          await this.runStore.setStep(run.id, index, stepResult(step, 'skipped', { reason: 'skip_condition' }, index));
-          continue;
-        }
-
-        if (!resolvedApproval) {
-          const approvalPolicy = evaluateApprovalRequirement({ step, mode: run.mode, taskPack, event: run.event });
-          if (approvalPolicy.requiresApproval) {
-            const approval = await this.approvalStore.createRequest({
-              runId: run.id,
-              queueId: run.queueId,
-              taskPackName: taskPack.name,
-              stepName: step.name,
-              stepIndex: index,
-              agentId: run.agentId,
-              companyId: run.event.companyId || null,
-              locationId: run.event.locationId || null,
-              eventType: run.event.type,
-              mode: run.mode,
-              reason: approvalPolicy.reason,
-              details: {
-                stepKind: step.kind,
-                mutation: Boolean(step.mutation),
-                safe: Boolean(step.safe),
-                adapter: step.adapter || null,
-                adapterMethod: step.method || null,
-                pathHint: step.pathHint || null,
-                riskLevel: approvalPolicy.riskLevel,
-                reviewHint: approvalPolicy.reviewHint,
-                plannedDetails: typeof step.details === 'function' ? step.details(context) : (step.details || null)
-              }
-            });
-            await this.runStore.setStep(run.id, index, stepResult(step, 'awaiting_approval', {
-              approvalId: approval.id,
-              reason: approvalPolicy.reason,
-              reasons: approvalPolicy.reasons
-            }, index));
-            return this.pauseForApproval(run.id, taskPack, run.mode, run.event, approval.id);
-          }
         }
 
         if (step.kind === 'intent') {
@@ -309,6 +321,10 @@ function stepResult(step, status, payload, index = null) {
     createdAt: new Date().toISOString(),
     payload
   };
+}
+
+function buildApprovalDedupeKey(runId, stepIndex, stepName, reason) {
+  return `${runId}:${stepIndex ?? stepName}:${reason}`;
 }
 
 function approvalSnapshot(approval) {
