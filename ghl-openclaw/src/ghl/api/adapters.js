@@ -90,6 +90,14 @@ export class ContactsAdapter {
   removeTags(credentialRef, contactId, body) {
     return this.client.request({ credentialRef, method: 'DELETE', path: `/contacts/${contactId}/tags`, body });
   }
+
+  addToWorkflow(credentialRef, contactId, workflowId) {
+    return this.client.request({ credentialRef, method: 'POST', path: `/contacts/${contactId}/workflow/${workflowId}` });
+  }
+
+  removeFromWorkflow(credentialRef, contactId, workflowId) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/contacts/${contactId}/workflow/${workflowId}` });
+  }
 }
 
 export class ConversationsAdapter {

@@ -114,6 +114,16 @@ export const EXAMPLE_CALLS = {
     method: 'addNote',
     args: ['location-oauth', 'CONTACT_ID', { body: 'OpenClaw validation note', title: 'Validation', pinned: false }]
   },
+  addContactToWorkflow: {
+    adapter: 'ContactsAdapter',
+    method: 'addToWorkflow',
+    args: ['location-oauth', 'CONTACT_ID', 'WORKFLOW_ID']
+  },
+  removeContactFromWorkflow: {
+    adapter: 'ContactsAdapter',
+    method: 'removeFromWorkflow',
+    args: ['location-oauth', 'CONTACT_ID', 'WORKFLOW_ID']
+  },
   deleteContactNote: {
     adapter: 'ContactsAdapter',
     method: 'deleteNote',
