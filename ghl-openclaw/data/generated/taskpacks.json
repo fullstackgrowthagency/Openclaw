@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-06T18:49:13.974Z",
+  "generatedAt": "2026-05-06T21:23:05.119Z",
   "taskpacks": [
     {
       "name": "sub_account_onboarding_pack",
@@ -329,6 +329,54 @@
       "output_schema": "marketing_asset_pack:output",
       "trigger_events": [],
       "manual_execution_command": "marketing_asset_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "manual_rollback_review"
+      ],
+      "permission_level": "approved_write",
+      "approval_required": true
+    },
+    {
+      "name": "facebook_ad_pack",
+      "owner_agent_type": "ghl-marketing-agent-{locationId}",
+      "purpose": "facebook_ad_pack",
+      "required_scopes": [
+        "admanager/campaigns.write",
+        "admanager/adsets.write",
+        "admanager/ads.write"
+      ],
+      "required_endpoints": [
+        "/ad-publishing/facebook/entity",
+        "/ad-publishing/facebook/campaigns",
+        "/ad-publishing/facebook/adsets",
+        "/ad-publishing/facebook/ads"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "facebook_ad_pack:input",
+      "output_schema": "facebook_ad_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "facebook_ad_pack",
       "validation_rules": [
         "scope_check",
         "token_context_check",

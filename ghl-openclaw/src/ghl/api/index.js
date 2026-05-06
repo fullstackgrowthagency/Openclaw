@@ -22,6 +22,7 @@ export {
   SaasAdapter,
   SnapshotsAdapter,
   SocialPlannerAdapter,
+  FacebookAdsAdapter,
   VoiceAiAdapter,
   WorkflowsAdapter
 } from './adapters.js';

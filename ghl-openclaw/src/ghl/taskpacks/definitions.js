@@ -34,6 +34,7 @@ export function buildTaskPacks() {
     pack('workflow_automation_qa_pack', 'ghl-workflow-agent-{locationId}', ['workflows.readonly'], ['/workflows/']),
     pack('payments_invoicing_pack', 'ghl-payments-agent-{locationId}', ['invoices.write', 'products.write'], ['/invoices', '/products/'], true),
     pack('marketing_asset_pack', 'ghl-marketing-agent-{locationId}', ['links.write', 'socialplanner/posts.write'], ['/social-media-posting/:locationId/accounts', '/social-media-posting/:locationId/posts'], true),
+    pack('facebook_ad_pack', 'ghl-marketing-agent-{locationId}', ['admanager/campaigns.write', 'admanager/adsets.write', 'admanager/ads.write'], ['/ad-publishing/facebook/entity', '/ad-publishing/facebook/campaigns', '/ad-publishing/facebook/adsets', '/ad-publishing/facebook/ads'], true),
     pack('user_permission_pack', 'ghl-agency-lead', ['users.write'], ['/users/'], true),
     pack('reporting_pack', 'ghl-reporting-agent-{locationId}', ['reporting.read'], []),
     pack('snapshot_template_pack', 'ghl-agency-lead', ['snapshots.write'], ['/snapshots'], true),

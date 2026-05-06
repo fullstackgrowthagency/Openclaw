@@ -6,6 +6,7 @@ import {
   ConversationsAdapter,
   CustomMenusAdapter,
   FormsAdapter,
+  FacebookAdsAdapter,
   InvoicesAdapter,
   LocationCustomFieldsAdapter,
   LocationCustomValuesAdapter,
@@ -52,6 +53,7 @@ export function buildAdapterExamples() {
       mediaStorage: new MediaStorageAdapter(),
       phoneSystem: new PhoneSystemAdapter(),
       socialPlanner: new SocialPlannerAdapter(),
+      facebookAds: new FacebookAdsAdapter(),
       voiceAi: new VoiceAiAdapter(),
       workflows: new WorkflowsAdapter()
     }
@@ -263,6 +265,31 @@ export const EXAMPLE_CALLS = {
       summary: 'OpenClaw validation draft social post',
       status: 'draft'
     }]
+  },
+  listFacebookAdEntities: {
+    adapter: 'FacebookAdsAdapter',
+    method: 'listEntities',
+    args: ['location-oauth', { entityType: 'campaign' }]
+  },
+  upsertFacebookCampaign: {
+    adapter: 'FacebookAdsAdapter',
+    method: 'upsertCampaign',
+    args: ['location-oauth', { name: 'OpenClaw validation campaign', objective: 'OUTCOME_TRAFFIC' }]
+  },
+  upsertFacebookAdset: {
+    adapter: 'FacebookAdsAdapter',
+    method: 'upsertAdset',
+    args: ['location-oauth', { campaignId: 'CAMPAIGN_ID', name: 'OpenClaw validation adset' }]
+  },
+  upsertFacebookAd: {
+    adapter: 'FacebookAdsAdapter',
+    method: 'upsertAd',
+    args: ['location-oauth', { campaignId: 'CAMPAIGN_ID', adsetId: 'ADSET_ID', name: 'OpenClaw validation ad' }]
+  },
+  publishFacebookCampaign: {
+    adapter: 'FacebookAdsAdapter',
+    method: 'publishCampaign',
+    args: ['location-oauth', 'CAMPAIGN_ID', {}]
   },
   uploadMediaFile: {
     adapter: 'MediaStorageAdapter',

@@ -9,13 +9,13 @@
     ],
     "scopeHint": "oauth.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:20.953Z",
+    "fetchedAt": "2026-05-06T21:23:11.410Z",
     "statusCode": 200,
-    "fingerprint": "08e4bdb5c63171310f2c7bd0bb88b994bc37f835267d19c38e1830fd7071e8ae",
+    "fingerprint": "4d0316f38806acd538b4a5858e7ce1dc545fc8b96cae379cf29a826b78a2415a",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "08e4bdb5c63171310f2c7bd0bb88b994bc37f835267d19c38e1830fd7071e8ae"
+    "bodyHash": "4d0316f38806acd538b4a5858e7ce1dc545fc8b96cae379cf29a826b78a2415a"
   },
   {
     "category": "authorization",
@@ -27,13 +27,13 @@
     ],
     "scopeHint": "ui_managed",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:21.267Z",
+    "fetchedAt": "2026-05-06T21:23:11.895Z",
     "statusCode": 200,
-    "fingerprint": "ad3013483ea978393a200e18b0fbdfa39b5f8c49bb3700e9781b548577995c22",
+    "fingerprint": "d33d9a190416b9f4b46e667ca1fd64a10b1fcb3afe2eeb87539927a09dec8196",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "ad3013483ea978393a200e18b0fbdfa39b5f8c49bb3700e9781b548577995c22"
+    "bodyHash": "d33d9a190416b9f4b46e667ca1fd64a10b1fcb3afe2eeb87539927a09dec8196"
   },
   {
     "category": "authorization",
@@ -46,9 +46,9 @@
     ],
     "scopeHint": "all",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:21.326Z",
+    "fetchedAt": "2026-05-06T21:23:12.167Z",
     "statusCode": 200,
-    "fingerprint": "bd9254d45da5046daf4a39785f91669360cbae1ffc3850971a643d6a3ef83e4d",
+    "fingerprint": "881484f19e25d1408a5ab1d50a6ff9bc3cbfb67054ea525ffca1475626761ca7",
     "version": "2023-02-21",
     "endpoints": [
       {
@@ -1421,7 +1421,7 @@
       }
     ],
     "rateLimitHints": [],
-    "bodyHash": "bd9254d45da5046daf4a39785f91669360cbae1ffc3850971a643d6a3ef83e4d"
+    "bodyHash": "881484f19e25d1408a5ab1d50a6ff9bc3cbfb67054ea525ffca1475626761ca7"
   },
   {
     "category": "webhooks",
@@ -1433,13 +1433,13 @@
     ],
     "scopeHint": "webhook",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:21.524Z",
+    "fetchedAt": "2026-05-06T21:23:12.653Z",
     "statusCode": 200,
-    "fingerprint": "644d2b485c1a110e0fc089cb894c4787e91c3a3131ff770770fbafa324f5fad6",
+    "fingerprint": "3820b692adf67da91361207e142faddd6795451f56543d9d6c8936f5b21b08d1",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "644d2b485c1a110e0fc089cb894c4787e91c3a3131ff770770fbafa324f5fad6"
+    "bodyHash": "3820b692adf67da91361207e142faddd6795451f56543d9d6c8936f5b21b08d1"
   },
   {
     "category": "webhooks",
@@ -1451,13 +1451,13 @@
     ],
     "scopeHint": "webhook",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:21.689Z",
+    "fetchedAt": "2026-05-06T21:23:13.152Z",
     "statusCode": 200,
-    "fingerprint": "9fc7ed4f1a24f08a5e03223568efb2f9de72b7e44fdf93a539c6c9e6b88847c2",
+    "fingerprint": "f0b62be81cbad1519730beaaaff3ccd07a6d3f2f6be133821572b9632cba1082",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "9fc7ed4f1a24f08a5e03223568efb2f9de72b7e44fdf93a539c6c9e6b88847c2"
+    "bodyHash": "f0b62be81cbad1519730beaaaff3ccd07a6d3f2f6be133821572b9632cba1082"
   },
   {
     "category": "contacts",
@@ -1470,13 +1470,13 @@
     ],
     "scopeHint": "contacts.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:22.146Z",
+    "fetchedAt": "2026-05-06T21:23:13.554Z",
     "statusCode": 200,
-    "fingerprint": "64692e5804e02030139dbce89203fe3042d1e133472f445f01ddfa21d65a258a",
+    "fingerprint": "2f532d643feba4b7bea93a92b7120f17c87248bde934d16fa46a52359707eeb2",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "64692e5804e02030139dbce89203fe3042d1e133472f445f01ddfa21d65a258a"
+    "bodyHash": "2f532d643feba4b7bea93a92b7120f17c87248bde934d16fa46a52359707eeb2"
   },
   {
     "category": "conversations",
@@ -1489,13 +1489,13 @@
     ],
     "scopeHint": "conversations.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:22.322Z",
+    "fetchedAt": "2026-05-06T21:23:13.945Z",
     "statusCode": 200,
-    "fingerprint": "86acbc8aac8548c50f87d0703a843d63458dba4891e008dc186a474a6b621df8",
+    "fingerprint": "fba563ae02ed4f4e0bad3fa8b05b864fc42dfd750d7519b9c468afa3580e3163",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "86acbc8aac8548c50f87d0703a843d63458dba4891e008dc186a474a6b621df8"
+    "bodyHash": "fba563ae02ed4f4e0bad3fa8b05b864fc42dfd750d7519b9c468afa3580e3163"
   },
   {
     "category": "calendars",
@@ -1508,13 +1508,13 @@
     ],
     "scopeHint": "calendars.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:22.487Z",
+    "fetchedAt": "2026-05-06T21:23:14.308Z",
     "statusCode": 200,
-    "fingerprint": "93d08da19f5b0a842c28748b3b19295b0462d3efaf2be545114173dcc1b5e157",
+    "fingerprint": "b21a0be039909aa56d88224ad97d2c07d4f9354244b591f299d674d4614f7165",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "93d08da19f5b0a842c28748b3b19295b0462d3efaf2be545114173dcc1b5e157"
+    "bodyHash": "b21a0be039909aa56d88224ad97d2c07d4f9354244b591f299d674d4614f7165"
   },
   {
     "category": "locations",
@@ -1527,13 +1527,13 @@
     ],
     "scopeHint": "locations.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:22.648Z",
+    "fetchedAt": "2026-05-06T21:23:14.691Z",
     "statusCode": 200,
-    "fingerprint": "732800f1fdd7a8831270fd49282e8ca98e155bdae7afe4a9ff66a8a9bbfb70ca",
+    "fingerprint": "f68ea041998ec443a227ea768d20041729ce534f4fdde4491bb806781fad921e",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "732800f1fdd7a8831270fd49282e8ca98e155bdae7afe4a9ff66a8a9bbfb70ca"
+    "bodyHash": "f68ea041998ec443a227ea768d20041729ce534f4fdde4491bb806781fad921e"
   },
   {
     "category": "location_custom_fields",
@@ -1546,13 +1546,13 @@
     ],
     "scopeHint": "locations/customFields.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:23.095Z",
+    "fetchedAt": "2026-05-06T21:23:15.070Z",
     "statusCode": 200,
-    "fingerprint": "6f6b5da362e8d8eec38274ed409cc718f9d2464b1e79e93af67c4c4fff1b7db9",
+    "fingerprint": "5bfa466a566d5f68470ea037ce5d73e541c0ba411e8e1f04cac6997c446c8abe",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "6f6b5da362e8d8eec38274ed409cc718f9d2464b1e79e93af67c4c4fff1b7db9"
+    "bodyHash": "5bfa466a566d5f68470ea037ce5d73e541c0ba411e8e1f04cac6997c446c8abe"
   },
   {
     "category": "location_custom_values",
@@ -1565,13 +1565,13 @@
     ],
     "scopeHint": "locations/customValues.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:23.451Z",
+    "fetchedAt": "2026-05-06T21:23:15.510Z",
     "statusCode": 200,
-    "fingerprint": "979a2d44237b11cae478b9d4508ddd7b4bcc6e3e2c70573dbc6a5fdd5005f190",
+    "fingerprint": "40c333fdc2182e361767986686ad9f9231ee8a31922958ea775bea86f2d02e41",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "979a2d44237b11cae478b9d4508ddd7b4bcc6e3e2c70573dbc6a5fdd5005f190"
+    "bodyHash": "40c333fdc2182e361767986686ad9f9231ee8a31922958ea775bea86f2d02e41"
   },
   {
     "category": "opportunities",
@@ -1584,13 +1584,13 @@
     ],
     "scopeHint": "opportunities.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:23.613Z",
+    "fetchedAt": "2026-05-06T21:23:15.910Z",
     "statusCode": 200,
-    "fingerprint": "95a8fbe3a7ccd37292056ce21986ba142e814dbafb9754b1e060789a2b05de5c",
+    "fingerprint": "084f2bd2d260bfeac05abf6f82effc1fe993fd06118ce888159172eee9a97540",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "95a8fbe3a7ccd37292056ce21986ba142e814dbafb9754b1e060789a2b05de5c"
+    "bodyHash": "084f2bd2d260bfeac05abf6f82effc1fe993fd06118ce888159172eee9a97540"
   },
   {
     "category": "payments",
@@ -1603,13 +1603,13 @@
     ],
     "scopeHint": "payments/*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:23.780Z",
+    "fetchedAt": "2026-05-06T21:23:16.321Z",
     "statusCode": 200,
-    "fingerprint": "b25a155ac894113dca2d6a3da8abad865d06812863adc26826c4211ce568686c",
+    "fingerprint": "8873dbd10e221b2dd97cdb045576ba12a7f34ca05aa52dfb34c727a24f43fa12",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "b25a155ac894113dca2d6a3da8abad865d06812863adc26826c4211ce568686c"
+    "bodyHash": "8873dbd10e221b2dd97cdb045576ba12a7f34ca05aa52dfb34c727a24f43fa12"
   },
   {
     "category": "products",
@@ -1622,13 +1622,13 @@
     ],
     "scopeHint": "products.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:23.951Z",
+    "fetchedAt": "2026-05-06T21:23:16.717Z",
     "statusCode": 200,
-    "fingerprint": "dfde3e29292f058c58d23e7db489f62bb80ac7bc09d1a23a0369d6e3c873d9c0",
+    "fingerprint": "ce8f548be7ee5af6a53e412713e03cc31c8588fdd74a5c5ba10c9a8f1181efed",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "dfde3e29292f058c58d23e7db489f62bb80ac7bc09d1a23a0369d6e3c873d9c0"
+    "bodyHash": "ce8f548be7ee5af6a53e412713e03cc31c8588fdd74a5c5ba10c9a8f1181efed"
   },
   {
     "category": "invoices",
@@ -1641,13 +1641,13 @@
     ],
     "scopeHint": "invoices.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:24.134Z",
+    "fetchedAt": "2026-05-06T21:23:17.127Z",
     "statusCode": 200,
-    "fingerprint": "55b918fe2b1a95d48fb95fd08bead058aa8c93bc06dde39654ef243313de2932",
+    "fingerprint": "471d088f4d05f40eb64067d37d38f3eaa790a652f2449b1515bb437f3a5508ff",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "55b918fe2b1a95d48fb95fd08bead058aa8c93bc06dde39654ef243313de2932"
+    "bodyHash": "471d088f4d05f40eb64067d37d38f3eaa790a652f2449b1515bb437f3a5508ff"
   },
   {
     "category": "users",
@@ -1660,13 +1660,13 @@
     ],
     "scopeHint": "users.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:24.294Z",
+    "fetchedAt": "2026-05-06T21:23:17.521Z",
     "statusCode": 200,
-    "fingerprint": "3c7edfe991e47e9815608b038e1d6805414786d640a4ec636f562dd24ee5d21e",
+    "fingerprint": "e31a6694e15a0dd687955d19da81a4ae76073b0ba5aa5684086e711142290c26",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "3c7edfe991e47e9815608b038e1d6805414786d640a4ec636f562dd24ee5d21e"
+    "bodyHash": "e31a6694e15a0dd687955d19da81a4ae76073b0ba5aa5684086e711142290c26"
   },
   {
     "category": "businesses",
@@ -1679,13 +1679,13 @@
     ],
     "scopeHint": "businesses.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:24.668Z",
+    "fetchedAt": "2026-05-06T21:23:17.919Z",
     "statusCode": 200,
-    "fingerprint": "aebfeff5f078ffd0780480f8885e491828df677a9d3f862cd199ff73751d7809",
+    "fingerprint": "9bde5666e2b95cb0cd9d8fbd6c6e0e726072d65b02020fd35b01f8b7b5150a0c",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "aebfeff5f078ffd0780480f8885e491828df677a9d3f862cd199ff73751d7809"
+    "bodyHash": "9bde5666e2b95cb0cd9d8fbd6c6e0e726072d65b02020fd35b01f8b7b5150a0c"
   },
   {
     "category": "forms",
@@ -1698,13 +1698,13 @@
     ],
     "scopeHint": "forms.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:25.026Z",
+    "fetchedAt": "2026-05-06T21:23:18.318Z",
     "statusCode": 200,
-    "fingerprint": "2409af4df6a1a48ffacea3c981564e9a0050f7f96326d972605031245d6c8ebe",
+    "fingerprint": "eb56dd15d4b528049068bdc77c73bad3c510aca480053ffa3001c7eb1cd51bd8",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "2409af4df6a1a48ffacea3c981564e9a0050f7f96326d972605031245d6c8ebe"
+    "bodyHash": "eb56dd15d4b528049068bdc77c73bad3c510aca480053ffa3001c7eb1cd51bd8"
   },
   {
     "category": "surveys",
@@ -1717,13 +1717,13 @@
     ],
     "scopeHint": "surveys.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:25.366Z",
+    "fetchedAt": "2026-05-06T21:23:18.722Z",
     "statusCode": 200,
-    "fingerprint": "cf55b15550b7320489a21675de0c1d893e7ea7d8c922e793a667f23e60d27281",
+    "fingerprint": "961f81abc341de55bbef9b31bd6bf270bd0ab2eebac2373439dab906933cec5c",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "cf55b15550b7320489a21675de0c1d893e7ea7d8c922e793a667f23e60d27281"
+    "bodyHash": "961f81abc341de55bbef9b31bd6bf270bd0ab2eebac2373439dab906933cec5c"
   },
   {
     "category": "custom_menus",
@@ -1736,13 +1736,13 @@
     ],
     "scopeHint": "custom-menus.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:25.699Z",
+    "fetchedAt": "2026-05-06T21:23:19.135Z",
     "statusCode": 200,
-    "fingerprint": "8f5e2487ad20fb7871c3afba83133f99f7af68964c01c5e3211fa279eb224019",
+    "fingerprint": "f398e46335d51cb167e74d8932c96bdd890077ffa49783972af31b2b178558a1",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "8f5e2487ad20fb7871c3afba83133f99f7af68964c01c5e3211fa279eb224019"
+    "bodyHash": "f398e46335d51cb167e74d8932c96bdd890077ffa49783972af31b2b178558a1"
   },
   {
     "category": "associations",
@@ -1755,13 +1755,13 @@
     ],
     "scopeHint": "associations.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:26.092Z",
+    "fetchedAt": "2026-05-06T21:23:19.558Z",
     "statusCode": 200,
-    "fingerprint": "4ff28420ea0dfa427d5b4b25a214f1319d70bf61843d0ebbb18d67fe0a16da6a",
+    "fingerprint": "dd7bf655220007acac596eb5e1eae68d96b0de59fe237809e72972696adbab54",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "4ff28420ea0dfa427d5b4b25a214f1319d70bf61843d0ebbb18d67fe0a16da6a"
+    "bodyHash": "dd7bf655220007acac596eb5e1eae68d96b0de59fe237809e72972696adbab54"
   },
   {
     "category": "trigger_links",
@@ -1774,13 +1774,13 @@
     ],
     "scopeHint": "links.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:26.533Z",
+    "fetchedAt": "2026-05-06T21:23:19.970Z",
     "statusCode": 200,
-    "fingerprint": "cccdc1ec51e984acce4432bddc077b186744854d06967b0dd8a27da7d7ac2751",
+    "fingerprint": "a532141e5e363bf0ccb4e7372fdd103cf17097324091cb72b81a70332fa72e3a",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "cccdc1ec51e984acce4432bddc077b186744854d06967b0dd8a27da7d7ac2751"
+    "bodyHash": "a532141e5e363bf0ccb4e7372fdd103cf17097324091cb72b81a70332fa72e3a"
   },
   {
     "category": "media_storage",
@@ -1793,13 +1793,13 @@
     ],
     "scopeHint": "medias.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:26.859Z",
+    "fetchedAt": "2026-05-06T21:23:20.431Z",
     "statusCode": 200,
-    "fingerprint": "98f3defb91e42fdff6ffcea3c83b3e7af87b60227dbd42e806085ad5ee5e50a4",
+    "fingerprint": "158c68458a78ea02e4702d8134ac85bdc2c6962a2199b5894d61cb0b75c5bce3",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "98f3defb91e42fdff6ffcea3c83b3e7af87b60227dbd42e806085ad5ee5e50a4"
+    "bodyHash": "158c68458a78ea02e4702d8134ac85bdc2c6962a2199b5894d61cb0b75c5bce3"
   },
   {
     "category": "snapshots",
@@ -1812,13 +1812,13 @@
     ],
     "scopeHint": "snapshots.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:27.034Z",
+    "fetchedAt": "2026-05-06T21:23:20.818Z",
     "statusCode": 200,
-    "fingerprint": "cffa4726406a8de311f1c561552907c263ac12f11102456cd13478a9c851117e",
+    "fingerprint": "8770963a9279d2e8636f921448cd30a4713fd7c9af3454086baa1264152aee41",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "cffa4726406a8de311f1c561552907c263ac12f11102456cd13478a9c851117e"
+    "bodyHash": "8770963a9279d2e8636f921448cd30a4713fd7c9af3454086baa1264152aee41"
   },
   {
     "category": "social_planner",
@@ -1831,13 +1831,13 @@
     ],
     "scopeHint": "socialplanner/*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:27.198Z",
+    "fetchedAt": "2026-05-06T21:23:21.259Z",
     "statusCode": 200,
-    "fingerprint": "ac7bbb8717540215c7ebe68643fb7bf5e92c21d23ad93f32c95d16c7c78d38f5",
+    "fingerprint": "1b20a58104b58d233b92160f901f8d59282bcfe81fdb09c8c8b9b9f59cf144fc",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "ac7bbb8717540215c7ebe68643fb7bf5e92c21d23ad93f32c95d16c7c78d38f5"
+    "bodyHash": "1b20a58104b58d233b92160f901f8d59282bcfe81fdb09c8c8b9b9f59cf144fc"
   },
   {
     "category": "voice_ai",
@@ -1850,13 +1850,13 @@
     ],
     "scopeHint": "voice-ai-*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:27.383Z",
+    "fetchedAt": "2026-05-06T21:23:21.664Z",
     "statusCode": 200,
-    "fingerprint": "07a21b5e0f33b96a48f641e280616a408ec17c5f7cf5b0c9d022877ac79d4310",
+    "fingerprint": "9f1510671becf4e33b6a046d981ffece07c2f9ca1a2ce7b5f1a1027ca0fcd070",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "07a21b5e0f33b96a48f641e280616a408ec17c5f7cf5b0c9d022877ac79d4310"
+    "bodyHash": "9f1510671becf4e33b6a046d981ffece07c2f9ca1a2ce7b5f1a1027ca0fcd070"
   },
   {
     "category": "phone_system",
@@ -1869,13 +1869,13 @@
     ],
     "scopeHint": "phonenumbers.read",
     "status": "conditional",
-    "fetchedAt": "2026-05-06T03:59:27.552Z",
+    "fetchedAt": "2026-05-06T21:23:22.062Z",
     "statusCode": 200,
-    "fingerprint": "eae9f59fb900c1b9f3eeb8046ad452b4d1e50be281287d803e7397b5ef3d37d3",
+    "fingerprint": "9830d9d4fea1bd0c4736ec3ecda52d59e1e6980495326bc88fc3202c43fd196b",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "eae9f59fb900c1b9f3eeb8046ad452b4d1e50be281287d803e7397b5ef3d37d3"
+    "bodyHash": "9830d9d4fea1bd0c4736ec3ecda52d59e1e6980495326bc88fc3202c43fd196b"
   },
   {
     "category": "saas",
@@ -1888,13 +1888,13 @@
     ],
     "scopeHint": "saas.*",
     "status": "conditional",
-    "fetchedAt": "2026-05-06T03:59:27.933Z",
+    "fetchedAt": "2026-05-06T21:23:22.497Z",
     "statusCode": 200,
-    "fingerprint": "bd2c6f81b6cfce130f697aeab35e976197fa017824e45c8e3d26e1f378f2595a",
+    "fingerprint": "46f15baca9c1b4f144767ae155e291805f4e630613e7aa33c95c64fa2284c5e5",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "bd2c6f81b6cfce130f697aeab35e976197fa017824e45c8e3d26e1f378f2595a"
+    "bodyHash": "46f15baca9c1b4f144767ae155e291805f4e630613e7aa33c95c64fa2284c5e5"
   },
   {
     "category": "workflows",
@@ -1907,13 +1907,13 @@
     ],
     "scopeHint": "workflows.readonly",
     "status": "conditional",
-    "fetchedAt": "2026-05-06T03:59:28.088Z",
+    "fetchedAt": "2026-05-06T21:23:22.870Z",
     "statusCode": 200,
-    "fingerprint": "d178370e30ee820963fb65fd092624084851bdcc709de869cbb91bb3b3c51636",
+    "fingerprint": "8377db20251305dd88e5a0d44061d85b9c304733b151603c4b98cacf77325370",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "d178370e30ee820963fb65fd092624084851bdcc709de869cbb91bb3b3c51636"
+    "bodyHash": "8377db20251305dd88e5a0d44061d85b9c304733b151603c4b98cacf77325370"
   },
   {
     "category": "webhooks",
@@ -1925,13 +1925,13 @@
     ],
     "scopeHint": "webhook",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:28.119Z",
+    "fetchedAt": "2026-05-06T21:23:23.097Z",
     "statusCode": 200,
-    "fingerprint": "e7a88cefe60cf6c3009b0739b37616756a651f1e5a491721be682a125981ac36",
+    "fingerprint": "0550c6c83041b84dcac924afaf9acf09ad2c7a44efe1d5c2fa174d0d5eb732c8",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [],
-    "bodyHash": "e7a88cefe60cf6c3009b0739b37616756a651f1e5a491721be682a125981ac36"
+    "bodyHash": "0550c6c83041b84dcac924afaf9acf09ad2c7a44efe1d5c2fa174d0d5eb732c8"
   },
   {
     "category": "oauth",
@@ -1943,15 +1943,15 @@
     ],
     "scopeHint": "oauth.*",
     "status": "supported",
-    "fetchedAt": "2026-05-06T03:59:28.291Z",
+    "fetchedAt": "2026-05-06T21:23:23.494Z",
     "statusCode": 200,
-    "fingerprint": "956c9db822111ee4e9e000cf0e7012c1a61fc749584292ac24aa63bf60f3ed27",
+    "fingerprint": "d10d84384f4edb4c16ca8dbafb197941540bc6037c9ba583c2414edf312b6963",
     "version": "2023-02-21",
     "endpoints": [],
     "rateLimitHints": [
       "100 API requests per 10 seconds",
       "200,000 API requests per day"
     ],
-    "bodyHash": "956c9db822111ee4e9e000cf0e7012c1a61fc749584292ac24aa63bf60f3ed27"
+    "bodyHash": "d10d84384f4edb4c16ca8dbafb197941540bc6037c9ba583c2414edf312b6963"
   }
 ]

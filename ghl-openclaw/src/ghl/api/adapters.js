@@ -538,6 +538,36 @@ export class SocialPlannerAdapter {
   }
 }
 
+export class FacebookAdsAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listEntities(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/facebook/entity', query });
+  }
+
+  getCampaign(credentialRef, campaignId, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/ad-publishing/facebook/campaigns/${campaignId}`, query });
+  }
+
+  upsertCampaign(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: '/ad-publishing/facebook/campaigns', body });
+  }
+
+  upsertAdset(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: '/ad-publishing/facebook/adsets', body });
+  }
+
+  upsertAd(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: '/ad-publishing/facebook/ads', body });
+  }
+
+  publishCampaign(credentialRef, campaignId, body = {}) {
+    return this.client.request({ credentialRef, method: 'POST', path: `/ad-publishing/facebook/campaigns/${campaignId}/publish`, body });
+  }
+}
+
 export class VoiceAiAdapter {
   constructor({ client = new GhlApiClient() } = {}) {
     this.client = client;

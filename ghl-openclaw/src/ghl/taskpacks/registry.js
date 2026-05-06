@@ -16,6 +16,10 @@ function normalizeStringArray(values) {
   return Array.isArray(values) ? values.map((value) => normalizeString(value)).filter(Boolean) : [];
 }
 
+function normalizePlainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : null;
+}
+
 function normalizeNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim()) {
@@ -198,6 +202,31 @@ function socialPostMutationRequestFrom(event) {
   };
 }
 
+function facebookAdMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+
+  const campaign = normalizePlainObject(request.campaign || request.campaignBody);
+  const adset = normalizePlainObject(request.adset || request.adsetBody);
+  const ad = normalizePlainObject(request.ad || request.adBody);
+  const query = normalizePlainObject(request.query);
+  const publish = normalizeBoolean(request.publishAfterCreate ?? request.publish ?? request.pushLive);
+
+  return {
+    action: request.action || null,
+    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    campaignId: normalizeString(request.campaignId) || normalizeString(campaign?.id),
+    adsetId: normalizeString(request.adsetId) || normalizeString(adset?.id),
+    adId: normalizeString(request.adId) || normalizeString(ad?.id),
+    entityType: normalizeString(request.entityType) || normalizeString(query?.entityType),
+    campaign,
+    adset,
+    ad,
+    query: query || {},
+    publish: publish === true
+  };
+}
+
 function socialAccountResumeData(liveResult) {
   const accounts = Array.isArray(liveResult?.data?.results?.accounts)
     ? liveResult.data.results.accounts
@@ -267,6 +296,177 @@ function socialPostCreateBody(mutationRequest) {
     ...(accountIds.length > 0 ? { accountIds } : {}),
     ...(status ? { status } : {}),
     ...(scheduleDate && !post.scheduleDate && !post.scheduledAt ? { scheduleDate } : {})
+  };
+}
+
+function collectFacebookEntityRecords(data) {
+  const candidateArrays = [
+    data?.results?.entities,
+    data?.results?.items,
+    data?.entities,
+    data?.items,
+    Array.isArray(data?.results) ? data.results : null,
+    Array.isArray(data) ? data : null
+  ];
+  const records = candidateArrays.find((candidate) => Array.isArray(candidate)) || [];
+  return records.filter((record) => record && typeof record === 'object');
+}
+
+function extractFacebookEntityId(value, keys = []) {
+  const queue = [value];
+  const seen = new Set();
+  const preferredKeys = [...keys, 'id', 'campaignId', 'adsetId', 'adSetId', 'adId'];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== 'object') continue;
+    if (seen.has(current)) continue;
+    seen.add(current);
+
+    for (const key of preferredKeys) {
+      const candidate = current[key];
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    }
+
+    if (Array.isArray(current)) {
+      queue.push(...current.slice(0, 10));
+      continue;
+    }
+
+    queue.push(...Object.values(current).filter((item) => item && typeof item === 'object').slice(0, 10));
+  }
+
+  return null;
+}
+
+function facebookEntityListResumeData(liveResult, context) {
+  const mutationRequest = facebookAdMutationRequestFrom(context?.event);
+  const entities = collectFacebookEntityRecords(liveResult?.data);
+  return {
+    entityType: mutationRequest?.entityType || null,
+    entityCount: entities.length,
+    entities: entities.slice(0, 20).map((entity) => ({
+      id: extractFacebookEntityId(entity),
+      name: entity?.name || entity?.campaignName || entity?.adsetName || entity?.adName || null,
+      status: entity?.status || entity?.effectiveStatus || null,
+      objective: entity?.objective || entity?.goal || null
+    })),
+    raw: liveResult?.data || null
+  };
+}
+
+function facebookCampaignResumeData(liveResult) {
+  const campaign = liveResult?.data?.campaign || liveResult?.data?.results?.campaign || liveResult?.data || null;
+  return {
+    campaign: campaign && typeof campaign === 'object'
+      ? {
+          id: extractFacebookEntityId(campaign, ['campaignId']),
+          name: campaign.name || campaign.campaignName || null,
+          status: campaign.status || campaign.effectiveStatus || null,
+          objective: campaign.objective || campaign.goal || null
+        }
+      : null,
+    raw: liveResult?.data || null
+  };
+}
+
+function facebookUpsertResumeData(kind, liveResult, requestedBody) {
+  const entity = liveResult?.data?.[kind] || liveResult?.data?.results?.[kind] || liveResult?.data || null;
+  const idKey = kind === 'campaign' ? ['campaignId'] : kind === 'adset' ? ['adsetId', 'adSetId'] : ['adId'];
+  return {
+    kind,
+    entity: entity && typeof entity === 'object'
+      ? {
+          id: extractFacebookEntityId(entity, idKey),
+          name: entity.name || entity.campaignName || entity.adsetName || entity.adName || requestedBody?.name || null,
+          status: entity.status || entity.effectiveStatus || requestedBody?.status || null
+        }
+      : {
+          id: extractFacebookEntityId(liveResult?.data, idKey),
+          name: requestedBody?.name || null,
+          status: requestedBody?.status || null
+        },
+    requested: requestedBody || null,
+    raw: liveResult?.data || null
+  };
+}
+
+function facebookCampaignUpsertResumeData(liveResult, context) {
+  return facebookUpsertResumeData('campaign', liveResult, facebookAdMutationRequestFrom(context?.event)?.campaign || null);
+}
+
+function facebookAdsetUpsertResumeData(liveResult, context) {
+  return facebookUpsertResumeData('adset', liveResult, facebookAdMutationRequestFrom(context?.event)?.adset || null);
+}
+
+function facebookAdUpsertResumeData(liveResult, context) {
+  return facebookUpsertResumeData('ad', liveResult, facebookAdMutationRequestFrom(context?.event)?.ad || null);
+}
+
+function resolvedFacebookCampaignId(context, mutationRequest) {
+  return mutationRequest?.campaignId
+    || normalizeString(mutationRequest?.campaign?.campaignId)
+    || extractFacebookEntityId(context?.runtime?.stepOutputs?.upsert_facebook_campaign?.data, ['campaignId'])
+    || null;
+}
+
+function resolvedFacebookAdsetId(context, mutationRequest) {
+  return mutationRequest?.adsetId
+    || normalizeString(mutationRequest?.adset?.adsetId)
+    || normalizeString(mutationRequest?.adset?.adSetId)
+    || extractFacebookEntityId(context?.runtime?.stepOutputs?.upsert_facebook_adset?.data, ['adsetId', 'adSetId'])
+    || null;
+}
+
+function facebookCampaignBody(mutationRequest) {
+  const campaign = mutationRequest?.campaign;
+  if (!campaign || Object.keys(campaign).length === 0) {
+    throw new Error('Facebook campaign upsert requires a campaign object.');
+  }
+  return { ...campaign };
+}
+
+function facebookAdsetBody(context, mutationRequest) {
+  const adset = mutationRequest?.adset;
+  if (!adset || Object.keys(adset).length === 0) {
+    throw new Error('Facebook adset upsert requires an adset object.');
+  }
+  const campaignId = normalizeString(adset.campaignId) || resolvedFacebookCampaignId(context, mutationRequest);
+  if (!campaignId) {
+    throw new Error('Facebook adset upsert requires campaignId, either explicitly or from the prior campaign step.');
+  }
+  return {
+    ...adset,
+    ...(adset.campaignId ? {} : { campaignId })
+  };
+}
+
+function facebookAdBody(context, mutationRequest) {
+  const ad = mutationRequest?.ad;
+  if (!ad || Object.keys(ad).length === 0) {
+    throw new Error('Facebook ad upsert requires an ad object.');
+  }
+  const campaignId = normalizeString(ad.campaignId) || resolvedFacebookCampaignId(context, mutationRequest);
+  const adsetId = normalizeString(ad.adsetId) || resolvedFacebookAdsetId(context, mutationRequest);
+  if (!adsetId) {
+    throw new Error('Facebook ad upsert requires adsetId, either explicitly or from the prior adset step.');
+  }
+  return {
+    ...ad,
+    ...(campaignId && !ad.campaignId ? { campaignId } : {}),
+    ...(ad.adsetId ? {} : { adsetId })
+  };
+}
+
+function facebookEntityQuery(mutationRequest) {
+  const query = { ...(mutationRequest?.query || {}) };
+  const entityType = normalizeString(query.entityType) || mutationRequest?.entityType;
+  if (!entityType) {
+    throw new Error('Facebook entity lookup requires entityType.');
+  }
+  return {
+    ...query,
+    entityType
   };
 }
 
@@ -1633,6 +1833,167 @@ function taskPackHandlers() {
               summaryPreview: mutationRequest?.summary ? mutationRequest.summary.slice(0, 160) : null
             },
             skipIf: () => !explicitCreateSocialPost
+          }
+        ];
+      }
+    },
+    facebook_ad_pack: {
+      trigger_events: ['ManualRun'],
+      buildExecutionPlan(context) {
+        const mutationRequest = facebookAdMutationRequestFrom(context.event);
+        const explicitEntityList = mutationRequest?.action === 'list_facebook_ad_entities'
+          && Boolean(mutationRequest?.entityType || mutationRequest?.query?.entityType);
+        const explicitCampaignFetch = mutationRequest?.action === 'get_facebook_campaign'
+          && Boolean(mutationRequest?.campaignId);
+        const explicitCampaignUpsert = ['upsert_facebook_campaign', 'build_facebook_ad_campaign'].includes(mutationRequest?.action)
+          && Boolean(mutationRequest?.campaign)
+          && Object.keys(mutationRequest.campaign).length > 0;
+        const explicitAdsetUpsert = ['upsert_facebook_adset', 'build_facebook_ad_campaign'].includes(mutationRequest?.action)
+          && Boolean(mutationRequest?.adset)
+          && Object.keys(mutationRequest.adset).length > 0;
+        const explicitAdUpsert = ['upsert_facebook_ad', 'build_facebook_ad_campaign'].includes(mutationRequest?.action)
+          && Boolean(mutationRequest?.ad)
+          && Object.keys(mutationRequest.ad).length > 0;
+        const explicitPublish = mutationRequest?.action === 'publish_facebook_campaign'
+          || (mutationRequest?.action === 'build_facebook_ad_campaign' && mutationRequest?.publish === true);
+
+        return [
+          {
+            name: 'list_facebook_ad_entities',
+            kind: 'adapter_call',
+            adapter: 'FacebookAdsAdapter',
+            method: 'listEntities',
+            pathHint: '/ad-publishing/facebook/entity',
+            args: () => [context.credentialRef || defaultLocationCredential(context), facebookEntityQuery(mutationRequest)],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: facebookEntityListResumeData,
+            details: {
+              action: 'list_facebook_ad_entities',
+              entityType: mutationRequest?.entityType || mutationRequest?.query?.entityType || null,
+              locationId: mutationRequest?.locationId || context.event.locationId || null
+            },
+            skipIf: () => !explicitEntityList
+          },
+          {
+            name: 'get_facebook_campaign',
+            kind: 'adapter_call',
+            adapter: 'FacebookAdsAdapter',
+            method: 'getCampaign',
+            pathHint: '/ad-publishing/facebook/campaigns/:campaignId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.campaignId, mutationRequest.query || {}],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: facebookCampaignResumeData,
+            details: {
+              action: 'get_facebook_campaign',
+              campaignId: mutationRequest?.campaignId || null
+            },
+            skipIf: () => !explicitCampaignFetch
+          },
+          {
+            name: 'upsert_facebook_campaign',
+            kind: 'adapter_call',
+            adapter: 'FacebookAdsAdapter',
+            method: 'upsertCampaign',
+            httpMethod: 'PUT',
+            pathHint: '/ad-publishing/facebook/campaigns',
+            args: () => [context.credentialRef || defaultLocationCredential(context), facebookCampaignBody(mutationRequest)],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            resumeData: facebookCampaignUpsertResumeData,
+            details: {
+              action: 'upsert_facebook_campaign',
+              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              campaignId: mutationRequest?.campaignId || null,
+              name: mutationRequest?.campaign?.name || null,
+              objective: mutationRequest?.campaign?.objective || mutationRequest?.campaign?.goal || null,
+              status: mutationRequest?.campaign?.status || null
+            },
+            skipIf: () => !explicitCampaignUpsert
+          },
+          {
+            name: 'upsert_facebook_adset',
+            kind: 'adapter_call',
+            adapter: 'FacebookAdsAdapter',
+            method: 'upsertAdset',
+            httpMethod: 'PUT',
+            pathHint: '/ad-publishing/facebook/adsets',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), facebookAdsetBody(runtimeContext, mutationRequest)],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            resumeData: facebookAdsetUpsertResumeData,
+            details: (runtimeContext) => ({
+              action: 'upsert_facebook_adset',
+              locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
+              campaignId: resolvedFacebookCampaignId(runtimeContext, mutationRequest),
+              adsetId: mutationRequest?.adsetId || null,
+              name: mutationRequest?.adset?.name || null,
+              status: mutationRequest?.adset?.status || null
+            }),
+            skipIf: () => !explicitAdsetUpsert
+          },
+          {
+            name: 'upsert_facebook_ad',
+            kind: 'adapter_call',
+            adapter: 'FacebookAdsAdapter',
+            method: 'upsertAd',
+            httpMethod: 'PUT',
+            pathHint: '/ad-publishing/facebook/ads',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), facebookAdBody(runtimeContext, mutationRequest)],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            resumeData: facebookAdUpsertResumeData,
+            details: (runtimeContext) => ({
+              action: 'upsert_facebook_ad',
+              locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
+              campaignId: resolvedFacebookCampaignId(runtimeContext, mutationRequest),
+              adsetId: resolvedFacebookAdsetId(runtimeContext, mutationRequest),
+              adId: mutationRequest?.adId || null,
+              name: mutationRequest?.ad?.name || null,
+              status: mutationRequest?.ad?.status || null
+            }),
+            skipIf: () => !explicitAdUpsert
+          },
+          {
+            name: 'publish_facebook_campaign',
+            kind: 'adapter_call',
+            adapter: 'FacebookAdsAdapter',
+            method: 'publishCampaign',
+            httpMethod: 'POST',
+            pathHint: '/ad-publishing/facebook/campaigns/:campaignId/publish',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedFacebookCampaignId(runtimeContext, mutationRequest), {}],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => ({
+              action: 'publish_facebook_campaign',
+              campaignId: resolvedFacebookCampaignId(runtimeContext, mutationRequest),
+              publishRequested: true
+            }),
+            skipIf: (runtimeContext) => !explicitPublish || !resolvedFacebookCampaignId(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'plan_facebook_ad_actions',
+            kind: 'intent',
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            details: {
+              action: 'possible_facebook_ad_campaign_bundle',
+              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              requestedAction: mutationRequest?.action || null
+            },
+            skipIf: () => explicitEntityList || explicitCampaignFetch || explicitCampaignUpsert || explicitAdsetUpsert || explicitAdUpsert || explicitPublish
           }
         ];
       }
