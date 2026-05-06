@@ -429,6 +429,14 @@ function resolvedFacebookAdsetId(context, mutationRequest) {
     || null;
 }
 
+function facebookCampaignDependencyReady(context, mutationRequest) {
+  return Boolean(resolvedFacebookCampaignId(context, mutationRequest));
+}
+
+function facebookAdsetDependencyReady(context, mutationRequest) {
+  return Boolean(resolvedFacebookAdsetId(context, mutationRequest));
+}
+
 function facebookCampaignBody(mutationRequest) {
   if (facebookPromotionRequested(mutationRequest)) {
     return facebookPromotionCampaignBody(mutationRequest);
@@ -623,6 +631,7 @@ function facebookPromotionRequested(mutationRequest) {
 
 function facebookPromotionCampaignBody(mutationRequest) {
   const base = {
+    ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
     name: inferredPromotionCampaignName(mutationRequest),
     objective: inferredPromotionObjective(mutationRequest),
     status: inferredPromotionStatus(mutationRequest)
@@ -637,6 +646,7 @@ function facebookPromotionCampaignBody(mutationRequest) {
 function facebookPromotionAdsetBody(context, mutationRequest) {
   const campaignId = resolvedFacebookCampaignId(context, mutationRequest);
   const base = {
+    ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
     name: inferredPromotionAdsetName(mutationRequest),
     status: inferredPromotionStatus(mutationRequest),
     ...(normalizeNumber(mutationRequest?.promotion?.dailyBudget) === null ? {} : { dailyBudget: normalizeNumber(mutationRequest?.promotion?.dailyBudget) }),
@@ -670,6 +680,7 @@ function facebookPromotionAdBody(context, mutationRequest) {
   };
 
   return {
+    ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
     name: inferredPromotionAdName(mutationRequest),
     status: inferredPromotionStatus(mutationRequest),
     ...(campaignId ? { campaignId } : {}),
@@ -2164,7 +2175,7 @@ function taskPackHandlers() {
               status: mutationRequest?.adset?.status || inferredPromotionStatus(mutationRequest),
               sourceMediaCount: facebookPromotionMediaUrls(mutationRequest).length
             }),
-            skipIf: () => !explicitAdsetUpsert
+            skipIf: (runtimeContext) => !explicitAdsetUpsert || !facebookCampaignDependencyReady(runtimeContext, mutationRequest)
           },
           {
             name: 'upsert_facebook_ad',
@@ -2190,7 +2201,7 @@ function taskPackHandlers() {
               websiteUrl: mutationRequest?.websiteUrl || null,
               mediaUrls: facebookPromotionMediaUrls(mutationRequest)
             }),
-            skipIf: () => !explicitAdUpsert
+            skipIf: (runtimeContext) => !explicitAdUpsert || !facebookCampaignDependencyReady(runtimeContext, mutationRequest) || !facebookAdsetDependencyReady(runtimeContext, mutationRequest)
           },
           {
             name: 'publish_facebook_campaign',
