@@ -67,6 +67,12 @@ async function main() {
       console.log(JSON.stringify({ ok: true, runs }, null, 2));
       return;
     }
+    case 'taskpack:resume': {
+      const runId = requireArg(args, '--run-id');
+      const result = await taskPackExecutor.resumeRun({ runId });
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
     case 'approval:status': {
       const summary = await approvalStore.summary();
       console.log(JSON.stringify({ ok: true, summary }, null, 2));
@@ -83,16 +89,20 @@ async function main() {
       const id = requireArg(args, '--id');
       const decider = optionalArg(args, '--decider') || 'human_admin';
       const note = optionalArg(args, '--note') || null;
+      const resumeRun = parseBooleanArg(args, '--resume-run', true);
       const approval = await approvalStore.decide(id, { decision: 'approved', decider, note });
-      console.log(JSON.stringify({ ok: Boolean(approval), approval }, null, 2));
+      const resumed = approval && approval.runId && resumeRun ? await taskPackExecutor.resumeRun({ runId: approval.runId }) : null;
+      console.log(JSON.stringify({ ok: Boolean(approval), approval, resumed }, null, 2));
       return;
     }
     case 'approval:reject': {
       const id = requireArg(args, '--id');
       const decider = optionalArg(args, '--decider') || 'human_admin';
       const note = optionalArg(args, '--note') || null;
+      const resumeRun = parseBooleanArg(args, '--resume-run', true);
       const approval = await approvalStore.decide(id, { decision: 'rejected', decider, note });
-      console.log(JSON.stringify({ ok: Boolean(approval), approval }, null, 2));
+      const resumed = approval && approval.runId && resumeRun ? await taskPackExecutor.resumeRun({ runId: approval.runId }) : null;
+      console.log(JSON.stringify({ ok: Boolean(approval), approval, resumed }, null, 2));
       return;
     }
     case 'report:generate': {
@@ -246,6 +256,12 @@ function requireArg(args, name) {
 function optionalArg(args, name) {
   const match = args.find((arg) => arg.startsWith(`${name}=`));
   return match ? match.slice(name.length + 1) : null;
+}
+
+function parseBooleanArg(args, name, defaultValue) {
+  const value = optionalArg(args, name);
+  if (value == null) return defaultValue;
+  return value !== 'false' && value !== '0' && value !== 'no';
 }
 
 function inferCredentialRef(userType) {

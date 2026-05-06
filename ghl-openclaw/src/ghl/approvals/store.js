@@ -34,6 +34,7 @@ export class ApprovalStore {
     queueId = null,
     taskPackName,
     stepName,
+    stepIndex = null,
     agentId,
     companyId = null,
     locationId = null,
@@ -44,7 +45,7 @@ export class ApprovalStore {
     key = null
   }) {
     const state = await this.load();
-    const dedupeKey = key || `${runId}:${stepName}:${reason}`;
+    const dedupeKey = key || `${runId}:${stepIndex ?? stepName}:${reason}`;
     const existing = state.approvals.find((item) => item.dedupeKey === dedupeKey && item.status === 'pending');
     if (existing) return existing;
 
@@ -55,6 +56,7 @@ export class ApprovalStore {
       queueId,
       taskPackName,
       stepName,
+      stepIndex,
       agentId,
       companyId,
       locationId,

@@ -39,7 +39,8 @@ export class TaskPackRunStore {
       eventType: event.type,
       companyId: event.companyId || null,
       locationId: event.locationId || null,
-      objectId: event.objectId || null,
+      objectId: event.objectId || event?.payload?.data?.id || event?.payload?.id || null,
+      event,
       mode,
       credentialRef,
       status: 'running',
@@ -54,6 +55,21 @@ export class TaskPackRunStore {
     return run;
   }
 
+  async getRun(runId) {
+    const state = await this.load();
+    return state.runs.find((item) => item.id === runId) || null;
+  }
+
+  async setStep(runId, stepIndex, step) {
+    const state = await this.load();
+    const run = state.runs.find((item) => item.id === runId);
+    if (!run) return null;
+    run.steps[stepIndex] = step;
+    run.updatedAt = nowIso();
+    await this.save(state);
+    return run;
+  }
+
   async appendStep(runId, step) {
     const state = await this.load();
     const run = state.runs.find((item) => item.id === runId);
@@ -64,26 +80,24 @@ export class TaskPackRunStore {
     return run;
   }
 
-  async completeRun(runId, summary) {
+  async setStatus(runId, status, { summary = undefined, error = undefined } = {}) {
     const state = await this.load();
     const run = state.runs.find((item) => item.id === runId);
     if (!run) return null;
-    run.status = 'completed';
-    run.summary = summary;
+    run.status = status;
+    if (summary !== undefined) run.summary = summary;
+    if (error !== undefined) run.error = error;
     run.updatedAt = nowIso();
     await this.save(state);
     return run;
   }
 
+  async completeRun(runId, summary) {
+    return this.setStatus(runId, 'completed', { summary, error: null });
+  }
+
   async failRun(runId, error) {
-    const state = await this.load();
-    const run = state.runs.find((item) => item.id === runId);
-    if (!run) return null;
-    run.status = 'failed';
-    run.error = error;
-    run.updatedAt = nowIso();
-    await this.save(state);
-    return run;
+    return this.setStatus(runId, 'failed', { error });
   }
 
   async listRuns(limit = 20) {
@@ -98,6 +112,8 @@ export class TaskPackRunStore {
       completedRuns: runs.filter((item) => item.status === 'completed').length,
       failedRuns: runs.filter((item) => item.status === 'failed').length,
       runningRuns: runs.filter((item) => item.status === 'running').length,
+      awaitingApprovalRuns: runs.filter((item) => item.status === 'awaiting_approval').length,
+      rejectedRuns: runs.filter((item) => item.status === 'rejected').length,
       dryRunCount: runs.filter((item) => item.mode === 'dry_run').length,
       liveRunCount: runs.filter((item) => item.mode === 'live').length
     };

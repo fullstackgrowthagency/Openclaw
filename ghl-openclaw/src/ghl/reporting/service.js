@@ -98,6 +98,8 @@ function summarizeRuns(runs) {
     completedRuns: runs.filter((item) => item.status === 'completed').length,
     failedRuns: runs.filter((item) => item.status === 'failed').length,
     runningRuns: runs.filter((item) => item.status === 'running').length,
+    awaitingApprovalRuns: runs.filter((item) => item.status === 'awaiting_approval').length,
+    rejectedRuns: runs.filter((item) => item.status === 'rejected').length,
     dryRunCount: runs.filter((item) => item.mode === 'dry_run').length,
     liveRunCount: runs.filter((item) => item.mode === 'live').length,
     awaitingApprovalSteps: runs.reduce((count, run) => count + run.steps.filter((step) => step.status === 'awaiting_approval').length, 0),
