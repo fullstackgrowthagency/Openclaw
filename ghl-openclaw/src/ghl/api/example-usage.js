@@ -162,7 +162,7 @@ export const EXAMPLE_CALLS = {
   sendConversationMessage: {
     adapter: 'ConversationsAdapter',
     method: 'sendMessage',
-    args: ['location-oauth', { conversationId: 'CONVERSATION_ID', message: 'OpenClaw validation message', type: 'SMS', channel: 'sms' }]
+    args: ['location-oauth', { contactId: 'CONTACT_ID', message: 'OpenClaw validation message', type: 'SMS' }]
   },
   createAppointment: {
     adapter: 'CalendarsAdapter',

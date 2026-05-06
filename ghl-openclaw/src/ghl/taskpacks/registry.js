@@ -56,9 +56,12 @@ function conversationMutationRequestFrom(event) {
   return {
     action: request.action || null,
     conversationId: request.conversationId || objectIdFrom(event),
+    contactId: request.contactId || null,
     message: typeof request.message === 'string' && request.message.trim() ? request.message : null,
     messageType: normalizedMessageType,
-    channel: typeof request.channel === 'string' && request.channel.trim() ? request.channel.trim() : null
+    channel: typeof request.channel === 'string' && request.channel.trim() ? request.channel.trim() : null,
+    fromNumber: typeof request.fromNumber === 'string' && request.fromNumber.trim() ? request.fromNumber.trim() : null,
+    toNumber: typeof request.toNumber === 'string' && request.toNumber.trim() ? request.toNumber.trim() : null
   };
 }
 
@@ -546,7 +549,7 @@ function taskPackHandlers() {
         const mutationRequest = conversationMutationRequestFrom(context.event);
         const conversationId = mutationRequest?.conversationId || objectIdFrom(context.event);
         const explicitConversationSend = mutationRequest?.action === 'send_conversation_message'
-          && Boolean(mutationRequest.conversationId)
+          && Boolean(mutationRequest.contactId)
           && Boolean(mutationRequest.message)
           && Boolean(mutationRequest.messageType);
         return [
@@ -570,10 +573,12 @@ function taskPackHandlers() {
             httpMethod: 'POST',
             pathHint: '/conversations/messages',
             args: () => [context.credentialRef || defaultLocationCredential(context), {
-              conversationId: mutationRequest.conversationId,
+              contactId: mutationRequest.contactId,
               message: mutationRequest.message,
               type: mutationRequest.messageType,
-              ...(mutationRequest.channel ? { channel: mutationRequest.channel } : {})
+              ...(mutationRequest.channel ? { channel: mutationRequest.channel } : {}),
+              ...(mutationRequest.fromNumber ? { fromNumber: mutationRequest.fromNumber } : {}),
+              ...(mutationRequest.toNumber ? { toNumber: mutationRequest.toNumber } : {})
             }],
             safe: false,
             mutation: true,
@@ -582,8 +587,11 @@ function taskPackHandlers() {
             details: {
               action: 'send_conversation_message',
               conversationId: mutationRequest?.conversationId || null,
+              contactId: mutationRequest?.contactId || null,
               messageType: mutationRequest?.messageType || null,
               channel: mutationRequest?.channel || null,
+              fromNumber: mutationRequest?.fromNumber || null,
+              toNumber: mutationRequest?.toNumber || null,
               messagePreview: mutationRequest?.message ? mutationRequest.message.slice(0, 120) : null
             },
             skipIf: () => !explicitConversationSend
