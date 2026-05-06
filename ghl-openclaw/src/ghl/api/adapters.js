@@ -207,8 +207,20 @@ export class CalendarsAdapter {
     return this.client.request({ credentialRef, method: 'GET', path: '/calendars/events', query });
   }
 
+  getAppointment(credentialRef, eventId) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/calendars/events/appointments/${eventId}` });
+  }
+
   createAppointment(credentialRef, body) {
     return this.client.request({ credentialRef, method: 'POST', path: '/calendars/events/appointments', body });
+  }
+
+  updateAppointment(credentialRef, eventId, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: `/calendars/events/appointments/${eventId}`, body });
+  }
+
+  deleteEvent(credentialRef, eventId) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/calendars/events/${eventId}` });
   }
 }
 

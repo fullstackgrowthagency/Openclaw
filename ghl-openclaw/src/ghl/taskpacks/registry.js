@@ -121,7 +121,7 @@ function appointmentMutationRequestFrom(event) {
   if (!request) return null;
   return {
     action: request.action || null,
-    appointmentId: request.appointmentId || objectIdFrom(event),
+    appointmentId: request.appointmentId || request.eventId || objectIdFrom(event),
     locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
     calendarId: request.calendarId || null,
     contactId: request.contactId || null,
@@ -141,6 +141,29 @@ function appointmentMutationRequestFrom(event) {
     ignoreDateRange: normalizeBoolean(request.ignoreDateRange),
     ignoreFreeSlotValidation: normalizeBoolean(request.ignoreFreeSlotValidation),
     rrule: normalizeString(request.rrule)
+  };
+}
+
+function appointmentUpdateBody(mutationRequest, { forceCancelled = false } = {}) {
+  const endTime = mutationRequest?.endTime || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes);
+  return {
+    ...(mutationRequest?.calendarId ? { calendarId: mutationRequest.calendarId } : {}),
+    ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
+    ...(mutationRequest?.contactId ? { contactId: mutationRequest.contactId } : {}),
+    ...(mutationRequest?.startTime ? { startTime: mutationRequest.startTime } : {}),
+    ...(endTime ? { endTime } : {}),
+    ...(mutationRequest?.title ? { title: mutationRequest.title } : {}),
+    ...(mutationRequest?.address ? { address: mutationRequest.address } : {}),
+    ...(mutationRequest?.assignedUserId ? { assignedUserId: mutationRequest.assignedUserId } : {}),
+    ...(mutationRequest?.description ? { description: mutationRequest.description } : {}),
+    ...(mutationRequest?.meetingLocationType ? { meetingLocationType: mutationRequest.meetingLocationType } : {}),
+    ...(mutationRequest?.meetingLocationId ? { meetingLocationId: mutationRequest.meetingLocationId } : {}),
+    ...(mutationRequest?.overrideLocationConfig === null ? {} : { overrideLocationConfig: mutationRequest.overrideLocationConfig }),
+    ...((forceCancelled || mutationRequest?.appointmentStatus) ? { appointmentStatus: forceCancelled ? 'cancelled' : mutationRequest.appointmentStatus } : {}),
+    ...(mutationRequest?.toNotify === null ? {} : { toNotify: mutationRequest.toNotify }),
+    ...(mutationRequest?.ignoreDateRange === null ? {} : { ignoreDateRange: mutationRequest.ignoreDateRange }),
+    ...(mutationRequest?.ignoreFreeSlotValidation === null ? {} : { ignoreFreeSlotValidation: mutationRequest.ignoreFreeSlotValidation }),
+    ...(mutationRequest?.rrule ? { rrule: mutationRequest.rrule } : {})
   };
 }
 
@@ -232,6 +255,25 @@ function resolvedAppointmentDetails(context, mutationRequest) {
     assignedUserId: mutationRequest?.assignedUserId || null,
     appointmentStatus: mutationRequest?.appointmentStatus || null,
     toNotify: mutationRequest?.toNotify
+  };
+}
+
+function resolvedAppointmentMutationDetails(mutationRequest, action, extra = {}) {
+  return {
+    action,
+    appointmentId: mutationRequest?.appointmentId || null,
+    locationId: mutationRequest?.locationId || null,
+    calendarId: mutationRequest?.calendarId || null,
+    contactId: mutationRequest?.contactId || null,
+    startTime: mutationRequest?.startTime || null,
+    endTime: mutationRequest?.endTime || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes),
+    durationMinutes: mutationRequest?.durationMinutes ?? null,
+    title: mutationRequest?.title || null,
+    address: mutationRequest?.address || null,
+    assignedUserId: mutationRequest?.assignedUserId || null,
+    appointmentStatus: mutationRequest?.appointmentStatus || null,
+    toNotify: mutationRequest?.toNotify,
+    ...extra
   };
 }
 
@@ -855,6 +897,13 @@ function taskPackHandlers() {
           && Boolean(mutationRequest.calendarId)
           && (Boolean(mutationRequest.contactId) || Boolean(mutationRequest.contactName))
           && Boolean(mutationRequest.startTime);
+        const explicitAppointmentUpdate = mutationRequest?.action === 'update_appointment'
+          && Boolean(mutationRequest.appointmentId)
+          && Object.keys(appointmentUpdateBody(mutationRequest)).length > 0;
+        const explicitAppointmentCancel = mutationRequest?.action === 'cancel_appointment'
+          && Boolean(mutationRequest.appointmentId);
+        const explicitAppointmentDelete = mutationRequest?.action === 'delete_appointment'
+          && Boolean(mutationRequest.appointmentId);
         return [
           {
             name: 'search_appointment_contact_by_name',
@@ -878,6 +927,18 @@ function taskPackHandlers() {
             skipIf: () => !explicitAppointmentCreate || Boolean(mutationRequest.contactId) || !mutationRequest.contactName
           },
           {
+            name: 'fetch_appointment',
+            kind: 'adapter_call',
+            adapter: 'CalendarsAdapter',
+            method: 'getAppointment',
+            pathHint: '/calendars/events/appointments/:eventId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.appointmentId],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            skipIf: () => !mutationRequest?.appointmentId || explicitAppointmentCreate
+          },
+          {
             name: 'refresh_calendar_event_window',
             kind: 'adapter_call',
             adapter: 'CalendarsAdapter',
@@ -887,7 +948,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             requiresCredential: true,
-            skipIf: () => explicitAppointmentCreate
+            skipIf: () => explicitAppointmentCreate || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
           },
           {
             name: 'create_appointment',
@@ -905,12 +966,57 @@ function taskPackHandlers() {
             skipIf: () => !explicitAppointmentCreate
           },
           {
+            name: 'update_appointment',
+            kind: 'adapter_call',
+            adapter: 'CalendarsAdapter',
+            method: 'updateAppointment',
+            httpMethod: 'PUT',
+            pathHint: '/calendars/events/appointments/:eventId',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), mutationRequest.appointmentId, appointmentUpdateBody(mutationRequest)],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: () => resolvedAppointmentMutationDetails(mutationRequest, 'update_appointment'),
+            skipIf: () => !explicitAppointmentUpdate
+          },
+          {
+            name: 'cancel_appointment',
+            kind: 'adapter_call',
+            adapter: 'CalendarsAdapter',
+            method: 'updateAppointment',
+            httpMethod: 'PUT',
+            pathHint: '/calendars/events/appointments/:eventId',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), mutationRequest.appointmentId, appointmentUpdateBody(mutationRequest, { forceCancelled: true })],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: () => resolvedAppointmentMutationDetails(mutationRequest, 'cancel_appointment', { appointmentStatus: 'cancelled' }),
+            skipIf: () => !explicitAppointmentCancel
+          },
+          {
+            name: 'delete_appointment',
+            kind: 'adapter_call',
+            adapter: 'CalendarsAdapter',
+            method: 'deleteEvent',
+            httpMethod: 'DELETE',
+            pathHint: '/calendars/events/:eventId',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), mutationRequest.appointmentId],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: () => resolvedAppointmentMutationDetails(mutationRequest, 'delete_appointment'),
+            skipIf: () => !explicitAppointmentDelete
+          },
+          {
             name: 'evaluate_booking_state',
             kind: 'intent',
             safe: true,
             mutation: false,
             details: { action: 'evaluate_booking_followups', locationId: context.event.locationId, mutationRequest },
-            skipIf: () => explicitAppointmentCreate
+            skipIf: () => explicitAppointmentCreate || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
           }
         ];
       }

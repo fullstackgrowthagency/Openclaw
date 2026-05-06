@@ -186,6 +186,26 @@ export const EXAMPLE_CALLS = {
       title: 'OpenClaw validation appointment'
     }]
   },
+  getAppointment: {
+    adapter: 'CalendarsAdapter',
+    method: 'getAppointment',
+    args: ['location-oauth', 'APPOINTMENT_ID']
+  },
+  updateAppointment: {
+    adapter: 'CalendarsAdapter',
+    method: 'updateAppointment',
+    args: ['location-oauth', 'APPOINTMENT_ID', {
+      startTime: '2026-05-07T16:00:00Z',
+      endTime: '2026-05-07T16:30:00Z',
+      title: 'Updated OpenClaw validation appointment',
+      appointmentStatus: 'confirmed'
+    }]
+  },
+  deleteEvent: {
+    adapter: 'CalendarsAdapter',
+    method: 'deleteEvent',
+    args: ['location-oauth', 'APPOINTMENT_ID']
+  },
   createInvoice: {
     adapter: 'InvoicesAdapter',
     method: 'createInvoice',
