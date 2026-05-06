@@ -163,7 +163,8 @@ async function main() {
       return;
     }
     case 'auth:doctor': {
-      const doctor = buildAuthDoctor(env, { cwd: process.cwd() });
+      const storedCredentials = await credentialBroker.listCredentialMetadata();
+      const doctor = buildAuthDoctor(env, { cwd: process.cwd(), storedCredentials });
       console.log(JSON.stringify({ ok: doctor.ready, doctor }, null, 2));
       return;
     }
@@ -330,7 +331,7 @@ function parseKeyValueArg(value) {
   return output;
 }
 
-function buildAuthDoctor(env, { cwd }) {
+function buildAuthDoctor(env, { cwd, storedCredentials = [] }) {
   const envPath = path.join(cwd, '.env');
   const checks = {
     envFilePresent: existsSync(envPath),
@@ -338,6 +339,8 @@ function buildAuthDoctor(env, { cwd }) {
     oauthClientConfigured: Boolean(env.clientId && env.clientSecret),
     redirectUriConfigured: Boolean(env.redirectUri),
     agencyPitConfigured: Boolean(env.agencyPit),
+    storedCredentialCount: storedCredentials.length,
+    storedAgencyPitCount: storedCredentials.filter((item) => item.kind === 'pit').length,
     apiBaseUrl: env.apiBaseUrl,
     webhookPublicKeyConfigured: Boolean(env.webhookPublicKey)
   };
@@ -345,12 +348,12 @@ function buildAuthDoctor(env, { cwd }) {
   const nextSteps = [];
   if (!checks.envFilePresent) nextSteps.push('Create .env from .env.example.');
   if (!checks.secretStorageReady) nextSteps.push('Set GHL_SECRET_KEY before storing any credentials.');
-  if (!checks.oauthClientConfigured) nextSteps.push('Set GHL_CLIENT_ID and GHL_CLIENT_SECRET for OAuth exchange and refresh.');
-  if (!checks.redirectUriConfigured) nextSteps.push('Set GHL_REDIRECT_URI to the callback registered in HighLevel.');
-  if (!checks.agencyPitConfigured) nextSteps.push('Optional: set GHL_AGENCY_PIT or use auth:store-pit for agency-level read probes.');
+  if (!checks.oauthClientConfigured && !checks.storedAgencyPitCount) nextSteps.push('Set GHL_CLIENT_ID and GHL_CLIENT_SECRET for OAuth exchange and refresh, or store a PIT.');
+  if (!checks.redirectUriConfigured && checks.oauthClientConfigured) nextSteps.push('Set GHL_REDIRECT_URI to the callback registered in HighLevel.');
+  if (!checks.agencyPitConfigured && !checks.storedAgencyPitCount) nextSteps.push('Optional: set GHL_AGENCY_PIT or use auth:store-pit for agency-level read probes.');
 
   return {
-    ready: checks.secretStorageReady && (checks.oauthClientConfigured || checks.agencyPitConfigured),
+    ready: checks.secretStorageReady && (checks.oauthClientConfigured || checks.agencyPitConfigured || checks.storedCredentialCount > 0),
     checks,
     nextSteps,
     suggestedCommands: [
@@ -358,7 +361,7 @@ function buildAuthDoctor(env, { cwd }) {
       'node src/cli/index.js auth:doctor',
       'node src/cli/index.js auth:store-pit --credential-ref=agency-pit',
       'node src/cli/index.js auth:list',
-      'node src/cli/index.js api:probe --credential-ref=agency-pit --path=/users/'
+      'node src/cli/index.js api:probe --credential-ref=agency-pit --path=/locations/search'
     ]
   };
 }
