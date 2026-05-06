@@ -57,17 +57,30 @@ Check auth readiness:
 
 ```bash
 npm run auth:status
+npm run auth:doctor
+npm run auth:list
 ```
 
 You can also call the CLI directly:
 
 ```bash
+node src/cli/index.js auth:store-pit --credential-ref=agency-pit
 node src/cli/index.js auth:exchange-code --code=AUTH_CODE --user-type=Company
 node src/cli/index.js auth:refresh --credential-ref=agency-oauth
 node src/cli/index.js auth:location-token --credential-ref=agency-oauth --company-id=COMPANY_ID --location-id=LOCATION_ID
+node src/cli/index.js api:probe --credential-ref=agency-pit --path=/users/
 ```
 
-These commands only work after `.env` is configured.
+These commands only work after `.env` is configured, and encrypted storage requires `GHL_SECRET_KEY`.
+
+Recommended live hookup sequence:
+
+1. Copy `.env.example` to `.env`
+2. Set `GHL_SECRET_KEY`
+3. Set either OAuth app credentials (`GHL_CLIENT_ID`, `GHL_CLIENT_SECRET`, `GHL_REDIRECT_URI`) or `GHL_AGENCY_PIT`
+4. Run `npm run auth:doctor`
+5. Store PIT or exchange OAuth code
+6. Run a safe `api:probe` read before any live write flow
 
 ## Webhook commands
 

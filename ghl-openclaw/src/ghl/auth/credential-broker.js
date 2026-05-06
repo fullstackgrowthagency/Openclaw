@@ -23,6 +23,21 @@ export class CredentialBroker {
     return this.encryptedStore.getMetadata(credentialRef);
   }
 
+  async listCredentialMetadata() {
+    const records = await this.encryptedStore.list();
+    return records.map((record) => ({
+      credentialRef: record.credentialRef,
+      kind: record.kind,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      tokenType: record.tokenType,
+      userType: record.userType,
+      companyId: record.companyId || null,
+      locationId: record.locationId || null,
+      scopes: record.scopes || []
+    }));
+  }
+
   async storePit({ credentialRef, token, tokenType = 'private_integration_token', companyId = null, locationId = null, scopes = [] }) {
     return await this.encryptedStore.upsert(credentialRef, {
       kind: 'pit',

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { getEnv } from '../config/env.js';
 import { ensureDir, writeJson } from '../lib/fs.js';
@@ -12,6 +13,7 @@ import { TaskPackExecutor } from '../ghl/taskpacks/executor.js';
 import { buildApprovalStatusView, enrichApproval } from '../ghl/approvals/presenter.js';
 import { ApprovalStore } from '../ghl/approvals/store.js';
 import { CredentialBroker } from '../ghl/auth/credential-broker.js';
+import { GhlApiClient } from '../ghl/api/client.js';
 import { GhlWebhookServer } from '../ghl/webhooks/server.js';
 import { WebhookStore } from '../ghl/webhooks/store.js';
 import { WebhookProcessor } from '../ghl/webhooks/processor.js';
@@ -27,6 +29,7 @@ async function main() {
   const approvalStore = new ApprovalStore();
   const taskPackRunStore = new TaskPackRunStore();
   const taskPackExecutor = new TaskPackExecutor({ runStore: taskPackRunStore, credentialBroker, approvalStore });
+  const apiClient = new GhlApiClient({ credentialBroker });
   const webhookStore = new WebhookStore();
   const webhookProcessor = new WebhookProcessor({ store: webhookStore, taskPackExecutor });
   const reportingService = new ReportingService({ approvalStore, credentialStore: credentialBroker.encryptedStore, taskPackRunStore, webhookStore });
@@ -159,6 +162,27 @@ async function main() {
       }, null, 2));
       return;
     }
+    case 'auth:doctor': {
+      const doctor = buildAuthDoctor(env, { cwd: process.cwd() });
+      console.log(JSON.stringify({ ok: doctor.ready, doctor }, null, 2));
+      return;
+    }
+    case 'auth:list': {
+      const credentials = await credentialBroker.listCredentialMetadata();
+      console.log(JSON.stringify({ ok: true, count: credentials.length, credentials }, null, 2));
+      return;
+    }
+    case 'auth:store-pit': {
+      const credentialRef = optionalArg(args, '--credential-ref') || 'agency-pit';
+      const token = optionalArg(args, '--token') || env.agencyPit;
+      const companyId = optionalArg(args, '--company-id') || null;
+      const locationId = optionalArg(args, '--location-id') || null;
+      const scopes = parseCsvArg(optionalArg(args, '--scopes'));
+      if (!token) throw new Error('Missing PIT token. Provide --token=... or set GHL_AGENCY_PIT.');
+      const result = await credentialBroker.storePit({ credentialRef, token, companyId, locationId, scopes });
+      console.log(JSON.stringify({ ok: true, credential: result }, null, 2));
+      return;
+    }
     case 'auth:exchange-code': {
       const code = requireArg(args, '--code');
       const userType = requireArg(args, '--user-type');
@@ -185,6 +209,21 @@ async function main() {
         locationId
       });
       console.log(JSON.stringify({ ok: true, targetCredentialRef, result }, null, 2));
+      return;
+    }
+    case 'api:probe': {
+      const credentialRef = requireArg(args, '--credential-ref');
+      const requestPath = requireArg(args, '--path');
+      if (!requestPath.startsWith('/')) throw new Error('--path must start with /.');
+      const query = parseKeyValueArg(optionalArg(args, '--query'));
+      const version = optionalArg(args, '--version') || undefined;
+      const result = await apiClient.request({ credentialRef, method: 'GET', path: requestPath, query, version });
+      console.log(JSON.stringify({
+        ok: result.ok,
+        status: result.status,
+        headers: sanitizeHeaders(result.headers || {}),
+        dataPreview: previewData(result.data)
+      }, null, 2));
       return;
     }
     case 'webhook:status': {
@@ -271,6 +310,71 @@ function parseBooleanArg(args, name, defaultValue) {
   const value = optionalArg(args, name);
   if (value == null) return defaultValue;
   return value !== 'false' && value !== '0' && value !== 'no';
+}
+
+function parseCsvArg(value) {
+  if (!value) return [];
+  return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function parseKeyValueArg(value) {
+  const output = {};
+  for (const item of parseCsvArg(value)) {
+    const idx = item.indexOf('=');
+    if (idx === -1) continue;
+    const key = item.slice(0, idx).trim();
+    const raw = item.slice(idx + 1).trim();
+    if (!key) continue;
+    output[key] = raw;
+  }
+  return output;
+}
+
+function buildAuthDoctor(env, { cwd }) {
+  const envPath = path.join(cwd, '.env');
+  const checks = {
+    envFilePresent: existsSync(envPath),
+    secretStorageReady: Boolean(env.secretKey),
+    oauthClientConfigured: Boolean(env.clientId && env.clientSecret),
+    redirectUriConfigured: Boolean(env.redirectUri),
+    agencyPitConfigured: Boolean(env.agencyPit),
+    apiBaseUrl: env.apiBaseUrl,
+    webhookPublicKeyConfigured: Boolean(env.webhookPublicKey)
+  };
+
+  const nextSteps = [];
+  if (!checks.envFilePresent) nextSteps.push('Create .env from .env.example.');
+  if (!checks.secretStorageReady) nextSteps.push('Set GHL_SECRET_KEY before storing any credentials.');
+  if (!checks.oauthClientConfigured) nextSteps.push('Set GHL_CLIENT_ID and GHL_CLIENT_SECRET for OAuth exchange and refresh.');
+  if (!checks.redirectUriConfigured) nextSteps.push('Set GHL_REDIRECT_URI to the callback registered in HighLevel.');
+  if (!checks.agencyPitConfigured) nextSteps.push('Optional: set GHL_AGENCY_PIT or use auth:store-pit for agency-level read probes.');
+
+  return {
+    ready: checks.secretStorageReady && (checks.oauthClientConfigured || checks.agencyPitConfigured),
+    checks,
+    nextSteps,
+    suggestedCommands: [
+      'npm run auth:status',
+      'node src/cli/index.js auth:doctor',
+      'node src/cli/index.js auth:store-pit --credential-ref=agency-pit',
+      'node src/cli/index.js auth:list',
+      'node src/cli/index.js api:probe --credential-ref=agency-pit --path=/users/'
+    ]
+  };
+}
+
+function sanitizeHeaders(headers) {
+  const output = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    output[key] = key.toLowerCase() === 'authorization' ? '[redacted]' : value;
+  }
+  return output;
+}
+
+function previewData(data) {
+  if (data == null) return null;
+  const serialized = typeof data === 'string' ? data : JSON.stringify(data);
+  return serialized.length > 1000 ? `${serialized.slice(0, 1000)}...` : serialized;
 }
 
 function inferCredentialRef(userType) {

@@ -15,6 +15,8 @@
     "report:generate": "node src/cli/index.js report:generate",
     "audit:status": "node src/cli/index.js audit:status",
     "auth:status": "node src/cli/index.js auth:status",
+    "auth:doctor": "node src/cli/index.js auth:doctor",
+    "auth:list": "node src/cli/index.js auth:list",
     "webhook:status": "node src/cli/index.js webhook:status",
     "webhook:serve": "node src/cli/index.js webhook:serve",
     "bootstrap": "node src/cli/index.js bootstrap"
