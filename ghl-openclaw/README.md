@@ -12,6 +12,7 @@ Implementation scaffold for a GoHighLevel / HighLevel multi-agent control plane 
 - webhook routing and dedupe skeleton
 - real OAuth exchange, refresh, and agency-to-location token exchange plumbing
 - first live API adapters for locations, contacts, conversations, and opportunities
+- expanded adapter set for users, calendars, invoices, payments, products, snapshots, social planner, voice AI, and workflows
 
 ## Quick start
 
@@ -72,3 +73,15 @@ Generated files are written to `data/generated/`.
 - `agent-manifests.json`
 - `taskpacks.json`
 - `status.json`
+
+## Adapter coverage in this pass
+
+Implemented adapters are intentionally limited to documented and verified paths already captured by the capability registry.
+
+- Agency-oriented: locations, users, snapshots
+- Location-oriented: contacts, conversations, opportunities, calendars, invoices, payments, products, social planner, voice AI, workflows
+
+Examples live in:
+
+- `src/ghl/api/index.js`
+- `src/ghl/api/example-usage.js`
