@@ -1,5 +1,6 @@
 import { routeWebhookEvent } from './router.js';
 import { WebhookStore } from './store.js';
+import { TaskPackExecutor } from '../taskpacks/executor.js';
 
 function inferTaskPack(eventType = '') {
   if (/^Contact|^Note|^Task|ContactTag/.test(eventType)) return 'lead_management_pack';
@@ -14,8 +15,9 @@ function inferTaskPack(eventType = '') {
 }
 
 export class WebhookProcessor {
-  constructor({ store = new WebhookStore() } = {}) {
+  constructor({ store = new WebhookStore(), taskPackExecutor = new TaskPackExecutor() } = {}) {
     this.store = store;
+    this.taskPackExecutor = taskPackExecutor;
   }
 
   async processNext() {
@@ -33,14 +35,24 @@ export class WebhookProcessor {
     try {
       const dispatchedAgentId = routeWebhookEvent({ eventType: event.type, locationId: event.locationId });
       const taskPack = inferTaskPack(event.type);
+      const credentialRef = event.locationId ? `location-${event.locationId}` : 'agency-oauth';
+      const taskPackRun = await this.taskPackExecutor.execute({
+        taskPackName: taskPack,
+        agentId: dispatchedAgentId,
+        event,
+        credentialRef,
+        mode: 'auto',
+        queueId: queueItem.id
+      });
       const result = {
         dispatchedAgentId,
         taskPack,
         routedAt: new Date().toISOString(),
-        status: 'queued_for_agent_execution',
+        status: taskPackRun.ok ? 'task_pack_executed_or_planned' : 'task_pack_failed',
         eventType: event.type,
         locationId: event.locationId,
-        companyId: event.companyId
+        companyId: event.companyId,
+        taskPackRun
       };
       await this.store.markProcessed(queueItem.id, result);
       return { ok: true, processed: true, queueId: queueItem.id, result };

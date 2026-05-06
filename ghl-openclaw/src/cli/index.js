@@ -5,6 +5,8 @@ import { ensureDir, writeJson } from '../lib/fs.js';
 import { refreshCapabilityRegistry } from '../ghl/docs/capability-registry.js';
 import { renderAgentManifests } from '../ghl/agents/definitions.js';
 import { renderTaskPacks } from '../ghl/taskpacks/definitions.js';
+import { TaskPackRunStore } from '../ghl/taskpacks/run-store.js';
+import { TaskPackExecutor } from '../ghl/taskpacks/executor.js';
 import { CredentialBroker } from '../ghl/auth/credential-broker.js';
 import { GhlWebhookServer } from '../ghl/webhooks/server.js';
 import { WebhookStore } from '../ghl/webhooks/store.js';
@@ -18,8 +20,10 @@ async function main() {
   const env = getEnv();
   await ensureDir(env.dataDir);
   const credentialBroker = new CredentialBroker();
+  const taskPackRunStore = new TaskPackRunStore();
+  const taskPackExecutor = new TaskPackExecutor({ runStore: taskPackRunStore, credentialBroker });
   const webhookStore = new WebhookStore();
-  const webhookProcessor = new WebhookProcessor({ store: webhookStore });
+  const webhookProcessor = new WebhookProcessor({ store: webhookStore, taskPackExecutor });
 
   switch (command) {
     case 'bootstrap': {
@@ -44,6 +48,37 @@ async function main() {
     case 'taskpacks:render': {
       const output = await renderTaskPacks();
       console.log(JSON.stringify({ ok: true, taskpackCount: output.taskpacks.length }, null, 2));
+      return;
+    }
+    case 'taskpack:status': {
+      const summary = await taskPackRunStore.summary();
+      console.log(JSON.stringify({ ok: true, summary }, null, 2));
+      return;
+    }
+    case 'taskpack:runs': {
+      const limit = Number(optionalArg(args, '--limit') || 20);
+      const runs = await taskPackRunStore.listRuns(limit);
+      console.log(JSON.stringify({ ok: true, runs }, null, 2));
+      return;
+    }
+    case 'taskpack:run': {
+      const taskPackName = requireArg(args, '--name');
+      const eventType = optionalArg(args, '--event-type') || 'ManualRun';
+      const locationId = optionalArg(args, '--location-id') || 'demo-location';
+      const companyId = optionalArg(args, '--company-id') || 'demo-company';
+      const objectId = optionalArg(args, '--object-id') || 'demo-object';
+      const agentId = optionalArg(args, '--agent-id') || inferAgentId(taskPackName, locationId);
+      const credentialRef = optionalArg(args, '--credential-ref') || null;
+      const mode = optionalArg(args, '--mode') || 'auto';
+      const event = {
+        type: eventType,
+        locationId,
+        companyId,
+        objectId,
+        payload: { type: eventType, locationId, companyId, data: { id: objectId } }
+      };
+      const result = await taskPackExecutor.execute({ taskPackName, agentId, event, credentialRef, mode });
+      console.log(JSON.stringify(result, null, 2));
       return;
     }
     case 'auth:status': {
@@ -168,6 +203,20 @@ function optionalArg(args, name) {
 
 function inferCredentialRef(userType) {
   return userType === 'Location' ? 'location-oauth' : 'agency-oauth';
+}
+
+function inferAgentId(taskPackName, locationId) {
+  if (taskPackName === 'sub_account_onboarding_pack' || taskPackName === 'user_permission_pack' || taskPackName === 'snapshot_template_pack') return 'ghl-agency-lead';
+  if (taskPackName === 'lead_management_pack') return `ghl-contacts-agent-${locationId}`;
+  if (taskPackName === 'sales_pipeline_pack') return `ghl-sales-pipeline-agent-${locationId}`;
+  if (taskPackName === 'conversation_management_pack') return `ghl-conversations-agent-${locationId}`;
+  if (taskPackName === 'calendar_appointment_pack') return `ghl-calendar-agent-${locationId}`;
+  if (taskPackName === 'workflow_automation_qa_pack') return `ghl-workflow-agent-${locationId}`;
+  if (taskPackName === 'payments_invoicing_pack') return `ghl-payments-agent-${locationId}`;
+  if (taskPackName === 'marketing_asset_pack') return `ghl-marketing-agent-${locationId}`;
+  if (taskPackName === 'reporting_pack') return `ghl-reporting-agent-${locationId}`;
+  if (taskPackName === 'compliance_audit_pack') return `ghl-compliance-audit-agent-${locationId}`;
+  return `ghl-sub-account-agent-${locationId}`;
 }
 
 main().catch((error) => {

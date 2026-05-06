@@ -10,6 +10,7 @@
     "capability:refresh": "node src/cli/index.js capability:refresh",
     "agents:render": "node src/cli/index.js agents:render",
     "taskpacks:render": "node src/cli/index.js taskpacks:render",
+    "taskpack:status": "node src/cli/index.js taskpack:status",
     "auth:status": "node src/cli/index.js auth:status",
     "webhook:status": "node src/cli/index.js webhook:status",
     "webhook:serve": "node src/cli/index.js webhook:serve",

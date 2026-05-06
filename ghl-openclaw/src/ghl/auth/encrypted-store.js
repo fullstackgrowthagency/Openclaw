@@ -46,7 +46,6 @@ export class FileEncryptedStore {
   }
 
   async list() {
-    this.assertReady();
     return (await readJson(this.filePath, [])) || [];
   }
 

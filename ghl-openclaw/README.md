@@ -14,6 +14,7 @@ Implementation scaffold for a GoHighLevel / HighLevel multi-agent control plane 
 - first live API adapters for locations, contacts, conversations, and opportunities
 - expanded adapter set for users, calendars, invoices, payments, products, snapshots, social planner, voice AI, and workflows
 - webhook ingestion server with signature verification, persistent dedupe store, and queue processor skeleton
+- task-pack execution engine with persistent run history and dry-run by default before credential hookup
 
 ## Quick start
 
@@ -84,6 +85,22 @@ Webhook server behavior:
 - queues work and ACKs fast
 - exposes `/health` and `/webhooks/ghl/status`
 
+## Task-pack execution commands
+
+```bash
+npm run taskpack:status
+node src/cli/index.js taskpack:runs --limit=20
+node src/cli/index.js taskpack:run --name=lead_management_pack --event-type=ContactCreate --location-id=demo-location
+```
+
+Task-pack engine behavior:
+
+- converts webhook-routed events into task-pack runs
+- persists run history under `data/taskpacks/`
+- executes in `dry_run` mode unless a real stored credential is available or `--mode=live` is used
+- performs safe adapter reads live when credentials exist
+- leaves high-risk or mutation steps as planned intents until final hookup and policy approval
+
 ## Output files
 
 Generated files are written to `data/generated/`.
@@ -94,6 +111,7 @@ Generated files are written to `data/generated/`.
 - `status.json`
 
 Persistent webhook state is written under `data/webhooks/`.
+Persistent task-pack runs are written under `data/taskpacks/`.
 
 ## Adapter coverage in this pass
 
