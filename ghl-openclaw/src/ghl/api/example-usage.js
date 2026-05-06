@@ -144,6 +144,16 @@ export const EXAMPLE_CALLS = {
     method: 'updateOpportunityStatus',
     args: ['location-oauth', 'OPPORTUNITY_ID', { status: 'won' }]
   },
+  addOpportunityFollowers: {
+    adapter: 'OpportunitiesAdapter',
+    method: 'addFollowers',
+    args: ['location-oauth', 'OPPORTUNITY_ID', { followers: ['USER_ID'] }]
+  },
+  removeOpportunityFollowers: {
+    adapter: 'OpportunitiesAdapter',
+    method: 'removeFollowers',
+    args: ['location-oauth', 'OPPORTUNITY_ID', { followers: ['USER_ID'] }]
+  },
   deleteOpportunity: {
     adapter: 'OpportunitiesAdapter',
     method: 'deleteOpportunity',

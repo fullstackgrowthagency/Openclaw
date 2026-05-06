@@ -42,6 +42,7 @@ function opportunityMutationRequestFrom(event) {
     pipelineStageId: request.pipelineStageId || null,
     status: request.status || null,
     name: request.name || null,
+    followers: Array.isArray(request.followers) ? request.followers.filter(Boolean) : [],
     monetaryValue: typeof request.monetaryValue === 'number' ? request.monetaryValue : null
   };
 }
@@ -361,6 +362,12 @@ function taskPackHandlers() {
         const explicitOpportunityStatusUpdate = mutationRequest?.action === 'update_opportunity_status'
           && Boolean(mutationRequest.opportunityId)
           && Boolean(mutationRequest.status);
+        const explicitOpportunityFollowerAdd = mutationRequest?.action === 'add_opportunity_followers'
+          && Boolean(mutationRequest.opportunityId)
+          && mutationRequest.followers.length > 0;
+        const explicitOpportunityFollowerRemove = mutationRequest?.action === 'remove_opportunity_followers'
+          && Boolean(mutationRequest.opportunityId)
+          && mutationRequest.followers.length > 0;
         const explicitOpportunityDelete = mutationRequest?.action === 'delete_opportunity' && Boolean(mutationRequest.opportunityId);
         return [
           {
@@ -455,6 +462,44 @@ function taskPackHandlers() {
             skipIf: () => !explicitOpportunityStatusUpdate
           },
           {
+            name: 'add_opportunity_followers',
+            kind: 'adapter_call',
+            adapter: 'OpportunitiesAdapter',
+            method: 'addFollowers',
+            httpMethod: 'POST',
+            pathHint: '/opportunities/:id/followers',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.opportunityId, { followers: mutationRequest.followers }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'add_opportunity_followers',
+              opportunityId: mutationRequest?.opportunityId || null,
+              followers: mutationRequest?.followers || []
+            },
+            skipIf: () => !explicitOpportunityFollowerAdd
+          },
+          {
+            name: 'remove_opportunity_followers',
+            kind: 'adapter_call',
+            adapter: 'OpportunitiesAdapter',
+            method: 'removeFollowers',
+            httpMethod: 'DELETE',
+            pathHint: '/opportunities/:id/followers',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.opportunityId, { followers: mutationRequest.followers }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'remove_opportunity_followers',
+              opportunityId: mutationRequest?.opportunityId || null,
+              followers: mutationRequest?.followers || []
+            },
+            skipIf: () => !explicitOpportunityFollowerRemove
+          },
+          {
             name: 'delete_opportunity',
             kind: 'adapter_call',
             adapter: 'OpportunitiesAdapter',
@@ -475,7 +520,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             details: { action: 'evaluate_staleness_and_forecast', opportunityId, mutationRequest },
-            skipIf: () => explicitOpportunityCreate || explicitOpportunityUpdate || explicitOpportunityStatusUpdate || explicitOpportunityDelete
+            skipIf: () => explicitOpportunityCreate || explicitOpportunityUpdate || explicitOpportunityStatusUpdate || explicitOpportunityFollowerAdd || explicitOpportunityFollowerRemove || explicitOpportunityDelete
           }
         ];
       }

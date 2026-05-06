@@ -147,6 +147,14 @@ export class OpportunitiesAdapter {
     return this.client.request({ credentialRef, method: 'PUT', path: `/opportunities/${id}/status`, body });
   }
 
+  addFollowers(credentialRef, id, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: `/opportunities/${id}/followers`, body });
+  }
+
+  removeFollowers(credentialRef, id, body) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/opportunities/${id}/followers`, body });
+  }
+
   deleteOpportunity(credentialRef, id) {
     return this.client.request({ credentialRef, method: 'DELETE', path: `/opportunities/${id}` });
   }
