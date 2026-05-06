@@ -160,6 +160,116 @@ function appointmentMutationRequestFrom(event) {
   };
 }
 
+function socialPostMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+
+  const rawPost = request.post && typeof request.post === 'object' && !Array.isArray(request.post)
+    ? { ...request.post }
+    : {};
+  const accountIds = normalizeStringArray(
+    request.accountIds
+    || rawPost.accountIds
+    || [request.accountId, rawPost.accountId].filter(Boolean)
+  );
+  const status = normalizeString(request.status) || normalizeString(rawPost.status);
+  const scheduleDate = normalizeString(request.scheduleDate)
+    || normalizeString(request.scheduledAt)
+    || normalizeString(rawPost.scheduleDate)
+    || normalizeString(rawPost.scheduledAt);
+  const summary = normalizeString(request.summary)
+    || normalizeString(request.text)
+    || normalizeString(rawPost.summary)
+    || normalizeString(rawPost.text);
+
+  if (accountIds.length > 0 && !Array.isArray(rawPost.accountIds)) rawPost.accountIds = accountIds;
+  if (status && !rawPost.status) rawPost.status = status;
+  if (scheduleDate && !rawPost.scheduleDate && !rawPost.scheduledAt) rawPost.scheduleDate = scheduleDate;
+  if (summary && !rawPost.summary && !rawPost.text) rawPost.summary = summary;
+
+  return {
+    action: request.action || null,
+    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    accountIds,
+    status,
+    scheduleDate,
+    summary,
+    post: rawPost
+  };
+}
+
+function socialAccountResumeData(liveResult) {
+  const accounts = Array.isArray(liveResult?.data?.results?.accounts)
+    ? liveResult.data.results.accounts
+    : Array.isArray(liveResult?.data?.accounts)
+      ? liveResult.data.accounts
+      : Array.isArray(liveResult?.data)
+        ? liveResult.data
+        : [];
+  return {
+    accounts: accounts.slice(0, 20).map((account) => ({
+      id: account?.id || null,
+      name: account?.name || account?.accountName || null,
+      platform: account?.platform || account?.type || null,
+      status: account?.status || null
+    })),
+    accountCount: accounts.length,
+    raw: liveResult?.data || null
+  };
+}
+
+function socialPostCreateResumeData(liveResult, context) {
+  const data = liveResult?.data || null;
+  const mutationRequest = socialPostMutationRequestFrom(context?.event);
+  return {
+    post: data && typeof data === 'object'
+      ? {
+          id: data.id || data.postId || null,
+          status: data.status || mutationRequest?.status || null,
+          scheduleDate: data.scheduleDate || data.scheduledAt || mutationRequest?.scheduleDate || null,
+          summary: data.summary || data.text || mutationRequest?.summary || null
+        }
+      : null,
+    requested: {
+      locationId: mutationRequest?.locationId || null,
+      accountIds: mutationRequest?.accountIds || [],
+      status: mutationRequest?.status || null,
+      scheduleDate: mutationRequest?.scheduleDate || null,
+      summary: mutationRequest?.summary || null
+    },
+    raw: data
+  };
+}
+
+function resolvedSocialPostLocationId(context, mutationRequest) {
+  return mutationRequest?.locationId || context?.event?.locationId || context?.event?.payload?.locationId || null;
+}
+
+function socialPostCreateBody(mutationRequest) {
+  const post = mutationRequest?.post;
+  if (!post || typeof post !== 'object' || Array.isArray(post) || Object.keys(post).length === 0) {
+    throw new Error('create_social_post requires a post object or top-level social post fields.');
+  }
+
+  const status = normalizeString(post.status) || mutationRequest?.status;
+  const scheduleDate = normalizeString(post.scheduleDate) || normalizeString(post.scheduledAt) || mutationRequest?.scheduleDate;
+  const accountIds = Array.isArray(post.accountIds) ? normalizeStringArray(post.accountIds) : mutationRequest?.accountIds || [];
+
+  if (['scheduled', 'in_review'].includes((status || '').toLowerCase()) && !scheduleDate) {
+    throw new Error('scheduled or in_review social posts require scheduleDate.');
+  }
+  if ((status || '').toLowerCase() !== 'draft' && accountIds.length === 0) {
+    throw new Error('Non-draft social posts require at least one accountId.');
+  }
+
+  return {
+    ...post,
+    ...(accountIds.length > 0 ? { accountIds } : {}),
+    ...(status ? { status } : {}),
+    ...(scheduleDate && !post.scheduleDate && !post.scheduledAt ? { scheduleDate } : {})
+  };
+}
+
 function appointmentFetchResumeData(liveResult) {
   const appointment = liveResult?.data?.appointment || liveResult?.data || null;
   if (!appointment || typeof appointment !== 'object') {
@@ -1478,8 +1588,11 @@ function taskPackHandlers() {
       }
     },
     marketing_asset_pack: {
-      trigger_events: ['SocialPostCreate'],
+      trigger_events: ['SocialPostCreate', 'ManualRun'],
       buildExecutionPlan(context) {
+        const mutationRequest = socialPostMutationRequestFrom(context.event);
+        const locationId = resolvedSocialPostLocationId(context, mutationRequest);
+        const explicitCreateSocialPost = mutationRequest?.action === 'create_social_post';
         return [
           {
             name: 'refresh_social_accounts',
@@ -1487,10 +1600,39 @@ function taskPackHandlers() {
             adapter: 'SocialPlannerAdapter',
             method: 'listAccounts',
             pathHint: '/social-media-posting/:locationId/accounts',
-            args: () => [context.credentialRef || defaultLocationCredential(context), context.event.locationId, {}],
+            args: () => [context.credentialRef || defaultLocationCredential(context), locationId, {}],
             safe: true,
             mutation: false,
-            requiresCredential: true
+            requiresCredential: true,
+            resumeData: socialAccountResumeData,
+            details: {
+              action: 'list_social_accounts',
+              locationId
+            },
+            skipIf: () => !locationId
+          },
+          {
+            name: 'create_social_post',
+            kind: 'adapter_call',
+            adapter: 'SocialPlannerAdapter',
+            method: 'createPost',
+            httpMethod: 'POST',
+            pathHint: '/social-media-posting/:locationId/posts',
+            args: () => [context.credentialRef || defaultLocationCredential(context), locationId, socialPostCreateBody(mutationRequest)],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            resumeData: socialPostCreateResumeData,
+            details: {
+              action: 'create_social_post',
+              locationId,
+              accountIds: mutationRequest?.accountIds || [],
+              status: mutationRequest?.status || null,
+              scheduleDate: mutationRequest?.scheduleDate || null,
+              summaryPreview: mutationRequest?.summary ? mutationRequest.summary.slice(0, 160) : null
+            },
+            skipIf: () => !explicitCreateSocialPost
           }
         ];
       }

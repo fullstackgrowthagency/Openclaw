@@ -250,6 +250,20 @@ export const EXAMPLE_CALLS = {
     method: 'searchTriggerLinks',
     args: ['location-oauth', { locationId: 'LOCATION_ID', query: 'promo' }]
   },
+  listSocialAccounts: {
+    adapter: 'SocialPlannerAdapter',
+    method: 'listAccounts',
+    args: ['location-oauth', 'LOCATION_ID', {}]
+  },
+  createSocialPost: {
+    adapter: 'SocialPlannerAdapter',
+    method: 'createPost',
+    args: ['location-oauth', 'LOCATION_ID', {
+      accountIds: ['ACCOUNT_ID'],
+      summary: 'OpenClaw validation draft social post',
+      status: 'draft'
+    }]
+  },
   uploadMediaFile: {
     adapter: 'MediaStorageAdapter',
     method: 'uploadFile',

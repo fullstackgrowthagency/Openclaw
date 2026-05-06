@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-06T17:57:44.656Z",
+  "generatedAt": "2026-05-06T18:49:13.974Z",
   "taskpacks": [
     {
       "name": "sub_account_onboarding_pack",
@@ -318,6 +318,7 @@
         "socialplanner/posts.write"
       ],
       "required_endpoints": [
+        "/social-media-posting/:locationId/accounts",
         "/social-media-posting/:locationId/posts"
       ],
       "required_token_type": [
@@ -348,10 +349,10 @@
         "completed_without_policy_violation"
       ],
       "rollback_plan": [
-        "best_effort_safe_rollback"
+        "manual_rollback_review"
       ],
-      "permission_level": "standard",
-      "approval_required": false
+      "permission_level": "approved_write",
+      "approval_required": true
     },
     {
       "name": "user_permission_pack",
