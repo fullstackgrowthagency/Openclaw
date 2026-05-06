@@ -13,6 +13,7 @@ Implementation scaffold for a GoHighLevel / HighLevel multi-agent control plane 
 - real OAuth exchange, refresh, and agency-to-location token exchange plumbing
 - first live API adapters for locations, contacts, conversations, and opportunities
 - expanded adapter set for users, calendars, invoices, payments, products, snapshots, social planner, voice AI, and workflows
+- webhook ingestion server with signature verification, persistent dedupe store, and queue processor skeleton
 
 ## Quick start
 
@@ -65,6 +66,24 @@ node src/cli/index.js auth:location-token --credential-ref=agency-oauth --compan
 
 These commands only work after `.env` is configured.
 
+## Webhook commands
+
+```bash
+npm run webhook:status
+npm run webhook:serve
+node src/cli/index.js webhook:test-event --type=ContactCreate --location-id=demo-location
+node src/cli/index.js webhook:drain --limit=10
+```
+
+Webhook server behavior:
+
+- listens on `/webhooks/ghl`
+- verifies `X-GHL-Signature` and legacy `X-WH-Signature`
+- stores receipts persistently
+- deduplicates by `webhookId` or payload hash
+- queues work and ACKs fast
+- exposes `/health` and `/webhooks/ghl/status`
+
 ## Output files
 
 Generated files are written to `data/generated/`.
@@ -73,6 +92,8 @@ Generated files are written to `data/generated/`.
 - `agent-manifests.json`
 - `taskpacks.json`
 - `status.json`
+
+Persistent webhook state is written under `data/webhooks/`.
 
 ## Adapter coverage in this pass
 

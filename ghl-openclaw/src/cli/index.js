@@ -6,6 +6,10 @@ import { refreshCapabilityRegistry } from '../ghl/docs/capability-registry.js';
 import { renderAgentManifests } from '../ghl/agents/definitions.js';
 import { renderTaskPacks } from '../ghl/taskpacks/definitions.js';
 import { CredentialBroker } from '../ghl/auth/credential-broker.js';
+import { GhlWebhookServer } from '../ghl/webhooks/server.js';
+import { WebhookStore } from '../ghl/webhooks/store.js';
+import { WebhookProcessor } from '../ghl/webhooks/processor.js';
+import { ingestTestEvent } from '../ghl/webhooks/test-ingest.js';
 
 const command = process.argv[2] || 'status';
 const args = process.argv.slice(3);
@@ -14,6 +18,8 @@ async function main() {
   const env = getEnv();
   await ensureDir(env.dataDir);
   const credentialBroker = new CredentialBroker();
+  const webhookStore = new WebhookStore();
+  const webhookProcessor = new WebhookProcessor({ store: webhookStore });
 
   switch (command) {
     case 'bootstrap': {
@@ -80,6 +86,43 @@ async function main() {
       console.log(JSON.stringify({ ok: true, targetCredentialRef, result }, null, 2));
       return;
     }
+    case 'webhook:status': {
+      const summary = await webhookStore.summary();
+      console.log(JSON.stringify({ ok: true, host: env.webhookHost, port: env.webhookPort, summary }, null, 2));
+      return;
+    }
+    case 'webhook:serve': {
+      const host = optionalArg(args, '--host') || env.webhookHost;
+      const port = Number(optionalArg(args, '--port') || env.webhookPort);
+      const server = new GhlWebhookServer({ store: webhookStore, processor: webhookProcessor, host, port });
+      await server.start();
+      console.log(JSON.stringify({ ok: true, listening: true, host, port, path: '/webhooks/ghl' }, null, 2));
+      return;
+    }
+    case 'webhook:drain': {
+      const limit = Number(optionalArg(args, '--limit') || 10);
+      const result = await webhookProcessor.drain(limit);
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    case 'webhook:test-event': {
+      const type = optionalArg(args, '--type') || 'ContactCreate';
+      const locationId = optionalArg(args, '--location-id') || 'demo-location';
+      const companyId = optionalArg(args, '--company-id') || 'demo-company';
+      const payload = {
+        type,
+        webhookId: optionalArg(args, '--webhook-id') || `test-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        locationId,
+        companyId,
+        data: {
+          id: optionalArg(args, '--object-id') || 'demo-object'
+        }
+      };
+      const result = await ingestTestEvent(payload, { store: webhookStore });
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
     case 'status': {
       const status = {
         ok: true,
@@ -88,6 +131,8 @@ async function main() {
         dataDir: env.dataDir,
         apiBaseUrl: env.apiBaseUrl,
         docsBaseUrl: env.docsBaseUrl,
+        webhookHost: env.webhookHost,
+        webhookPort: env.webhookPort,
         approvalBulkThreshold: env.approvalBulkThreshold,
         hasClientId: Boolean(env.clientId),
         hasClientSecret: Boolean(env.clientSecret),

@@ -18,6 +18,8 @@ export function getEnv() {
     webhookPublicKey: process.env.GHL_WEBHOOK_PUBLIC_KEY || null,
     agencyPit: process.env.GHL_AGENCY_PIT || null,
     secretKey: process.env.GHL_SECRET_KEY || null,
+    webhookHost: process.env.GHL_WEBHOOK_HOST || '127.0.0.1',
+    webhookPort: Number(process.env.GHL_WEBHOOK_PORT || 8787),
     docsRefreshHours: Number(process.env.GHL_DOCS_REFRESH_HOURS || 12),
     approvalBulkThreshold: Number(process.env.GHL_APPROVAL_BULK_THRESHOLD || 25)
   };
