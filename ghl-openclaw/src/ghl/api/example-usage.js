@@ -89,6 +89,11 @@ export const EXAMPLE_CALLS = {
     method: 'deleteTask',
     args: ['location-oauth', 'CONTACT_ID', 'TASK_ID']
   },
+  updateContactTaskCompleted: {
+    adapter: 'ContactsAdapter',
+    method: 'updateTaskCompleted',
+    args: ['location-oauth', 'CONTACT_ID', 'TASK_ID', { completed: true }]
+  },
   addContactNote: {
     adapter: 'ContactsAdapter',
     method: 'addNote',

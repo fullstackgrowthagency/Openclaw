@@ -83,6 +83,7 @@ function taskPackHandlers() {
         const explicitTagRemove = mutationRequest?.action === 'remove_contact_tags' && mutationRequest.tags.length > 0;
         const explicitTaskCreate = mutationRequest?.action === 'create_contact_task' && Boolean(mutationRequest.title);
         const explicitTaskDelete = mutationRequest?.action === 'delete_contact_task' && Boolean(mutationRequest.taskId);
+        const explicitTaskComplete = mutationRequest?.action === 'update_contact_task_completed' && Boolean(mutationRequest.taskId) && typeof mutationRequest.completed === 'boolean';
         const explicitNoteAdd = mutationRequest?.action === 'add_contact_note' && Boolean(mutationRequest.note);
         const explicitNoteDelete = mutationRequest?.action === 'delete_contact_note' && Boolean(mutationRequest.noteId);
         const explicitEnrichment = mutationRequest?.action === 'enrich_contact' && (mutationRequest.tags.length > 0 || Boolean(mutationRequest.note));
@@ -178,6 +179,21 @@ function taskPackHandlers() {
             skipIf: () => !contactId || !explicitTaskDelete
           },
           {
+            name: 'update_contact_task_completed',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'updateTaskCompleted',
+            httpMethod: 'PUT',
+            pathHint: '/contacts/:contactId/tasks/:taskId/completed',
+            args: () => [context.credentialRef || defaultLocationCredential(context), contactId, mutationRequest.taskId, { completed: mutationRequest.completed }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: { action: 'update_contact_task_completed', contactId, taskId: mutationRequest?.taskId || null, completed: mutationRequest?.completed },
+            skipIf: () => !contactId || !explicitTaskComplete
+          },
+          {
             name: 'add_contact_note',
             kind: 'adapter_call',
             adapter: 'ContactsAdapter',
@@ -223,7 +239,7 @@ function taskPackHandlers() {
             mutation: true,
             requiresApproval: true,
             details: { action: 'possible_tag_note_task_or_opportunity', contactId },
-            skipIf: () => explicitTagAdd || explicitTagRemove || explicitTaskCreate || explicitTaskDelete || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
+            skipIf: () => explicitTagAdd || explicitTagRemove || explicitTaskCreate || explicitTaskDelete || explicitTaskComplete || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
           }
         ];
       }
