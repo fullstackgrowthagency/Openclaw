@@ -59,6 +59,10 @@ export class ContactsAdapter {
     return this.client.request({ credentialRef, method: 'POST', path: `/contacts/${contactId}/tasks`, body });
   }
 
+  deleteTask(credentialRef, contactId, taskId) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/contacts/${contactId}/tasks/${taskId}` });
+  }
+
   listNotes(credentialRef, contactId) {
     return this.client.request({ credentialRef, method: 'GET', path: `/contacts/${contactId}/notes` });
   }

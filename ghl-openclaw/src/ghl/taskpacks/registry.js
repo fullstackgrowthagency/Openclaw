@@ -12,8 +12,13 @@ function leadMutationRequestFrom(event) {
     tags: Array.isArray(request.tags) ? request.tags.filter(Boolean) : [],
     note: request.note || null,
     title: request.title || null,
+    body: request.body || null,
+    dueDate: request.dueDate || null,
+    assignedTo: request.assignedTo || null,
+    completed: typeof request.completed === 'boolean' ? request.completed : null,
     pinned: Boolean(request.pinned),
     noteId: request.noteId || null,
+    taskId: request.taskId || null,
     contactId: request.contactId || objectIdFrom(event)
   };
 }
@@ -60,6 +65,8 @@ function taskPackHandlers() {
         const contactId = mutationRequest?.contactId || objectIdFrom(context.event);
         const explicitTagAdd = mutationRequest?.action === 'add_contact_tags' && mutationRequest.tags.length > 0;
         const explicitTagRemove = mutationRequest?.action === 'remove_contact_tags' && mutationRequest.tags.length > 0;
+        const explicitTaskCreate = mutationRequest?.action === 'create_contact_task' && Boolean(mutationRequest.title);
+        const explicitTaskDelete = mutationRequest?.action === 'delete_contact_task' && Boolean(mutationRequest.taskId);
         const explicitNoteAdd = mutationRequest?.action === 'add_contact_note' && Boolean(mutationRequest.note);
         const explicitNoteDelete = mutationRequest?.action === 'delete_contact_note' && Boolean(mutationRequest.noteId);
         const explicitEnrichment = mutationRequest?.action === 'enrich_contact' && (mutationRequest.tags.length > 0 || Boolean(mutationRequest.note));
@@ -114,6 +121,47 @@ function taskPackHandlers() {
             skipIf: () => !contactId || !explicitTagRemove
           },
           {
+            name: 'create_contact_task',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'createTask',
+            httpMethod: 'POST',
+            pathHint: '/contacts/:contactId/tasks',
+            args: () => [context.credentialRef || defaultLocationCredential(context), contactId, {
+              title: mutationRequest.title,
+              body: mutationRequest.body || 'OpenClaw controlled validation task',
+              dueDate: mutationRequest.dueDate || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+              ...(mutationRequest.assignedTo ? { assignedTo: mutationRequest.assignedTo } : {}),
+              completed: mutationRequest.completed === null ? false : mutationRequest.completed
+            }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'create_contact_task',
+              contactId,
+              title: mutationRequest?.title || null,
+              dueDate: mutationRequest?.dueDate || null
+            },
+            skipIf: () => !contactId || !explicitTaskCreate
+          },
+          {
+            name: 'delete_contact_task',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'deleteTask',
+            httpMethod: 'DELETE',
+            pathHint: '/contacts/:contactId/tasks/:taskId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), contactId, mutationRequest.taskId],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: { action: 'delete_contact_task', contactId, taskId: mutationRequest?.taskId || null },
+            skipIf: () => !contactId || !explicitTaskDelete
+          },
+          {
             name: 'add_contact_note',
             kind: 'adapter_call',
             adapter: 'ContactsAdapter',
@@ -159,7 +207,7 @@ function taskPackHandlers() {
             mutation: true,
             requiresApproval: true,
             details: { action: 'possible_tag_note_task_or_opportunity', contactId },
-            skipIf: () => explicitTagAdd || explicitTagRemove || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
+            skipIf: () => explicitTagAdd || explicitTagRemove || explicitTaskCreate || explicitTaskDelete || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
           }
         ];
       }

@@ -79,6 +79,16 @@ export const EXAMPLE_CALLS = {
     method: 'removeTags',
     args: ['location-oauth', 'CONTACT_ID', { tags: ['openclaw-validation'] }]
   },
+  createContactTask: {
+    adapter: 'ContactsAdapter',
+    method: 'createTask',
+    args: ['location-oauth', 'CONTACT_ID', { title: 'OpenClaw validation task', body: 'Safe to delete', dueDate: '2026-05-07T00:00:00Z', completed: false }]
+  },
+  deleteContactTask: {
+    adapter: 'ContactsAdapter',
+    method: 'deleteTask',
+    args: ['location-oauth', 'CONTACT_ID', 'TASK_ID']
+  },
   addContactNote: {
     adapter: 'ContactsAdapter',
     method: 'addNote',
