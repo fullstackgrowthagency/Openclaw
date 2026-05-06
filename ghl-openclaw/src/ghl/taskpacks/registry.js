@@ -180,10 +180,65 @@ function appointmentFetchResumeData(liveResult) {
   };
 }
 
-function appointmentListResumeData(liveResult) {
+function appointmentComparableDateTime(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return new Date(value).toISOString().slice(0, 19).replace('T', ' ');
+  }
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const trimmed = value.trim();
+  const directMatch = trimmed.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/);
+  if (directMatch) {
+    return `${directMatch[1]} ${directMatch[2]}`;
+  }
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function filterAppointmentRecords(records, mutationRequest) {
+  const requestedStart = appointmentComparableDateTime(mutationRequest?.startTime)
+    || appointmentComparableDateTime(mutationRequest?.startDate);
+  const requestedEnd = appointmentComparableDateTime(
+    mutationRequest?.endTime
+    || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes)
+    || mutationRequest?.endDate
+  );
+
+  return records.filter((appointment) => {
+    if (mutationRequest?.contactId && appointment.contactId !== mutationRequest.contactId) return false;
+    if (mutationRequest?.calendarId && appointment.calendarId !== mutationRequest.calendarId) return false;
+    if (mutationRequest?.assignedUserId && appointment.assignedUserId !== mutationRequest.assignedUserId) return false;
+    if (mutationRequest?.appointmentStatus && appointment.appointmentStatus !== mutationRequest.appointmentStatus) return false;
+
+    const appointmentStart = appointmentComparableDateTime(appointment.startTime);
+    const appointmentEnd = appointmentComparableDateTime(appointment.endTime) || appointmentStart;
+
+    if (requestedStart && appointmentEnd && appointmentEnd < requestedStart) return false;
+    if (requestedEnd && appointmentStart && appointmentStart > requestedEnd) return false;
+    return true;
+  });
+}
+
+function appointmentListResumeData(liveResult, context) {
+  const mutationRequest = appointmentMutationRequestFrom(context?.event);
+  const appointments = collectAppointmentRecords(liveResult?.data).slice(0, 100);
+  const filteredAppointments = filterAppointmentRecords(appointments, mutationRequest).slice(0, 100);
   return {
-    appointments: collectAppointmentRecords(liveResult?.data).slice(0, 100),
-    raw: liveResult?.data || null
+    appointments: filteredAppointments,
+    raw: liveResult?.data || null,
+    filtersApplied: {
+      contactId: mutationRequest?.contactId || null,
+      contactName: mutationRequest?.contactName || null,
+      calendarId: mutationRequest?.calendarId || null,
+      assignedUserId: mutationRequest?.assignedUserId || null,
+      appointmentStatus: mutationRequest?.appointmentStatus || null,
+      startTime: mutationRequest?.startTime || null,
+      endTime: mutationRequest?.endTime || null,
+      startDate: mutationRequest?.startDate ?? null,
+      endDate: mutationRequest?.endDate ?? null
+    },
+    unfilteredCount: appointments.length,
+    filteredCount: filteredAppointments.length
   };
 }
 
