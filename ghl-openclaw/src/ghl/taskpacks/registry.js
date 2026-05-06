@@ -210,6 +210,8 @@ function facebookAdMutationRequestFrom(event) {
   const adset = normalizePlainObject(request.adset || request.adsetBody);
   const ad = normalizePlainObject(request.ad || request.adBody);
   const query = normalizePlainObject(request.query);
+  const sourcePost = normalizePlainObject(request.sourcePost || request.socialPost || request.post);
+  const promotion = normalizePlainObject(request.promotion || request.bundle || request.adBundle);
   const publish = normalizeBoolean(request.publishAfterCreate ?? request.publish ?? request.pushLive);
 
   return {
@@ -222,6 +224,15 @@ function facebookAdMutationRequestFrom(event) {
     campaign,
     adset,
     ad,
+    sourcePost,
+    promotion,
+    websiteUrl: normalizeString(request.websiteUrl) || normalizeString(request.link) || normalizeString(promotion?.websiteUrl) || normalizeString(promotion?.link),
+    mediaUrls: normalizeStringArray(request.mediaUrls || request.imageUrls || promotion?.mediaUrls || promotion?.imageUrls),
+    pageId: normalizeString(request.pageId) || normalizeString(promotion?.pageId),
+    instagramAccountId: normalizeString(request.instagramAccountId) || normalizeString(promotion?.instagramAccountId),
+    cta: normalizeString(request.cta) || normalizeString(request.callToAction) || normalizeString(promotion?.cta) || normalizeString(promotion?.callToAction),
+    headline: normalizeString(request.headline) || normalizeString(promotion?.headline),
+    description: normalizeString(request.description) || normalizeString(promotion?.description),
     query: query || {},
     publish: publish === true
   };
@@ -419,6 +430,9 @@ function resolvedFacebookAdsetId(context, mutationRequest) {
 }
 
 function facebookCampaignBody(mutationRequest) {
+  if (facebookPromotionRequested(mutationRequest)) {
+    return facebookPromotionCampaignBody(mutationRequest);
+  }
   const campaign = mutationRequest?.campaign;
   if (!campaign || Object.keys(campaign).length === 0) {
     throw new Error('Facebook campaign upsert requires a campaign object.');
@@ -427,6 +441,9 @@ function facebookCampaignBody(mutationRequest) {
 }
 
 function facebookAdsetBody(context, mutationRequest) {
+  if (facebookPromotionRequested(mutationRequest)) {
+    return facebookPromotionAdsetBody(context, mutationRequest);
+  }
   const adset = mutationRequest?.adset;
   if (!adset || Object.keys(adset).length === 0) {
     throw new Error('Facebook adset upsert requires an adset object.');
@@ -442,6 +459,9 @@ function facebookAdsetBody(context, mutationRequest) {
 }
 
 function facebookAdBody(context, mutationRequest) {
+  if (facebookPromotionRequested(mutationRequest)) {
+    return facebookPromotionAdBody(context, mutationRequest);
+  }
   const ad = mutationRequest?.ad;
   if (!ad || Object.keys(ad).length === 0) {
     throw new Error('Facebook ad upsert requires an ad object.');
@@ -467,6 +487,202 @@ function facebookEntityQuery(mutationRequest) {
   return {
     ...query,
     entityType
+  };
+}
+
+function sourcePostSummary(sourcePost) {
+  return normalizeString(sourcePost?.summary)
+    || normalizeString(sourcePost?.text)
+    || normalizeString(sourcePost?.caption)
+    || null;
+}
+
+function sourcePostTheme(sourcePost) {
+  return normalizeString(sourcePost?.theme) || normalizeString(sourcePost?.topic) || null;
+}
+
+function sourcePostMediaUrls(sourcePost) {
+  const urls = [];
+  const push = (value) => {
+    const normalized = normalizeString(value);
+    if (normalized) urls.push(normalized);
+  };
+
+  if (!sourcePost || typeof sourcePost !== 'object') return [];
+
+  push(sourcePost.mediaUrl);
+  push(sourcePost.imageUrl);
+  push(sourcePost.link);
+
+  if (Array.isArray(sourcePost.mediaUrls)) {
+    sourcePost.mediaUrls.forEach(push);
+  }
+  if (Array.isArray(sourcePost.imageUrls)) {
+    sourcePost.imageUrls.forEach(push);
+  }
+  if (Array.isArray(sourcePost.images)) {
+    sourcePost.images.forEach((image) => {
+      if (typeof image === 'string') push(image);
+      else if (image && typeof image === 'object') {
+        push(image.url);
+        push(image.mediaUrl);
+        push(image.fileUrl);
+      }
+    });
+  }
+  if (Array.isArray(sourcePost.media)) {
+    sourcePost.media.forEach((item) => {
+      if (typeof item === 'string') push(item);
+      else if (item && typeof item === 'object') {
+        push(item.url);
+        push(item.mediaUrl);
+        push(item.fileUrl);
+        push(item.sourceUrl);
+        push(item.secureUrl);
+      }
+    });
+  }
+
+  return [...new Set(urls)];
+}
+
+function facebookPromotionMediaUrls(mutationRequest) {
+  return [...new Set([...(mutationRequest?.mediaUrls || []), ...sourcePostMediaUrls(mutationRequest?.sourcePost)])];
+}
+
+function firstParagraph(text) {
+  const normalized = normalizeString(text);
+  if (!normalized) return null;
+  return normalized.split(/\n\s*\n/).map((part) => part.trim()).find(Boolean) || normalized;
+}
+
+function firstNonHashtagLine(text) {
+  const normalized = normalizeString(text);
+  if (!normalized) return null;
+  const line = normalized
+    .split('\n')
+    .map((part) => part.trim())
+    .find((part) => part && !part.startsWith('#'));
+  return line || normalized;
+}
+
+function clampText(value, maxLength) {
+  const normalized = normalizeString(value);
+  if (!normalized || normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function inferredPromotionHeadline(mutationRequest) {
+  return mutationRequest?.headline
+    || clampText(firstNonHashtagLine(sourcePostSummary(mutationRequest?.sourcePost)), 60)
+    || clampText(sourcePostTheme(mutationRequest?.sourcePost), 60)
+    || 'Learn more';
+}
+
+function inferredPromotionDescription(mutationRequest) {
+  return mutationRequest?.description
+    || clampText(firstParagraph(sourcePostSummary(mutationRequest?.sourcePost)), 140)
+    || clampText(sourcePostTheme(mutationRequest?.sourcePost), 140)
+    || null;
+}
+
+function inferredPromotionCampaignName(mutationRequest) {
+  const explicit = normalizeString(mutationRequest?.promotion?.campaignName) || normalizeString(mutationRequest?.campaign?.name);
+  if (explicit) return explicit;
+  const theme = sourcePostTheme(mutationRequest?.sourcePost);
+  if (theme) return `Promote ${theme}`;
+  const headline = inferredPromotionHeadline(mutationRequest);
+  return headline ? `Promote ${headline}` : 'Promote social post';
+}
+
+function inferredPromotionAdsetName(mutationRequest) {
+  return normalizeString(mutationRequest?.promotion?.adsetName) || normalizeString(mutationRequest?.adset?.name) || `${inferredPromotionCampaignName(mutationRequest)} ad set`;
+}
+
+function inferredPromotionAdName(mutationRequest) {
+  return normalizeString(mutationRequest?.promotion?.adName) || normalizeString(mutationRequest?.ad?.name) || `${inferredPromotionCampaignName(mutationRequest)} ad`;
+}
+
+function inferredPromotionStatus(mutationRequest) {
+  return normalizeString(mutationRequest?.promotion?.status)
+    || normalizeString(mutationRequest?.campaign?.status)
+    || normalizeString(mutationRequest?.adset?.status)
+    || normalizeString(mutationRequest?.ad?.status)
+    || 'PAUSED';
+}
+
+function inferredPromotionObjective(mutationRequest) {
+  return normalizeString(mutationRequest?.promotion?.objective)
+    || normalizeString(mutationRequest?.campaign?.objective)
+    || 'OUTCOME_TRAFFIC';
+}
+
+function facebookPromotionRequested(mutationRequest) {
+  return ['promote_social_post_to_facebook_ad', 'promote_social_post', 'build_facebook_ad_from_social_post'].includes(mutationRequest?.action);
+}
+
+function facebookPromotionCampaignBody(mutationRequest) {
+  const base = {
+    name: inferredPromotionCampaignName(mutationRequest),
+    objective: inferredPromotionObjective(mutationRequest),
+    status: inferredPromotionStatus(mutationRequest)
+  };
+  return {
+    ...base,
+    ...(mutationRequest?.promotion?.campaign || {}),
+    ...(mutationRequest?.campaign || {})
+  };
+}
+
+function facebookPromotionAdsetBody(context, mutationRequest) {
+  const campaignId = resolvedFacebookCampaignId(context, mutationRequest);
+  const base = {
+    name: inferredPromotionAdsetName(mutationRequest),
+    status: inferredPromotionStatus(mutationRequest),
+    ...(normalizeNumber(mutationRequest?.promotion?.dailyBudget) === null ? {} : { dailyBudget: normalizeNumber(mutationRequest?.promotion?.dailyBudget) }),
+    ...(normalizeString(mutationRequest?.promotion?.optimizationGoal) ? { optimizationGoal: normalizeString(mutationRequest?.promotion?.optimizationGoal) } : {}),
+    ...(normalizeString(mutationRequest?.promotion?.billingEvent) ? { billingEvent: normalizeString(mutationRequest?.promotion?.billingEvent) } : {}),
+    ...(normalizePlainObject(mutationRequest?.promotion?.targeting) ? { targeting: normalizePlainObject(mutationRequest?.promotion?.targeting) } : {}),
+    ...(normalizeString(mutationRequest?.promotion?.startTime) ? { startTime: normalizeString(mutationRequest?.promotion?.startTime) } : {}),
+    ...(normalizeString(mutationRequest?.promotion?.endTime) ? { endTime: normalizeString(mutationRequest?.promotion?.endTime) } : {})
+  };
+  return {
+    ...base,
+    ...(mutationRequest?.promotion?.adset || {}),
+    ...(mutationRequest?.adset || {}),
+    ...(campaignId ? { campaignId } : {})
+  };
+}
+
+function facebookPromotionAdBody(context, mutationRequest) {
+  const mediaUrls = facebookPromotionMediaUrls(mutationRequest);
+  const campaignId = resolvedFacebookCampaignId(context, mutationRequest);
+  const adsetId = resolvedFacebookAdsetId(context, mutationRequest);
+  const websiteUrl = mutationRequest?.websiteUrl || normalizeString(mutationRequest?.sourcePost?.websiteUrl) || normalizeString(mutationRequest?.sourcePost?.link) || null;
+  const creative = {
+    primaryText: sourcePostSummary(mutationRequest?.sourcePost),
+    headline: inferredPromotionHeadline(mutationRequest),
+    ...(inferredPromotionDescription(mutationRequest) ? { description: inferredPromotionDescription(mutationRequest) } : {}),
+    ...(normalizeString(mutationRequest?.cta) ? { callToAction: normalizeString(mutationRequest?.cta) } : {}),
+    ...(websiteUrl ? { link: websiteUrl } : {}),
+    ...(mediaUrls[0] ? { mediaUrl: mediaUrls[0] } : {}),
+    ...(mediaUrls.length > 0 ? { mediaUrls } : {})
+  };
+
+  return {
+    name: inferredPromotionAdName(mutationRequest),
+    status: inferredPromotionStatus(mutationRequest),
+    ...(campaignId ? { campaignId } : {}),
+    ...(adsetId ? { adsetId } : {}),
+    ...(mutationRequest?.pageId ? { pageId: mutationRequest.pageId } : {}),
+    ...(mutationRequest?.instagramAccountId ? { instagramAccountId: mutationRequest.instagramAccountId } : {}),
+    ...(mutationRequest?.promotion?.ad || {}),
+    ...(mutationRequest?.ad || {}),
+    creative: {
+      ...creative,
+      ...(normalizePlainObject(mutationRequest?.promotion?.creative) || {}),
+      ...(normalizePlainObject(mutationRequest?.ad?.creative) || {})
+    }
   };
 }
 
@@ -1841,21 +2057,30 @@ function taskPackHandlers() {
       trigger_events: ['ManualRun'],
       buildExecutionPlan(context) {
         const mutationRequest = facebookAdMutationRequestFrom(context.event);
+        const explicitPromoteSocialPost = facebookPromotionRequested(mutationRequest)
+          && Boolean(sourcePostSummary(mutationRequest?.sourcePost))
+          && (facebookPromotionMediaUrls(mutationRequest).length > 0 || Boolean(mutationRequest?.websiteUrl));
         const explicitEntityList = mutationRequest?.action === 'list_facebook_ad_entities'
           && Boolean(mutationRequest?.entityType || mutationRequest?.query?.entityType);
         const explicitCampaignFetch = mutationRequest?.action === 'get_facebook_campaign'
           && Boolean(mutationRequest?.campaignId);
-        const explicitCampaignUpsert = ['upsert_facebook_campaign', 'build_facebook_ad_campaign'].includes(mutationRequest?.action)
+        const explicitCampaignUpsert = explicitPromoteSocialPost || (
+          ['upsert_facebook_campaign', 'build_facebook_ad_campaign'].includes(mutationRequest?.action)
           && Boolean(mutationRequest?.campaign)
-          && Object.keys(mutationRequest.campaign).length > 0;
-        const explicitAdsetUpsert = ['upsert_facebook_adset', 'build_facebook_ad_campaign'].includes(mutationRequest?.action)
+          && Object.keys(mutationRequest.campaign).length > 0
+        );
+        const explicitAdsetUpsert = explicitPromoteSocialPost || (
+          ['upsert_facebook_adset', 'build_facebook_ad_campaign'].includes(mutationRequest?.action)
           && Boolean(mutationRequest?.adset)
-          && Object.keys(mutationRequest.adset).length > 0;
-        const explicitAdUpsert = ['upsert_facebook_ad', 'build_facebook_ad_campaign'].includes(mutationRequest?.action)
+          && Object.keys(mutationRequest.adset).length > 0
+        );
+        const explicitAdUpsert = explicitPromoteSocialPost || (
+          ['upsert_facebook_ad', 'build_facebook_ad_campaign'].includes(mutationRequest?.action)
           && Boolean(mutationRequest?.ad)
-          && Object.keys(mutationRequest.ad).length > 0;
+          && Object.keys(mutationRequest.ad).length > 0
+        );
         const explicitPublish = mutationRequest?.action === 'publish_facebook_campaign'
-          || (mutationRequest?.action === 'build_facebook_ad_campaign' && mutationRequest?.publish === true);
+          || ((mutationRequest?.action === 'build_facebook_ad_campaign' || explicitPromoteSocialPost) && mutationRequest?.publish === true);
 
         return [
           {
@@ -1910,9 +2135,10 @@ function taskPackHandlers() {
               action: 'upsert_facebook_campaign',
               locationId: mutationRequest?.locationId || context.event.locationId || null,
               campaignId: mutationRequest?.campaignId || null,
-              name: mutationRequest?.campaign?.name || null,
-              objective: mutationRequest?.campaign?.objective || mutationRequest?.campaign?.goal || null,
-              status: mutationRequest?.campaign?.status || null
+              name: mutationRequest?.campaign?.name || inferredPromotionCampaignName(mutationRequest),
+              objective: mutationRequest?.campaign?.objective || mutationRequest?.campaign?.goal || inferredPromotionObjective(mutationRequest),
+              status: mutationRequest?.campaign?.status || inferredPromotionStatus(mutationRequest),
+              sourceSummaryPreview: sourcePostSummary(mutationRequest?.sourcePost)?.slice(0, 160) || null
             },
             skipIf: () => !explicitCampaignUpsert
           },
@@ -1934,8 +2160,9 @@ function taskPackHandlers() {
               locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
               campaignId: resolvedFacebookCampaignId(runtimeContext, mutationRequest),
               adsetId: mutationRequest?.adsetId || null,
-              name: mutationRequest?.adset?.name || null,
-              status: mutationRequest?.adset?.status || null
+              name: mutationRequest?.adset?.name || inferredPromotionAdsetName(mutationRequest),
+              status: mutationRequest?.adset?.status || inferredPromotionStatus(mutationRequest),
+              sourceMediaCount: facebookPromotionMediaUrls(mutationRequest).length
             }),
             skipIf: () => !explicitAdsetUpsert
           },
@@ -1958,8 +2185,10 @@ function taskPackHandlers() {
               campaignId: resolvedFacebookCampaignId(runtimeContext, mutationRequest),
               adsetId: resolvedFacebookAdsetId(runtimeContext, mutationRequest),
               adId: mutationRequest?.adId || null,
-              name: mutationRequest?.ad?.name || null,
-              status: mutationRequest?.ad?.status || null
+              name: mutationRequest?.ad?.name || inferredPromotionAdName(mutationRequest),
+              status: mutationRequest?.ad?.status || inferredPromotionStatus(mutationRequest),
+              websiteUrl: mutationRequest?.websiteUrl || null,
+              mediaUrls: facebookPromotionMediaUrls(mutationRequest)
             }),
             skipIf: () => !explicitAdUpsert
           },
@@ -1993,7 +2222,7 @@ function taskPackHandlers() {
               locationId: mutationRequest?.locationId || context.event.locationId || null,
               requestedAction: mutationRequest?.action || null
             },
-            skipIf: () => explicitEntityList || explicitCampaignFetch || explicitCampaignUpsert || explicitAdsetUpsert || explicitAdUpsert || explicitPublish
+            skipIf: () => explicitEntityList || explicitCampaignFetch || explicitCampaignUpsert || explicitAdsetUpsert || explicitAdUpsert || explicitPublish || explicitPromoteSocialPost
           }
         ];
       }

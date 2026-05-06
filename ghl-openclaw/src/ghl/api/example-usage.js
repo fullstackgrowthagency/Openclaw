@@ -291,6 +291,37 @@ export const EXAMPLE_CALLS = {
     method: 'publishCampaign',
     args: ['location-oauth', 'CAMPAIGN_ID', {}]
   },
+  promoteSocialPostToFacebookAd: {
+    adapter: 'TaskPackExecutor',
+    method: 'execute',
+    args: [{
+      taskPackName: 'facebook_ad_pack',
+      agentId: 'ghl-marketing-agent-LOCATION_ID',
+      credentialRef: 'location-oauth',
+      mode: 'dry_run',
+      event: {
+        type: 'ManualRun',
+        locationId: 'LOCATION_ID',
+        payload: {
+          mutationRequest: {
+            action: 'promote_social_post_to_facebook_ad',
+            websiteUrl: 'https://example.com/landing-page',
+            cta: 'LEARN_MORE',
+            sourcePost: {
+              theme: 'analytics clarity',
+              summary: 'If your marketing feels busy but not measurable, the fix is almost never more noise.',
+              media: [{ url: 'https://assets.example.com/post-image.png' }]
+            },
+            promotion: {
+              objective: 'OUTCOME_TRAFFIC',
+              dailyBudget: 2000,
+              status: 'PAUSED'
+            }
+          }
+        }
+      }
+    }]
+  },
   uploadMediaFile: {
     adapter: 'MediaStorageAdapter',
     method: 'uploadFile',
