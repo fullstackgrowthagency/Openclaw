@@ -24,10 +24,27 @@ export function evaluateApprovalRequirement({ step, mode, taskPack, event }) {
     requiresApproval,
     reason: requiresApproval ? reasons.join(',') : 'no_approval_required',
     reasons,
+    riskLevel: inferRiskLevel(reasons),
+    reviewHint: buildReviewHint(reasons),
     eventType: event?.type || null,
     locationId: event?.locationId || null,
     companyId: event?.companyId || null
   };
+}
+
+function inferRiskLevel(reasons) {
+  if (reasons.includes('high_risk_endpoint') || reasons.includes('high_risk_step_name')) return 'high';
+  if (reasons.includes('live_mutation_gate')) return 'high';
+  if (reasons.length >= 3) return 'medium';
+  return 'standard';
+}
+
+function buildReviewHint(reasons) {
+  if (reasons.includes('high_risk_endpoint')) return 'Verify the exact target resource before approving.';
+  if (reasons.includes('live_mutation_gate')) return 'This will perform a live write when credentials are present.';
+  if (reasons.includes('taskpack_requires_approval')) return 'Task-pack policy requires a human decision before this write step.';
+  if (reasons.includes('mutation_step')) return 'Confirm the intended write action still matches the operator goal.';
+  return 'Review the planned action before deciding.';
 }
 
 function inferMethodFromStep(step) {

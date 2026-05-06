@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-06T04:11:21.675Z",
+  "generatedAt": "2026-05-06T04:25:39.353Z",
   "scope": "agency",
   "capabilities": {
     "total": 380,
@@ -35,8 +35,15 @@
     "pending": 0,
     "approved": 0,
     "rejected": 0,
+    "pendingOver15Min": 0,
+    "pendingOver60Min": 0,
+    "pendingOver240Min": 0,
+    "oldestPendingMinutes": 0,
+    "avgDecisionMinutes": null,
+    "mostUrgent": [],
     "topReasons": [],
-    "topTaskPacks": []
+    "topTaskPacks": [],
+    "recentDecisions": []
   },
   "credentials": {
     "total": 0,
@@ -45,6 +52,10 @@
     "agencyScoped": 0,
     "locationScoped": 0,
     "topScopes": []
+  },
+  "operations": {
+    "topApprovalLocations": [],
+    "topRejectedTaskPacks": []
   },
   "risks": [
     "no_credentials_configured"

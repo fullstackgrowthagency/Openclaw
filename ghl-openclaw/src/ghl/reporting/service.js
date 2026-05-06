@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { getEnv } from '../../config/env.js';
 import { readJson, writeJson } from '../../lib/fs.js';
+import { buildApprovalStatusView } from '../approvals/presenter.js';
 import { ApprovalStore } from '../approvals/store.js';
 import { FileEncryptedStore } from '../auth/encrypted-store.js';
 import { TaskPackRunStore } from '../taskpacks/run-store.js';
@@ -29,6 +30,7 @@ export class ReportingService {
       readJson(path.join(this.env.dataDir, 'generated', 'capability-registry.json'), { capabilities: [] })
     ]);
 
+    const approvalView = buildApprovalStatusView(approvals);
     const summary = {
       generatedAt: new Date().toISOString(),
       scope: 'agency',
@@ -39,8 +41,12 @@ export class ReportingService {
       },
       webhooks: summarizeWebhooks(webhookState),
       taskpacks: summarizeRuns(runs),
-      approvals: summarizeApprovals(approvals),
+      approvals: summarizeApprovals(approvalView),
       credentials: summarizeCredentials(credentials),
+      operations: {
+        topApprovalLocations: topCounts(approvals.map((item) => item.locationId || 'agency')),
+        topRejectedTaskPacks: topCounts(runs.filter((item) => item.status === 'rejected').map((item) => item.taskPackName))
+      },
       risks: buildRiskFlags({ approvals, runs, webhookState, credentials })
     };
 
@@ -59,6 +65,7 @@ export class ReportingService {
     const locationRuns = runs.filter((item) => item.locationId === locationId);
     const locationEvents = webhookState.events.filter((item) => item.locationId === locationId);
     const locationQueue = webhookState.queue.filter((item) => item.locationId === locationId);
+    const approvalView = buildApprovalStatusView(locationApprovals);
 
     const summary = {
       generatedAt: new Date().toISOString(),
@@ -66,7 +73,7 @@ export class ReportingService {
       locationId,
       webhooks: summarizeWebhooks({ events: locationEvents, queue: locationQueue }),
       taskpacks: summarizeRuns(locationRuns),
-      approvals: summarizeApprovals(locationApprovals),
+      approvals: summarizeApprovals(approvalView),
       topEventTypes: topCounts(locationEvents.map((item) => item.type)),
       topTaskPacks: topCounts(locationRuns.map((item) => item.taskPackName))
     };
@@ -108,14 +115,23 @@ function summarizeRuns(runs) {
   };
 }
 
-function summarizeApprovals(approvals) {
+function summarizeApprovals(approvalView) {
   return {
-    total: approvals.length,
-    pending: approvals.filter((item) => item.status === 'pending').length,
-    approved: approvals.filter((item) => item.status === 'approved').length,
-    rejected: approvals.filter((item) => item.status === 'rejected').length,
-    topReasons: topCounts(approvals.map((item) => item.reason)),
-    topTaskPacks: topCounts(approvals.map((item) => item.taskPackName))
+    ...approvalView.summary,
+    topReasons: topCounts(approvalView.approvals.flatMap((item) => item.reasonLabels || [])),
+    topTaskPacks: topCounts(approvalView.approvals.map((item) => item.taskPackName)),
+    recentDecisions: approvalView.approvals
+      .filter((item) => item.status === 'approved' || item.status === 'rejected')
+      .sort((a, b) => String(b.decidedAt || '').localeCompare(String(a.decidedAt || '')))
+      .slice(0, 5)
+      .map((item) => ({
+        id: item.id,
+        status: item.status,
+        operatorSummary: item.operatorSummary,
+        decisionLatencyMinutes: item.decisionLatencyMinutes,
+        decider: item.decider,
+        locationId: item.locationId || null
+      }))
   };
 }
 
@@ -142,9 +158,12 @@ function topCounts(values, limit = 10) {
 }
 
 function buildRiskFlags({ approvals, runs, webhookState, credentials }) {
+  const approvalView = buildApprovalStatusView(approvals);
   const risks = [];
-  if (approvals.some((item) => item.status === 'pending')) risks.push('pending_approvals_exist');
+  if (approvalView.summary.pending > 0) risks.push('pending_approvals_exist');
+  if (approvalView.summary.pendingOver60Min > 0) risks.push('stale_approvals_exist');
   if (runs.some((item) => item.status === 'failed')) risks.push('failed_taskpack_runs_exist');
+  if (runs.some((item) => item.status === 'rejected')) risks.push('rejected_taskpack_runs_exist');
   if ((webhookState.queue || []).some((item) => item.status === 'dead_letter')) risks.push('webhook_dead_letter_items_exist');
   if ((webhookState.events || []).some((item) => item.duplicate)) risks.push('duplicate_webhooks_detected');
   if (!credentials.length) risks.push('no_credentials_configured');

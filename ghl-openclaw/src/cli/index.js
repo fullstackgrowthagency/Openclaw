@@ -9,6 +9,7 @@ import { renderAgentManifests } from '../ghl/agents/definitions.js';
 import { renderTaskPacks } from '../ghl/taskpacks/definitions.js';
 import { TaskPackRunStore } from '../ghl/taskpacks/run-store.js';
 import { TaskPackExecutor } from '../ghl/taskpacks/executor.js';
+import { buildApprovalStatusView, enrichApproval } from '../ghl/approvals/presenter.js';
 import { ApprovalStore } from '../ghl/approvals/store.js';
 import { CredentialBroker } from '../ghl/auth/credential-broker.js';
 import { GhlWebhookServer } from '../ghl/webhooks/server.js';
@@ -74,15 +75,23 @@ async function main() {
       return;
     }
     case 'approval:status': {
-      const summary = await approvalStore.summary();
-      console.log(JSON.stringify({ ok: true, summary }, null, 2));
+      const approvals = await approvalStore.list(1000);
+      const view = buildApprovalStatusView(approvals);
+      console.log(JSON.stringify({ ok: true, summary: view.summary }, null, 2));
       return;
     }
     case 'approval:list': {
       const limit = Number(optionalArg(args, '--limit') || 50);
       const status = optionalArg(args, '--status') || null;
       const approvals = await approvalStore.list(limit, status);
-      console.log(JSON.stringify({ ok: true, approvals }, null, 2));
+      const view = buildApprovalStatusView(approvals);
+      console.log(JSON.stringify({ ok: true, summary: view.summary, approvals: view.approvals }, null, 2));
+      return;
+    }
+    case 'approval:show': {
+      const id = requireArg(args, '--id');
+      const approval = await approvalStore.get(id);
+      console.log(JSON.stringify({ ok: Boolean(approval), approval: approval ? enrichApproval(approval) : null }, null, 2));
       return;
     }
     case 'approval:approve': {

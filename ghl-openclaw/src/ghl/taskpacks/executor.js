@@ -194,8 +194,11 @@ export class TaskPackExecutor {
                 stepKind: step.kind,
                 mutation: Boolean(step.mutation),
                 safe: Boolean(step.safe),
+                adapter: step.adapter || null,
+                adapterMethod: step.method || null,
                 pathHint: step.pathHint || null,
-                method: step.method || null,
+                riskLevel: approvalPolicy.riskLevel,
+                reviewHint: approvalPolicy.reviewHint,
                 plannedDetails: step.details || null
               }
             });
