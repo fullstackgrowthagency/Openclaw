@@ -83,6 +83,7 @@ function taskPackHandlers() {
         const explicitTagRemove = mutationRequest?.action === 'remove_contact_tags' && mutationRequest.tags.length > 0;
         const explicitTaskCreate = mutationRequest?.action === 'create_contact_task' && Boolean(mutationRequest.title);
         const explicitTaskDelete = mutationRequest?.action === 'delete_contact_task' && Boolean(mutationRequest.taskId);
+        const explicitTaskUpdate = mutationRequest?.action === 'update_contact_task' && Boolean(mutationRequest.taskId) && Boolean(mutationRequest.title) && typeof mutationRequest.completed === 'boolean';
         const explicitTaskComplete = mutationRequest?.action === 'update_contact_task_completed' && Boolean(mutationRequest.taskId) && typeof mutationRequest.completed === 'boolean';
         const explicitNoteAdd = mutationRequest?.action === 'add_contact_note' && Boolean(mutationRequest.note);
         const explicitNoteDelete = mutationRequest?.action === 'delete_contact_note' && Boolean(mutationRequest.noteId);
@@ -179,6 +180,27 @@ function taskPackHandlers() {
             skipIf: () => !contactId || !explicitTaskDelete
           },
           {
+            name: 'update_contact_task',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'updateTask',
+            httpMethod: 'PUT',
+            pathHint: '/contacts/:contactId/tasks/:taskId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), contactId, mutationRequest.taskId, {
+              title: mutationRequest.title,
+              body: mutationRequest.body || 'OpenClaw updated validation task',
+              dueDate: mutationRequest.dueDate || new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
+              ...(mutationRequest.assignedTo ? { assignedTo: mutationRequest.assignedTo } : {}),
+              completed: mutationRequest.completed
+            }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: { action: 'update_contact_task', contactId, taskId: mutationRequest?.taskId || null, title: mutationRequest?.title || null, completed: mutationRequest?.completed },
+            skipIf: () => !contactId || !explicitTaskUpdate
+          },
+          {
             name: 'update_contact_task_completed',
             kind: 'adapter_call',
             adapter: 'ContactsAdapter',
@@ -239,7 +261,7 @@ function taskPackHandlers() {
             mutation: true,
             requiresApproval: true,
             details: { action: 'possible_tag_note_task_or_opportunity', contactId },
-            skipIf: () => explicitTagAdd || explicitTagRemove || explicitTaskCreate || explicitTaskDelete || explicitTaskComplete || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
+            skipIf: () => explicitTagAdd || explicitTagRemove || explicitTaskCreate || explicitTaskDelete || explicitTaskUpdate || explicitTaskComplete || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
           }
         ];
       }

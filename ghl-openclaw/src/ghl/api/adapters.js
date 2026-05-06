@@ -63,6 +63,10 @@ export class ContactsAdapter {
     return this.client.request({ credentialRef, method: 'DELETE', path: `/contacts/${contactId}/tasks/${taskId}` });
   }
 
+  updateTask(credentialRef, contactId, taskId, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: `/contacts/${contactId}/tasks/${taskId}`, body });
+  }
+
   updateTaskCompleted(credentialRef, contactId, taskId, body) {
     return this.client.request({ credentialRef, method: 'PUT', path: `/contacts/${contactId}/tasks/${taskId}/completed`, body });
   }
