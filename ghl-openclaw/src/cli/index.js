@@ -135,7 +135,10 @@ async function main() {
       const eventType = optionalArg(args, '--event-type') || 'ManualRun';
       const locationId = optionalArg(args, '--location-id') || 'demo-location';
       const companyId = optionalArg(args, '--company-id') || 'demo-company';
-      const objectId = optionalArg(args, '--object-id') || 'demo-object';
+      const payloadJson = parseJsonArg(optionalArg(args, '--payload-json')) || {};
+      const payloadData = payloadJson.data && typeof payloadJson.data === 'object' ? payloadJson.data : {};
+      const payloadMutationRequest = payloadJson.mutationRequest && typeof payloadJson.mutationRequest === 'object' ? payloadJson.mutationRequest : {};
+      const objectId = optionalArg(args, '--object-id') || payloadData.id || payloadMutationRequest.contactId || payloadJson.objectId || 'demo-object';
       const agentId = optionalArg(args, '--agent-id') || inferAgentId(taskPackName, locationId);
       const credentialRef = optionalArg(args, '--credential-ref') || null;
       const mode = optionalArg(args, '--mode') || 'auto';
@@ -144,7 +147,13 @@ async function main() {
         locationId,
         companyId,
         objectId,
-        payload: { type: eventType, locationId, companyId, data: { id: objectId } }
+        payload: {
+          type: eventType,
+          locationId,
+          companyId,
+          ...payloadJson,
+          data: { ...payloadData, id: objectId }
+        }
       };
       const result = await taskPackExecutor.execute({ taskPackName, agentId, event, credentialRef, mode });
       console.log(JSON.stringify(result, null, 2));
@@ -311,6 +320,15 @@ function parseBooleanArg(args, name, defaultValue) {
   const value = optionalArg(args, name);
   if (value == null) return defaultValue;
   return value !== 'false' && value !== '0' && value !== 'no';
+}
+
+function parseJsonArg(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    throw new Error(`Invalid JSON argument: ${error.message}`);
+  }
 }
 
 function parseCsvArg(value) {

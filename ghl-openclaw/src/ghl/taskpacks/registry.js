@@ -4,6 +4,20 @@ function objectIdFrom(event) {
   return event?.objectId || event?.payload?.data?.id || event?.payload?.id || null;
 }
 
+function leadMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+  return {
+    action: request.action || null,
+    tags: Array.isArray(request.tags) ? request.tags.filter(Boolean) : [],
+    note: request.note || null,
+    title: request.title || null,
+    pinned: Boolean(request.pinned),
+    noteId: request.noteId || null,
+    contactId: request.contactId || objectIdFrom(event)
+  };
+}
+
 function taskPackHandlers() {
   return {
     sub_account_onboarding_pack: {
@@ -40,9 +54,15 @@ function taskPackHandlers() {
       }
     },
     lead_management_pack: {
-      trigger_events: ['ContactCreate', 'ContactUpdate', 'ContactTagUpdate', 'TaskCreate', 'NoteCreate'],
+      trigger_events: ['ContactCreate', 'ContactUpdate', 'ContactTagUpdate', 'TaskCreate', 'NoteCreate', 'ManualRun'],
       buildExecutionPlan(context) {
-        const contactId = objectIdFrom(context.event);
+        const mutationRequest = leadMutationRequestFrom(context.event);
+        const contactId = mutationRequest?.contactId || objectIdFrom(context.event);
+        const explicitTagAdd = mutationRequest?.action === 'add_contact_tags' && mutationRequest.tags.length > 0;
+        const explicitTagRemove = mutationRequest?.action === 'remove_contact_tags' && mutationRequest.tags.length > 0;
+        const explicitNoteAdd = mutationRequest?.action === 'add_contact_note' && Boolean(mutationRequest.note);
+        const explicitNoteDelete = mutationRequest?.action === 'delete_contact_note' && Boolean(mutationRequest.noteId);
+        const explicitEnrichment = mutationRequest?.action === 'enrich_contact' && (mutationRequest.tags.length > 0 || Boolean(mutationRequest.note));
         return [
           {
             name: 'fetch_contact',
@@ -61,7 +81,76 @@ function taskPackHandlers() {
             kind: 'intent',
             safe: true,
             mutation: false,
-            details: { action: 'evaluate_lead_rules', contactId }
+            details: { action: 'evaluate_lead_rules', contactId, mutationRequest }
+          },
+          {
+            name: 'apply_contact_tags',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'addTags',
+            httpMethod: 'POST',
+            pathHint: '/contacts/:contactId/tags',
+            args: () => [context.credentialRef || defaultLocationCredential(context), contactId, { tags: mutationRequest.tags }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: { action: explicitEnrichment ? 'enrich_contact:add_tags' : 'add_contact_tags', contactId, tags: mutationRequest?.tags || [] },
+            skipIf: () => !contactId || !((explicitTagAdd || explicitEnrichment) && mutationRequest.tags.length > 0)
+          },
+          {
+            name: 'remove_contact_tags',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'removeTags',
+            httpMethod: 'DELETE',
+            pathHint: '/contacts/:contactId/tags',
+            args: () => [context.credentialRef || defaultLocationCredential(context), contactId, { tags: mutationRequest.tags }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: { action: 'remove_contact_tags', contactId, tags: mutationRequest?.tags || [] },
+            skipIf: () => !contactId || !explicitTagRemove
+          },
+          {
+            name: 'add_contact_note',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'addNote',
+            httpMethod: 'POST',
+            pathHint: '/contacts/:contactId/notes',
+            args: () => [context.credentialRef || defaultLocationCredential(context), contactId, {
+              body: mutationRequest.note,
+              title: mutationRequest.title || 'OpenClaw controlled enrichment note',
+              pinned: mutationRequest.pinned || false
+            }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: explicitEnrichment ? 'enrich_contact:add_note' : 'add_contact_note',
+              contactId,
+              title: mutationRequest?.title || 'OpenClaw controlled enrichment note',
+              notePreview: mutationRequest?.note ? String(mutationRequest.note).slice(0, 120) : null
+            },
+            skipIf: () => !contactId || !((explicitNoteAdd || explicitEnrichment) && Boolean(mutationRequest.note))
+          },
+          {
+            name: 'delete_contact_note',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'deleteNote',
+            httpMethod: 'DELETE',
+            pathHint: '/contacts/:contactId/notes/:id',
+            args: () => [context.credentialRef || defaultLocationCredential(context), contactId, mutationRequest.noteId],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: { action: 'delete_contact_note', contactId, noteId: mutationRequest?.noteId || null },
+            skipIf: () => !contactId || !explicitNoteDelete
           },
           {
             name: 'plan_follow_up_write_actions',
@@ -69,7 +158,8 @@ function taskPackHandlers() {
             safe: false,
             mutation: true,
             requiresApproval: true,
-            details: { action: 'possible_tag_note_task_or_opportunity', contactId }
+            details: { action: 'possible_tag_note_task_or_opportunity', contactId },
+            skipIf: () => explicitTagAdd || explicitTagRemove || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
           }
         ];
       }
