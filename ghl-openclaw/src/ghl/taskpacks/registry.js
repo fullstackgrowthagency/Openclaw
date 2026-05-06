@@ -17,6 +17,11 @@ function leadMutationRequestFrom(event) {
     assignedTo: request.assignedTo || null,
     completed: typeof request.completed === 'boolean' ? request.completed : null,
     website: request.website ?? null,
+    customFields: Array.isArray(request.customFields)
+      ? request.customFields
+          .filter((field) => field && typeof field === 'object' && field.id)
+          .map((field) => ({ id: field.id, value: field.value ?? null }))
+      : [],
     pinned: Boolean(request.pinned),
     noteId: request.noteId || null,
     taskId: request.taskId || null,
@@ -83,6 +88,7 @@ function taskPackHandlers() {
         const explicitTagAdd = mutationRequest?.action === 'add_contact_tags' && mutationRequest.tags.length > 0;
         const explicitTagRemove = mutationRequest?.action === 'remove_contact_tags' && mutationRequest.tags.length > 0;
         const explicitContactUpdate = mutationRequest?.action === 'update_contact' && Object.prototype.hasOwnProperty.call(mutationRequest, 'website');
+        const explicitContactCustomFieldUpdate = mutationRequest?.action === 'update_contact_custom_fields' && mutationRequest.customFields.length > 0;
         const explicitTaskCreate = mutationRequest?.action === 'create_contact_task' && Boolean(mutationRequest.title);
         const explicitTaskDelete = mutationRequest?.action === 'delete_contact_task' && Boolean(mutationRequest.taskId);
         const explicitTaskUpdate = mutationRequest?.action === 'update_contact_task' && Boolean(mutationRequest.taskId) && Boolean(mutationRequest.title) && typeof mutationRequest.completed === 'boolean';
@@ -124,6 +130,21 @@ function taskPackHandlers() {
             requiresCredential: true,
             details: { action: 'update_contact', contactId, website: mutationRequest?.website },
             skipIf: () => !contactId || !explicitContactUpdate
+          },
+          {
+            name: 'update_contact_custom_fields',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'updateContact',
+            httpMethod: 'PUT',
+            pathHint: '/contacts/:contactId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), contactId, { customFields: mutationRequest.customFields }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: { action: 'update_contact_custom_fields', contactId, customFields: mutationRequest?.customFields || [] },
+            skipIf: () => !contactId || !explicitContactCustomFieldUpdate
           },
           {
             name: 'apply_contact_tags',
@@ -278,7 +299,7 @@ function taskPackHandlers() {
             mutation: true,
             requiresApproval: true,
             details: { action: 'possible_tag_note_task_or_opportunity', contactId },
-            skipIf: () => explicitContactUpdate || explicitTagAdd || explicitTagRemove || explicitTaskCreate || explicitTaskDelete || explicitTaskUpdate || explicitTaskComplete || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
+            skipIf: () => explicitContactUpdate || explicitContactCustomFieldUpdate || explicitTagAdd || explicitTagRemove || explicitTaskCreate || explicitTaskDelete || explicitTaskUpdate || explicitTaskComplete || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
           }
         ];
       }

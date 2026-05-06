@@ -79,6 +79,11 @@ export const EXAMPLE_CALLS = {
     method: 'updateContact',
     args: ['location-oauth', 'CONTACT_ID', { website: 'https://openclaw-validation.invalid' }]
   },
+  updateContactCustomFields: {
+    adapter: 'ContactsAdapter',
+    method: 'updateContact',
+    args: ['location-oauth', 'CONTACT_ID', { customFields: [{ id: 'CUSTOM_FIELD_ID', value: 'OpenClaw validation value' }] }]
+  },
   removeContactTag: {
     adapter: 'ContactsAdapter',
     method: 'removeTags',
