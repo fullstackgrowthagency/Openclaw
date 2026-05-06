@@ -15,6 +15,7 @@ Implementation scaffold for a GoHighLevel / HighLevel multi-agent control plane 
 - expanded adapter set for users, calendars, invoices, payments, products, snapshots, social planner, voice AI, and workflows
 - webhook ingestion server with signature verification, persistent dedupe store, and queue processor skeleton
 - task-pack execution engine with persistent run history and dry-run by default before credential hookup
+- approval workflow layer with persistent approval requests and mutation gating
 
 ## Quick start
 
@@ -101,6 +102,22 @@ Task-pack engine behavior:
 - performs safe adapter reads live when credentials exist
 - leaves high-risk or mutation steps as planned intents until final hookup and policy approval
 
+## Approval workflow commands
+
+```bash
+npm run approval:status
+node src/cli/index.js approval:list --status=pending --limit=50
+node src/cli/index.js approval:approve --id=APR_ID --decider=human_admin
+node src/cli/index.js approval:reject --id=APR_ID --decider=human_admin --note="Denied"
+```
+
+Approval layer behavior:
+
+- creates persistent approval requests for mutation or otherwise gated steps
+- blocks those steps from execution until approved
+- keeps safe read steps executable when credentials exist
+- preserves approval context by run, queue item, agent, task pack, location, and event type
+
 ## Output files
 
 Generated files are written to `data/generated/`.
@@ -112,6 +129,7 @@ Generated files are written to `data/generated/`.
 
 Persistent webhook state is written under `data/webhooks/`.
 Persistent task-pack runs are written under `data/taskpacks/`.
+Persistent approval requests are written under `data/approvals/`.
 
 ## Adapter coverage in this pass
 

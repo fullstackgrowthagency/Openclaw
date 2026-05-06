@@ -13,6 +13,8 @@ import {
   VoiceAiAdapter,
   WorkflowsAdapter
 } from '../api/index.js';
+import { ApprovalStore } from '../approvals/store.js';
+import { evaluateApprovalRequirement } from '../approvals/policy.js';
 import { CredentialBroker } from '../auth/credential-broker.js';
 import { TaskPackRunStore } from './run-store.js';
 import { getTaskPackDefinition } from './registry.js';
@@ -34,9 +36,14 @@ const ADAPTERS = {
 };
 
 export class TaskPackExecutor {
-  constructor({ runStore = new TaskPackRunStore(), credentialBroker = new CredentialBroker() } = {}) {
+  constructor({
+    runStore = new TaskPackRunStore(),
+    credentialBroker = new CredentialBroker(),
+    approvalStore = new ApprovalStore()
+  } = {}) {
     this.runStore = runStore;
     this.credentialBroker = credentialBroker;
+    this.approvalStore = approvalStore;
     this.adapters = Object.fromEntries(Object.entries(ADAPTERS).map(([name, Klass]) => [name, new Klass()]));
   }
 
@@ -58,11 +65,43 @@ export class TaskPackExecutor {
 
     const context = { taskPack, event, agentId, credentialRef, mode: resolvedMode, queueId };
     const plan = taskPack.buildExecutionPlan(context) || [];
+    let pendingApprovals = 0;
 
     try {
       for (const step of plan) {
         if (step.skipIf?.(context)) {
           await this.runStore.appendStep(run.id, stepResult(step, 'skipped', { reason: 'skip_condition' }));
+          continue;
+        }
+
+        const approvalPolicy = evaluateApprovalRequirement({ step, mode: resolvedMode, taskPack, event });
+        if (approvalPolicy.requiresApproval) {
+          const approval = await this.approvalStore.createRequest({
+            runId: run.id,
+            queueId,
+            taskPackName,
+            stepName: step.name,
+            agentId,
+            companyId: event.companyId || null,
+            locationId: event.locationId || null,
+            eventType: event.type,
+            mode: resolvedMode,
+            reason: approvalPolicy.reason,
+            details: {
+              stepKind: step.kind,
+              mutation: Boolean(step.mutation),
+              safe: Boolean(step.safe),
+              pathHint: step.pathHint || null,
+              method: step.method || null,
+              plannedDetails: step.details || null
+            }
+          });
+          pendingApprovals += 1;
+          await this.runStore.appendStep(run.id, stepResult(step, 'awaiting_approval', {
+            approvalId: approval.id,
+            reason: approvalPolicy.reason,
+            reasons: approvalPolicy.reasons
+          }));
           continue;
         }
 
@@ -90,7 +129,7 @@ export class TaskPackExecutor {
         await this.runStore.appendStep(run.id, stepResult(step, 'skipped', { reason: 'unknown_step_kind' }));
       }
 
-      const summary = buildSummary(taskPack, run.id, resolvedMode, event);
+      const summary = buildSummary(taskPack, run.id, resolvedMode, event, pendingApprovals);
       await this.runStore.completeRun(run.id, summary);
       return {
         ok: true,
@@ -155,7 +194,7 @@ function previewData(data) {
   return serialized.length > 500 ? `${serialized.slice(0, 500)}...` : serialized;
 }
 
-function buildSummary(taskPack, runId, mode, event) {
+function buildSummary(taskPack, runId, mode, event, pendingApprovals = 0) {
   return {
     runId,
     taskPackName: taskPack.name,
@@ -163,6 +202,7 @@ function buildSummary(taskPack, runId, mode, event) {
     eventType: event.type,
     locationId: event.locationId || null,
     companyId: event.companyId || null,
+    approvalPendingCount: pendingApprovals,
     completedAt: new Date().toISOString()
   };
 }

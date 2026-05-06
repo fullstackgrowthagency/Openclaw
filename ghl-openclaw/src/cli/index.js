@@ -7,6 +7,7 @@ import { renderAgentManifests } from '../ghl/agents/definitions.js';
 import { renderTaskPacks } from '../ghl/taskpacks/definitions.js';
 import { TaskPackRunStore } from '../ghl/taskpacks/run-store.js';
 import { TaskPackExecutor } from '../ghl/taskpacks/executor.js';
+import { ApprovalStore } from '../ghl/approvals/store.js';
 import { CredentialBroker } from '../ghl/auth/credential-broker.js';
 import { GhlWebhookServer } from '../ghl/webhooks/server.js';
 import { WebhookStore } from '../ghl/webhooks/store.js';
@@ -20,8 +21,9 @@ async function main() {
   const env = getEnv();
   await ensureDir(env.dataDir);
   const credentialBroker = new CredentialBroker();
+  const approvalStore = new ApprovalStore();
   const taskPackRunStore = new TaskPackRunStore();
-  const taskPackExecutor = new TaskPackExecutor({ runStore: taskPackRunStore, credentialBroker });
+  const taskPackExecutor = new TaskPackExecutor({ runStore: taskPackRunStore, credentialBroker, approvalStore });
   const webhookStore = new WebhookStore();
   const webhookProcessor = new WebhookProcessor({ store: webhookStore, taskPackExecutor });
 
@@ -59,6 +61,34 @@ async function main() {
       const limit = Number(optionalArg(args, '--limit') || 20);
       const runs = await taskPackRunStore.listRuns(limit);
       console.log(JSON.stringify({ ok: true, runs }, null, 2));
+      return;
+    }
+    case 'approval:status': {
+      const summary = await approvalStore.summary();
+      console.log(JSON.stringify({ ok: true, summary }, null, 2));
+      return;
+    }
+    case 'approval:list': {
+      const limit = Number(optionalArg(args, '--limit') || 50);
+      const status = optionalArg(args, '--status') || null;
+      const approvals = await approvalStore.list(limit, status);
+      console.log(JSON.stringify({ ok: true, approvals }, null, 2));
+      return;
+    }
+    case 'approval:approve': {
+      const id = requireArg(args, '--id');
+      const decider = optionalArg(args, '--decider') || 'human_admin';
+      const note = optionalArg(args, '--note') || null;
+      const approval = await approvalStore.decide(id, { decision: 'approved', decider, note });
+      console.log(JSON.stringify({ ok: Boolean(approval), approval }, null, 2));
+      return;
+    }
+    case 'approval:reject': {
+      const id = requireArg(args, '--id');
+      const decider = optionalArg(args, '--decider') || 'human_admin';
+      const note = optionalArg(args, '--note') || null;
+      const approval = await approvalStore.decide(id, { decision: 'rejected', decider, note });
+      console.log(JSON.stringify({ ok: Boolean(approval), approval }, null, 2));
       return;
     }
     case 'taskpack:run': {

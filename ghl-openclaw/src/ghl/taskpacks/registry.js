@@ -4,10 +4,6 @@ function objectIdFrom(event) {
   return event?.objectId || event?.payload?.data?.id || event?.payload?.id || null;
 }
 
-function noopArgs() {
-  return [];
-}
-
 function taskPackHandlers() {
   return {
     sub_account_onboarding_pack: {
@@ -20,6 +16,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'LocationsAdapter',
             method: 'getLocation',
+            pathHint: '/locations/:locationId',
             args: () => [context.credentialRef || 'agency-oauth', locationId],
             safe: true,
             mutation: false,
@@ -52,6 +49,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'ContactsAdapter',
             method: 'getContact',
+            pathHint: '/contacts/:contactId',
             args: () => [context.credentialRef || defaultLocationCredential(context), contactId],
             safe: true,
             mutation: false,
@@ -70,6 +68,7 @@ function taskPackHandlers() {
             kind: 'intent',
             safe: false,
             mutation: true,
+            requiresApproval: true,
             details: { action: 'possible_tag_note_task_or_opportunity', contactId }
           }
         ];
@@ -85,6 +84,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'OpportunitiesAdapter',
             method: 'getOpportunity',
+            pathHint: '/opportunities/:id',
             args: () => [context.credentialRef || defaultLocationCredential(context), opportunityId],
             safe: true,
             mutation: false,
@@ -111,6 +111,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'ConversationsAdapter',
             method: 'getConversation',
+            pathHint: '/conversations/:conversationId',
             args: () => [context.credentialRef || defaultLocationCredential(context), conversationId],
             safe: true,
             mutation: false,
@@ -136,6 +137,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'CalendarsAdapter',
             method: 'listEvents',
+            pathHint: '/calendars/events',
             args: () => [context.credentialRef || defaultLocationCredential(context), {}],
             safe: true,
             mutation: false,
@@ -160,6 +162,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'WorkflowsAdapter',
             method: 'listWorkflows',
+            pathHint: '/workflows/',
             args: () => [context.credentialRef || defaultLocationCredential(context), {}],
             safe: true,
             mutation: false,
@@ -177,6 +180,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'InvoicesAdapter',
             method: 'listInvoices',
+            pathHint: '/invoices/',
             args: () => [context.credentialRef || defaultLocationCredential(context), {}],
             safe: true,
             mutation: false,
@@ -187,6 +191,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'PaymentsAdapter',
             method: 'listTransactions',
+            pathHint: '/payments/transactions/',
             args: () => [context.credentialRef || defaultLocationCredential(context), {}],
             safe: true,
             mutation: false,
@@ -197,6 +202,7 @@ function taskPackHandlers() {
             kind: 'intent',
             safe: false,
             mutation: true,
+            requiresApproval: true,
             details: { action: 'possible_collections_or_follow_up', eventType: context.event.type }
           }
         ];
@@ -211,6 +217,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'SocialPlannerAdapter',
             method: 'listAccounts',
+            pathHint: '/social-media-posting/:locationId/accounts',
             args: () => [context.credentialRef || defaultLocationCredential(context), context.event.locationId, {}],
             safe: true,
             mutation: false,
@@ -228,6 +235,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'UsersAdapter',
             method: 'listUsers',
+            pathHint: '/users/',
             args: () => [context.credentialRef || 'agency-oauth', {}],
             safe: true,
             mutation: false,
@@ -252,6 +260,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'VoiceAiAdapter',
             method: 'listCallLogs',
+            pathHint: '/voice-ai/dashboard/call-logs',
             args: () => [context.credentialRef || defaultLocationCredential(context), {}],
             safe: true,
             mutation: false,
@@ -276,6 +285,7 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'SnapshotsAdapter',
             method: 'listSnapshots',
+            pathHint: '/snapshots',
             args: () => [context.credentialRef || 'agency-oauth', {}],
             safe: true,
             mutation: false,
