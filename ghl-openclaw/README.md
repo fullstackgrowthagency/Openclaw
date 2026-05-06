@@ -10,6 +10,8 @@ Implementation scaffold for a GoHighLevel / HighLevel multi-agent control plane 
 - credential broker skeleton for OAuth and PIT handling
 - modular task pack definitions
 - webhook routing and dedupe skeleton
+- real OAuth exchange, refresh, and agency-to-location token exchange plumbing
+- first live API adapters for locations, contacts, conversations, and opportunities
 
 ## Quick start
 
@@ -43,6 +45,24 @@ It already enforces these core rules:
 - separate agency and location capability ownership
 - keep destructive actions approval-gated
 - keep raw credentials out of agent manifests and logs
+
+## Auth commands
+
+Check auth readiness:
+
+```bash
+npm run auth:status
+```
+
+You can also call the CLI directly:
+
+```bash
+node src/cli/index.js auth:exchange-code --code=AUTH_CODE --user-type=Company
+node src/cli/index.js auth:refresh --credential-ref=agency-oauth
+node src/cli/index.js auth:location-token --credential-ref=agency-oauth --company-id=COMPANY_ID --location-id=LOCATION_ID
+```
+
+These commands only work after `.env` is configured.
 
 ## Output files
 

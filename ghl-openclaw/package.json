@@ -10,6 +10,7 @@
     "capability:refresh": "node src/cli/index.js capability:refresh",
     "agents:render": "node src/cli/index.js agents:render",
     "taskpacks:render": "node src/cli/index.js taskpacks:render",
+    "auth:status": "node src/cli/index.js auth:status",
     "bootstrap": "node src/cli/index.js bootstrap"
   }
 }
