@@ -66,6 +66,10 @@ export class ContactsAdapter {
   addTags(credentialRef, contactId, body) {
     return this.client.request({ credentialRef, method: 'POST', path: `/contacts/${contactId}/tags`, body });
   }
+
+  removeTags(credentialRef, contactId, body) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/contacts/${contactId}/tags`, body });
+  }
 }
 
 export class ConversationsAdapter {

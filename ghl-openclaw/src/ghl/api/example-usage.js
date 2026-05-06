@@ -69,6 +69,16 @@ export const EXAMPLE_CALLS = {
     method: 'createContact',
     args: ['location-oauth', { firstName: 'Ada', lastName: 'Lovelace' }]
   },
+  addContactTag: {
+    adapter: 'ContactsAdapter',
+    method: 'addTags',
+    args: ['location-oauth', 'CONTACT_ID', { tags: ['openclaw-validation'] }]
+  },
+  removeContactTag: {
+    adapter: 'ContactsAdapter',
+    method: 'removeTags',
+    args: ['location-oauth', 'CONTACT_ID', { tags: ['openclaw-validation'] }]
+  },
   createOpportunity: {
     adapter: 'OpportunitiesAdapter',
     method: 'createOpportunity',
