@@ -47,6 +47,21 @@ function opportunityMutationRequestFrom(event) {
   };
 }
 
+function conversationMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+  const normalizedMessageType = typeof request.messageType === 'string' && request.messageType.trim()
+    ? request.messageType.trim()
+    : (typeof request.type === 'string' && request.type.trim() ? request.type.trim() : null);
+  return {
+    action: request.action || null,
+    conversationId: request.conversationId || objectIdFrom(event),
+    message: typeof request.message === 'string' && request.message.trim() ? request.message : null,
+    messageType: normalizedMessageType,
+    channel: typeof request.channel === 'string' && request.channel.trim() ? request.channel.trim() : null
+  };
+}
+
 function taskPackHandlers() {
   return {
     sub_account_onboarding_pack: {
@@ -526,9 +541,14 @@ function taskPackHandlers() {
       }
     },
     conversation_management_pack: {
-      trigger_events: ['ConversationUpdate', 'ConversationUnreadWebhook', 'InboundMessage', 'OutboundMessage'],
+      trigger_events: ['ConversationUpdate', 'ConversationUnreadWebhook', 'InboundMessage', 'OutboundMessage', 'ManualRun'],
       buildExecutionPlan(context) {
-        const conversationId = objectIdFrom(context.event);
+        const mutationRequest = conversationMutationRequestFrom(context.event);
+        const conversationId = mutationRequest?.conversationId || objectIdFrom(context.event);
+        const explicitConversationSend = mutationRequest?.action === 'send_conversation_message'
+          && Boolean(mutationRequest.conversationId)
+          && Boolean(mutationRequest.message)
+          && Boolean(mutationRequest.messageType);
         return [
           {
             name: 'fetch_conversation',
@@ -543,11 +563,38 @@ function taskPackHandlers() {
             skipIf: () => !conversationId
           },
           {
+            name: 'send_conversation_message',
+            kind: 'adapter_call',
+            adapter: 'ConversationsAdapter',
+            method: 'sendMessage',
+            httpMethod: 'POST',
+            pathHint: '/conversations/messages',
+            args: () => [context.credentialRef || defaultLocationCredential(context), {
+              conversationId: mutationRequest.conversationId,
+              message: mutationRequest.message,
+              type: mutationRequest.messageType,
+              ...(mutationRequest.channel ? { channel: mutationRequest.channel } : {})
+            }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'send_conversation_message',
+              conversationId: mutationRequest?.conversationId || null,
+              messageType: mutationRequest?.messageType || null,
+              channel: mutationRequest?.channel || null,
+              messagePreview: mutationRequest?.message ? mutationRequest.message.slice(0, 120) : null
+            },
+            skipIf: () => !explicitConversationSend
+          },
+          {
             name: 'evaluate_sla_and_assignment',
             kind: 'intent',
             safe: true,
             mutation: false,
-            details: { action: 'evaluate_response_rules', conversationId }
+            details: { action: 'evaluate_response_rules', conversationId, mutationRequest },
+            skipIf: () => explicitConversationSend
           }
         ];
       }

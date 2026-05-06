@@ -159,6 +159,11 @@ export const EXAMPLE_CALLS = {
     method: 'deleteOpportunity',
     args: ['location-oauth', 'OPPORTUNITY_ID']
   },
+  sendConversationMessage: {
+    adapter: 'ConversationsAdapter',
+    method: 'sendMessage',
+    args: ['location-oauth', { conversationId: 'CONVERSATION_ID', message: 'OpenClaw validation message', type: 'SMS', channel: 'sms' }]
+  },
   createAppointment: {
     adapter: 'CalendarsAdapter',
     method: 'createAppointment',
