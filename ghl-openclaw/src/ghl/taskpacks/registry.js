@@ -187,6 +187,18 @@ function appointmentListResumeData(liveResult) {
   };
 }
 
+function appointmentCalendarListResumeData(liveResult) {
+  const appointments = collectAppointmentRecords(liveResult?.data).slice(0, 100);
+  return {
+    appointments,
+    raw: liveResult?.data || null,
+    bestEffort: true,
+    warning: appointments.length === 0
+      ? 'Calendar-scoped /calendars/events may return false-empty results in live HighLevel responses. Prefer contact-scoped listing when a contact is known.'
+      : null
+  };
+}
+
 function appointmentFreeSlotsResumeData(liveResult) {
   return {
     slots: collectAppointmentSlotStartTimes(liveResult?.data).slice(0, 200),
@@ -1189,11 +1201,13 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             requiresCredential: true,
-            resumeData: appointmentListResumeData,
+            resumeData: appointmentCalendarListResumeData,
             details: (runtimeContext) => ({
               ...resolvedAppointmentListDetails(runtimeContext, mutationRequest),
               path: '/calendars/events',
-              strategy: 'calendar_events'
+              strategy: 'calendar_events',
+              bestEffort: true,
+              recommendation: 'Prefer contact-scoped listing when contactId or contactName is available.'
             }),
             skipIf: () => !explicitListAppointments || Boolean(resolvedAppointmentListContactId(context, mutationRequest))
           },
