@@ -1,0 +1,37 @@
+{
+  "generatedAt": "2026-05-06T03:41:13.001Z",
+  "scope": "location",
+  "locationId": "demo-location",
+  "webhooks": {
+    "totalEvents": 0,
+    "duplicateEvents": 0,
+    "processedEvents": 0,
+    "deadLetterEvents": 0,
+    "queuePending": 0,
+    "queueProcessing": 0,
+    "queueProcessed": 0,
+    "queueDeadLetter": 0,
+    "topEventTypes": []
+  },
+  "taskpacks": {
+    "totalRuns": 0,
+    "completedRuns": 0,
+    "failedRuns": 0,
+    "runningRuns": 0,
+    "dryRunCount": 0,
+    "liveRunCount": 0,
+    "awaitingApprovalSteps": 0,
+    "topTaskPacks": [],
+    "topAgents": []
+  },
+  "approvals": {
+    "total": 0,
+    "pending": 0,
+    "approved": 0,
+    "rejected": 0,
+    "topReasons": [],
+    "topTaskPacks": []
+  },
+  "topEventTypes": [],
+  "topTaskPacks": []
+}

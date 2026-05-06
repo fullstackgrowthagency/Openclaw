@@ -1,0 +1,19 @@
+{
+  "generatedAt": "2026-05-06T03:41:13.154Z",
+  "compliance": {
+    "pendingApprovals": 0,
+    "rejectedApprovals": 0,
+    "failedRuns": 0,
+    "deadLetterQueue": 0,
+    "duplicateWebhookEvents": 0,
+    "credentialCount": 0
+  },
+  "findings": [
+    {
+      "severity": "medium",
+      "code": "NO_CREDENTIALS",
+      "message": "No credentials are configured yet."
+    }
+  ],
+  "byLocation": []
+}

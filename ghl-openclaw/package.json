@@ -12,6 +12,8 @@
     "taskpacks:render": "node src/cli/index.js taskpacks:render",
     "taskpack:status": "node src/cli/index.js taskpack:status",
     "approval:status": "node src/cli/index.js approval:status",
+    "report:generate": "node src/cli/index.js report:generate",
+    "audit:status": "node src/cli/index.js audit:status",
     "auth:status": "node src/cli/index.js auth:status",
     "webhook:status": "node src/cli/index.js webhook:status",
     "webhook:serve": "node src/cli/index.js webhook:serve",

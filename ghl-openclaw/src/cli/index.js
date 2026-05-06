@@ -2,7 +2,9 @@
 import path from 'node:path';
 import { getEnv } from '../config/env.js';
 import { ensureDir, writeJson } from '../lib/fs.js';
+import { AuditService } from '../ghl/audit/service.js';
 import { refreshCapabilityRegistry } from '../ghl/docs/capability-registry.js';
+import { ReportingService } from '../ghl/reporting/service.js';
 import { renderAgentManifests } from '../ghl/agents/definitions.js';
 import { renderTaskPacks } from '../ghl/taskpacks/definitions.js';
 import { TaskPackRunStore } from '../ghl/taskpacks/run-store.js';
@@ -26,6 +28,8 @@ async function main() {
   const taskPackExecutor = new TaskPackExecutor({ runStore: taskPackRunStore, credentialBroker, approvalStore });
   const webhookStore = new WebhookStore();
   const webhookProcessor = new WebhookProcessor({ store: webhookStore, taskPackExecutor });
+  const reportingService = new ReportingService({ approvalStore, credentialStore: credentialBroker.encryptedStore, taskPackRunStore, webhookStore });
+  const auditService = new AuditService({ approvalStore, credentialStore: credentialBroker.encryptedStore, taskPackRunStore, webhookStore });
 
   switch (command) {
     case 'bootstrap': {
@@ -89,6 +93,19 @@ async function main() {
       const note = optionalArg(args, '--note') || null;
       const approval = await approvalStore.decide(id, { decision: 'rejected', decider, note });
       console.log(JSON.stringify({ ok: Boolean(approval), approval }, null, 2));
+      return;
+    }
+    case 'report:generate': {
+      const locationId = optionalArg(args, '--location-id') || null;
+      const report = locationId
+        ? await reportingService.buildLocationSummary(locationId)
+        : await reportingService.buildAgencySummary();
+      console.log(JSON.stringify({ ok: true, report }, null, 2));
+      return;
+    }
+    case 'audit:status': {
+      const audit = await auditService.buildAuditStatus();
+      console.log(JSON.stringify({ ok: true, audit }, null, 2));
       return;
     }
     case 'taskpack:run': {

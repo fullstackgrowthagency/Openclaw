@@ -16,6 +16,7 @@ Implementation scaffold for a GoHighLevel / HighLevel multi-agent control plane 
 - webhook ingestion server with signature verification, persistent dedupe store, and queue processor skeleton
 - task-pack execution engine with persistent run history and dry-run by default before credential hookup
 - approval workflow layer with persistent approval requests and mutation gating
+- reporting and audit services with generated agency/location summaries and compliance findings
 
 ## Quick start
 
@@ -118,6 +119,21 @@ Approval layer behavior:
 - keeps safe read steps executable when credentials exist
 - preserves approval context by run, queue item, agent, task pack, location, and event type
 
+## Reporting and audit commands
+
+```bash
+npm run report:generate
+node src/cli/index.js report:generate --location-id=demo-location
+npm run audit:status
+```
+
+Reporting and audit behavior:
+
+- generates agency-level runtime summaries from webhook, task-pack, approval, credential, and capability state
+- generates per-location summaries when `--location-id` is provided
+- produces compliance findings for pending approvals, failed runs, dead-letter webhook items, duplicates, and missing credentials
+- writes generated outputs under `data/generated/`
+
 ## Output files
 
 Generated files are written to `data/generated/`.
@@ -130,6 +146,12 @@ Generated files are written to `data/generated/`.
 Persistent webhook state is written under `data/webhooks/`.
 Persistent task-pack runs are written under `data/taskpacks/`.
 Persistent approval requests are written under `data/approvals/`.
+
+Generated service outputs include:
+
+- `data/generated/agency-report.json`
+- `data/generated/location-report-<locationId>.json`
+- `data/generated/audit-status.json`
 
 ## Adapter coverage in this pass
 
