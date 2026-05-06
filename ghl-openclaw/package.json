@@ -1,0 +1,15 @@
+{
+  "name": "ghl-openclaw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenClaw control plane scaffold for GoHighLevel / HighLevel multi-agent operations",
+  "scripts": {
+    "start": "node src/cli/index.js status",
+    "status": "node src/cli/index.js status",
+    "capability:refresh": "node src/cli/index.js capability:refresh",
+    "agents:render": "node src/cli/index.js agents:render",
+    "taskpacks:render": "node src/cli/index.js taskpacks:render",
+    "bootstrap": "node src/cli/index.js bootstrap"
+  }
+}

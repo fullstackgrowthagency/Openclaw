@@ -1,0 +1,1767 @@
+[
+  {
+    "category": "oauth",
+    "resource": "oauth_2_0",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/oauth/oauth-2-0/",
+    "accessLevel": "agency",
+    "tokenTypes": [
+      "oauth_access_token"
+    ],
+    "scopeHint": "oauth.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:46.542Z",
+    "statusCode": 200,
+    "fingerprint": "08e4bdb5c63171310f2c7bd0bb88b994bc37f835267d19c38e1830fd7071e8ae",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "08e4bdb5c63171310f2c7bd0bb88b994bc37f835267d19c38e1830fd7071e8ae"
+  },
+  {
+    "category": "authorization",
+    "resource": "private_integration_tokens",
+    "url": "https://marketplace.gohighlevel.com/docs/Authorization/PrivateIntegrationsToken",
+    "accessLevel": "both",
+    "tokenTypes": [
+      "private_integration_token"
+    ],
+    "scopeHint": "ui_managed",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:46.915Z",
+    "statusCode": 200,
+    "fingerprint": "5bb68490a6477ca91284179ce5aaf97505a4375295836f3fb56d751982a53dad",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "5bb68490a6477ca91284179ce5aaf97505a4375295836f3fb56d751982a53dad"
+  },
+  {
+    "category": "authorization",
+    "resource": "scopes",
+    "url": "https://marketplace.gohighlevel.com/docs/Authorization/Scopes/",
+    "accessLevel": "both",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "all",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:47.182Z",
+    "statusCode": 200,
+    "fingerprint": "bd9254d45da5046daf4a39785f91669360cbae1ffc3850971a643d6a3ef83e4d",
+    "version": "2023-02-21",
+    "endpoints": [
+      {
+        "method": "GET",
+        "path": "/ad-publishing/campaigns"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/markup"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/subscriptions"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/onboarding"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/reporting"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/reporting/campaign/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/reporting/list"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/oauth/start"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/me"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/pages"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/page/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/ad-accounts"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/ad-accounts/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/integration"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/ads/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/pixels"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/custom-audience"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/ad-insights"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/max-budget"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/whatsapp-numbers"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/conversation-forms"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/custom-audience/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/lead-form/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/entity"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/campaign/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/facebook/ad/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/reporting"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/reporting/list"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/reporting/campaign/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/conversions"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/ad-accounts"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/ad-accounts/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/integration"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/me"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/ads/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/targeting/search"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/conversions/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/assets"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/entity"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/target-interests"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/segments"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/segments/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/audiences"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/audiences/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/google/conversion-goals"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/reselling/subscription/location/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/reselling/subscription/company/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/reselling/configuration/company/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/reselling/configuration/location/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/reselling/affiliate-code/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/reselling/feedback/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/snapshots/ads/list"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/snapshots/ads/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/integration"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/ad-accounts"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/ad-account"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/me"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/ads/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/targeting/search"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/reporting"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/reporting/list"
+      },
+      {
+        "method": "GET",
+        "path": "/ad-publishing/linkedin/reporting/campaign-group/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/google/keyword-ideas"
+      },
+      {
+        "method": "PATCH",
+        "path": "/ad-publishing/ad/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/plan"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/subscribe"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/ad/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/ads/discard"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/page/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/facebook/ad-accounts/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/integration"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/facebook/integration"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/facebook/ads"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/ads/publish"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/facebook/page"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/facebook/pixels"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/pixels/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/custom-audience"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/facebook/custom-audience/"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/facebook/custom-audience/"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/facebook/page/default"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/conversation-forms"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/widgets"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/campaigns/"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/facebook/campaigns"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/facebook/adsets"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/facebook/ads-v2"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/facebook/campaigns/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/adsets/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/facebook/adsets/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/ads/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/facebook/ads/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/custom-audience/execute"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/facebook/ad/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/google/conversion-click"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/google/ad-accounts/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/google/integration"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/google/integration"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/google/ads/"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/google/ads"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/google/conversions/"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/google/conversions"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/google/assets"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/google/widgets"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/google/segments/"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/google/segments"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/google/segments/offline-user-list-job"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/google/segments/execute"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/google/audiences"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/reselling/subscription/location/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/reselling/subscription/company/"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/reselling/configuration/location/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/reselling/unsubscribe/location/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/reselling/location/"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/snapshots/ads/check-conflicts"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/snapshots/ads/load-snapshot"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/linkedin/integration"
+      },
+      {
+        "method": "DELETE",
+        "path": "/ad-publishing/linkedin/ad-account"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/linkedin/ads/"
+      },
+      {
+        "method": "PUT",
+        "path": "/ad-publishing/linkedin/ads"
+      },
+      {
+        "method": "POST",
+        "path": "/ad-publishing/linkedin/"
+      },
+      {
+        "method": "PATCH",
+        "path": "/ad-publishing/linkedin/"
+      },
+      {
+        "method": "GET",
+        "path": "/businesses"
+      },
+      {
+        "method": "GET",
+        "path": "/businesses/"
+      },
+      {
+        "method": "POST",
+        "path": "/businesses"
+      },
+      {
+        "method": "PUT",
+        "path": "/businesses/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/businesses/"
+      },
+      {
+        "method": "POST",
+        "path": "/calendars/"
+      },
+      {
+        "method": "PUT",
+        "path": "/calendars/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/calendars/"
+      },
+      {
+        "method": "GET",
+        "path": "/calendars/"
+      },
+      {
+        "method": "GET",
+        "path": "/calendars/groups"
+      },
+      {
+        "method": "POST",
+        "path": "/calendars/groups"
+      },
+      {
+        "method": "POST",
+        "path": "/calendars/groups/validate-slug"
+      },
+      {
+        "method": "DELETE",
+        "path": "/calendars/groups/"
+      },
+      {
+        "method": "PUT",
+        "path": "/calendars/groups/"
+      },
+      {
+        "method": "GET",
+        "path": "/calendars/resources/"
+      },
+      {
+        "method": "POST",
+        "path": "/calendars/resources"
+      },
+      {
+        "method": "PUT",
+        "path": "/calendars/resources/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/calendars/resources/"
+      },
+      {
+        "method": "GET",
+        "path": "/calendars/events/appointments/"
+      },
+      {
+        "method": "GET",
+        "path": "/calendars/events"
+      },
+      {
+        "method": "GET",
+        "path": "/calendars/blocked-slots"
+      },
+      {
+        "method": "DELETE",
+        "path": "/calendars/events/"
+      },
+      {
+        "method": "POST",
+        "path": "/calendars/events/block-slots"
+      },
+      {
+        "method": "PUT",
+        "path": "/calendars/events/block-slots/"
+      },
+      {
+        "method": "POST",
+        "path": "/calendars/events/appointments"
+      },
+      {
+        "method": "PUT",
+        "path": "/calendars/events/appointments"
+      },
+      {
+        "method": "GET",
+        "path": "/campaigns/"
+      },
+      {
+        "method": "GET",
+        "path": "/contacts/"
+      },
+      {
+        "method": "GET",
+        "path": "/contacts/business/"
+      },
+      {
+        "method": "POST",
+        "path": "/contacts/"
+      },
+      {
+        "method": "PUT",
+        "path": "/contacts/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/contacts/"
+      },
+      {
+        "method": "GET",
+        "path": "/objects/"
+      },
+      {
+        "method": "GET",
+        "path": "/objects"
+      },
+      {
+        "method": "POST",
+        "path": "/objects/"
+      },
+      {
+        "method": "PUT",
+        "path": "/objects/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/objects/"
+      },
+      {
+        "method": "GET",
+        "path": "/conversations/"
+      },
+      {
+        "method": "GET",
+        "path": "/conversations/search"
+      },
+      {
+        "method": "POST",
+        "path": "/conversations/"
+      },
+      {
+        "method": "PUT",
+        "path": "/conversations/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/conversations/"
+      },
+      {
+        "method": "POST",
+        "path": "/conversations/messages"
+      },
+      {
+        "method": "POST",
+        "path": "/conversations/messages/inbound"
+      },
+      {
+        "method": "POST",
+        "path": "/conversations/messages/upload"
+      },
+      {
+        "method": "PUT",
+        "path": "/conversations/messages/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/conversations/messages/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/conversations/messages/email/"
+      },
+      {
+        "method": "GET",
+        "path": "/forms/"
+      },
+      {
+        "method": "GET",
+        "path": "/forms/submissions"
+      },
+      {
+        "method": "POST",
+        "path": "/forms/upload-custom-files"
+      },
+      {
+        "method": "GET",
+        "path": "/invoices/"
+      },
+      {
+        "method": "GET",
+        "path": "/invoices/generate-invoice-number"
+      },
+      {
+        "method": "POST",
+        "path": "/invoices"
+      },
+      {
+        "method": "PUT",
+        "path": "/invoices/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/invoices/"
+      },
+      {
+        "method": "POST",
+        "path": "/invoices/"
+      },
+      {
+        "method": "POST",
+        "path": "/invoices/text2pay"
+      },
+      {
+        "method": "GET",
+        "path": "/invoices/schedule/"
+      },
+      {
+        "method": "POST",
+        "path": "/invoices/schedule"
+      },
+      {
+        "method": "PUT",
+        "path": "/invoices/schedule/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/invoices/schedule/"
+      },
+      {
+        "method": "POST",
+        "path": "/invoices/schedule/"
+      },
+      {
+        "method": "GET",
+        "path": "/invoices/template/"
+      },
+      {
+        "method": "POST",
+        "path": "/invoices/template/"
+      },
+      {
+        "method": "PUT",
+        "path": "/invoices/template/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/invoices/template/"
+      },
+      {
+        "method": "GET",
+        "path": "/invoices/estimate/number/generate"
+      },
+      {
+        "method": "GET",
+        "path": "/invoices/estimate/list"
+      },
+      {
+        "method": "GET",
+        "path": "/invoices/estimate/template"
+      },
+      {
+        "method": "GET",
+        "path": "/invoices/estimate/template/preview"
+      },
+      {
+        "method": "POST",
+        "path": "/invoices/estimate"
+      },
+      {
+        "method": "POST",
+        "path": "/invoices/estimate/"
+      },
+      {
+        "method": "POST",
+        "path": "/invoices/estimate/template"
+      },
+      {
+        "method": "PUT",
+        "path": "/invoices/estimate/"
+      },
+      {
+        "method": "PUT",
+        "path": "/invoices/estimate/template/"
+      },
+      {
+        "method": "PATCH",
+        "path": "/invoices/estimate/stats/last-visited-at"
+      },
+      {
+        "method": "DELETE",
+        "path": "/invoices/estimate/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/invoices/estimate/template/"
+      },
+      {
+        "method": "GET",
+        "path": "/links/"
+      },
+      {
+        "method": "POST",
+        "path": "/links/"
+      },
+      {
+        "method": "PUT",
+        "path": "/links/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/links/"
+      },
+      {
+        "method": "GET",
+        "path": "/locations/"
+      },
+      {
+        "method": "GET",
+        "path": "/locations/search"
+      },
+      {
+        "method": "GET",
+        "path": "/locations/timeZones"
+      },
+      {
+        "method": "POST",
+        "path": "/locations/"
+      },
+      {
+        "method": "PUT",
+        "path": "/locations/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/locations/"
+      },
+      {
+        "method": "GET",
+        "path": "/custom-fields/"
+      },
+      {
+        "method": "GET",
+        "path": "/custom-field/object-key/"
+      },
+      {
+        "method": "GET",
+        "path": "/medias/files"
+      },
+      {
+        "method": "POST",
+        "path": "/medias/upload-file"
+      },
+      {
+        "method": "GET",
+        "path": "/funnels/lookup/redirect/list"
+      },
+      {
+        "method": "POST",
+        "path": "/funnels/lookup/redirect"
+      },
+      {
+        "method": "GET",
+        "path": "/funnels/page"
+      },
+      {
+        "method": "GET",
+        "path": "/funnels/funnel/list"
+      },
+      {
+        "method": "GET",
+        "path": "/funnels/page/count"
+      },
+      {
+        "method": "DELETE",
+        "path": "/funnels/lookup/redirect/"
+      },
+      {
+        "method": "PATCH",
+        "path": "/funnels/lookup/redirect/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/medias/"
+      },
+      {
+        "method": "GET",
+        "path": "/opportunities/search"
+      },
+      {
+        "method": "GET",
+        "path": "/opportunities/"
+      },
+      {
+        "method": "GET",
+        "path": "/opportunities/pipelines"
+      },
+      {
+        "method": "DELETE",
+        "path": "/opportunities/"
+      },
+      {
+        "method": "PUT",
+        "path": "/opportunities/"
+      },
+      {
+        "method": "POST",
+        "path": "/opportunities"
+      },
+      {
+        "method": "GET",
+        "path": "/payments/integrations/provider/whitelabel"
+      },
+      {
+        "method": "POST",
+        "path": "/payments/integrations/provider/whitelabel"
+      },
+      {
+        "method": "GET",
+        "path": "/payments/orders/"
+      },
+      {
+        "method": "POST",
+        "path": "/payments/orders/"
+      },
+      {
+        "method": "GET",
+        "path": "/payments/transactions/"
+      },
+      {
+        "method": "GET",
+        "path": "/payments/subscriptions/"
+      },
+      {
+        "method": "GET",
+        "path": "/payments/coupon/list"
+      },
+      {
+        "method": "GET",
+        "path": "/payments/coupon"
+      },
+      {
+        "method": "POST",
+        "path": "/payments/coupon"
+      },
+      {
+        "method": "PUT",
+        "path": "/payments/coupon"
+      },
+      {
+        "method": "DELETE",
+        "path": "/payments/coupon"
+      },
+      {
+        "method": "GET",
+        "path": "/payments/custom-provider/connect"
+      },
+      {
+        "method": "POST",
+        "path": "/payments/custom-provider/provider"
+      },
+      {
+        "method": "POST",
+        "path": "/payments/custom-provider/connect"
+      },
+      {
+        "method": "POST",
+        "path": "/payments/custom-provider/disconnect"
+      },
+      {
+        "method": "PUT",
+        "path": "/payments/custom-provider/capabilities"
+      },
+      {
+        "method": "DELETE",
+        "path": "/payments/custom-provider/provider"
+      },
+      {
+        "method": "GET",
+        "path": "/products/"
+      },
+      {
+        "method": "GET",
+        "path": "/products/store/"
+      },
+      {
+        "method": "GET",
+        "path": "/products/reviews"
+      },
+      {
+        "method": "GET",
+        "path": "/products/reviews/count"
+      },
+      {
+        "method": "POST",
+        "path": "/products/"
+      },
+      {
+        "method": "PUT",
+        "path": "/products/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/products/"
+      },
+      {
+        "method": "POST",
+        "path": "/products/bulk-update"
+      },
+      {
+        "method": "POST",
+        "path": "/products/store/"
+      },
+      {
+        "method": "POST",
+        "path": "/products/reviews/bulk-update"
+      },
+      {
+        "method": "PUT",
+        "path": "/products/reviews/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/products/reviews/"
+      },
+      {
+        "method": "GET",
+        "path": "/products/collections"
+      },
+      {
+        "method": "GET",
+        "path": "/products/collections/"
+      },
+      {
+        "method": "POST",
+        "path": "/products/collections"
+      },
+      {
+        "method": "PUT",
+        "path": "/products/collections/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/products/collections/"
+      },
+      {
+        "method": "GET",
+        "path": "/oauth/installedLocations"
+      },
+      {
+        "method": "POST",
+        "path": "/oauth/locationToken"
+      },
+      {
+        "method": "DELETE",
+        "path": "/marketplace/app/"
+      },
+      {
+        "method": "PUT",
+        "path": "/update-saas-subscription/"
+      },
+      {
+        "method": "POST",
+        "path": "/enable-saas/"
+      },
+      {
+        "method": "GET",
+        "path": "/locations"
+      },
+      {
+        "method": "POST",
+        "path": "/bulk-disable-saas/"
+      },
+      {
+        "method": "GET",
+        "path": "/snapshots"
+      },
+      {
+        "method": "GET",
+        "path": "/snapshots/snapshot-status/"
+      },
+      {
+        "method": "POST",
+        "path": "/snapshots/share/link"
+      },
+      {
+        "method": "GET",
+        "path": "/social-media-posting/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/social-media-posting/"
+      },
+      {
+        "method": "POST",
+        "path": "/social-media-posting/"
+      },
+      {
+        "method": "PATCH",
+        "path": "/social-media-posting/"
+      },
+      {
+        "method": "GET",
+        "path": "/social-media-posting/oauth/facebook/start"
+      },
+      {
+        "method": "GET",
+        "path": "/social-media-posting/oauth/"
+      },
+      {
+        "method": "GET",
+        "path": "/social-media-posting/oauth/google/start"
+      },
+      {
+        "method": "GET",
+        "path": "/social-media-posting/oauth/instagram/start"
+      },
+      {
+        "method": "GET",
+        "path": "/social-media-posting/oauth/linkedin/start"
+      },
+      {
+        "method": "GET",
+        "path": "/social-media-posting/oauth/tiktok/start"
+      },
+      {
+        "method": "GET",
+        "path": "/social-media-posting/oauth/tiktok-business/start"
+      },
+      {
+        "method": "GET",
+        "path": "/social-media-posting/oauth/twitter/start"
+      },
+      {
+        "method": "POST",
+        "path": "/social-media-posting/oauth/"
+      },
+      {
+        "method": "PUT",
+        "path": "/social-media-posting/"
+      },
+      {
+        "method": "POST",
+        "path": "/social-media-posting/statistics"
+      },
+      {
+        "method": "GET",
+        "path": "/surveys/"
+      },
+      {
+        "method": "GET",
+        "path": "/surveys/submissions"
+      },
+      {
+        "method": "GET",
+        "path": "/users/"
+      },
+      {
+        "method": "POST",
+        "path": "/users/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/users/"
+      },
+      {
+        "method": "PUT",
+        "path": "/users/"
+      },
+      {
+        "method": "GET",
+        "path": "/workflows/"
+      },
+      {
+        "method": "POST",
+        "path": "/blogs/posts"
+      },
+      {
+        "method": "PUT",
+        "path": "/blogs/posts/"
+      },
+      {
+        "method": "GET",
+        "path": "/blogs/posts/url-slug-exists"
+      },
+      {
+        "method": "GET",
+        "path": "/blogs/categories"
+      },
+      {
+        "method": "GET",
+        "path": "/blogs/authors"
+      },
+      {
+        "method": "GET",
+        "path": "/companies/"
+      },
+      {
+        "method": "GET",
+        "path": "/associations/key/"
+      },
+      {
+        "method": "GET",
+        "path": "/associations/objectKey/"
+      },
+      {
+        "method": "GET",
+        "path": "/associations/"
+      },
+      {
+        "method": "POST",
+        "path": "/associations/"
+      },
+      {
+        "method": "PUT",
+        "path": "/associations/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/associations/"
+      },
+      {
+        "method": "GET",
+        "path": "/associations/relations/"
+      },
+      {
+        "method": "POST",
+        "path": "/associations/relations"
+      },
+      {
+        "method": "GET",
+        "path": "/emails/builder"
+      },
+      {
+        "method": "POST",
+        "path": "/emails/builder"
+      },
+      {
+        "method": "POST",
+        "path": "/emails/builder/data"
+      },
+      {
+        "method": "DELETE",
+        "path": "/emails/builder/"
+      },
+      {
+        "method": "GET",
+        "path": "/emails/schedule"
+      },
+      {
+        "method": "GET",
+        "path": "/custom-menus/"
+      },
+      {
+        "method": "POST",
+        "path": "/custom-menus/"
+      },
+      {
+        "method": "PUT",
+        "path": "/custom-menus/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/custom-menus/"
+      },
+      {
+        "method": "GET",
+        "path": "/proposals/document"
+      },
+      {
+        "method": "POST",
+        "path": "/proposals/document/send"
+      },
+      {
+        "method": "GET",
+        "path": "/proposals/templates"
+      },
+      {
+        "method": "POST",
+        "path": "/proposals/templates/send"
+      },
+      {
+        "method": "GET",
+        "path": "/marketplace/app/"
+      },
+      {
+        "method": "GET",
+        "path": "/marketplace/billing/charges"
+      },
+      {
+        "method": "GET",
+        "path": "/marketplace/billing/charges/"
+      },
+      {
+        "method": "GET",
+        "path": "/marketplace/billing/charges/has-funds"
+      },
+      {
+        "method": "POST",
+        "path": "/marketplace/billing/charges"
+      },
+      {
+        "method": "DELETE",
+        "path": "/marketplace/billing/charges/"
+      },
+      {
+        "method": "GET",
+        "path": "/voice-ai/dashboard/call-logs"
+      },
+      {
+        "method": "GET",
+        "path": "/voice-ai/dashboard/call-logs/"
+      },
+      {
+        "method": "GET",
+        "path": "/voice-ai/agents"
+      },
+      {
+        "method": "GET",
+        "path": "/voice-ai/agents/"
+      },
+      {
+        "method": "POST",
+        "path": "/voice-ai/agents"
+      },
+      {
+        "method": "PATCH",
+        "path": "/voice-ai/agents/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/voice-ai/agents/"
+      },
+      {
+        "method": "GET",
+        "path": "/voice-ai/actions/"
+      },
+      {
+        "method": "POST",
+        "path": "/voice-ai/actions"
+      },
+      {
+        "method": "PUT",
+        "path": "/voice-ai/actions/"
+      },
+      {
+        "method": "DELETE",
+        "path": "/voice-ai/actions/"
+      },
+      {
+        "method": "GET",
+        "path": "/phone-system/numbers/location/"
+      },
+      {
+        "method": "GET",
+        "path": "/phone-system/number-pools"
+      }
+    ],
+    "rateLimitHints": [],
+    "bodyHash": "bd9254d45da5046daf4a39785f91669360cbae1ffc3850971a643d6a3ef83e4d"
+  },
+  {
+    "category": "webhooks",
+    "resource": "integration_guide",
+    "url": "https://marketplace.gohighlevel.com/docs/webhook/WebhookIntegrationGuide",
+    "accessLevel": "agency",
+    "tokenTypes": [
+      "oauth_access_token"
+    ],
+    "scopeHint": "webhook",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:47.495Z",
+    "statusCode": 200,
+    "fingerprint": "805c107d7d13994661f8998c753b1bab38b38656f3c4ce12be1b1f4c51f20b37",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "805c107d7d13994661f8998c753b1bab38b38656f3c4ce12be1b1f4c51f20b37"
+  },
+  {
+    "category": "webhooks",
+    "resource": "logs_dashboard",
+    "url": "https://marketplace.gohighlevel.com/docs/webhook/WebhookLogsDashboard",
+    "accessLevel": "agency",
+    "tokenTypes": [
+      "oauth_access_token"
+    ],
+    "scopeHint": "webhook",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:47.840Z",
+    "statusCode": 200,
+    "fingerprint": "9fc7ed4f1a24f08a5e03223568efb2f9de72b7e44fdf93a539c6c9e6b88847c2",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "9fc7ed4f1a24f08a5e03223568efb2f9de72b7e44fdf93a539c6c9e6b88847c2"
+  },
+  {
+    "category": "contacts",
+    "resource": "contacts",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/contacts/contacts",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "contacts.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:48.510Z",
+    "statusCode": 200,
+    "fingerprint": "64692e5804e02030139dbce89203fe3042d1e133472f445f01ddfa21d65a258a",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "64692e5804e02030139dbce89203fe3042d1e133472f445f01ddfa21d65a258a"
+  },
+  {
+    "category": "conversations",
+    "resource": "conversations",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/conversations/conversations",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "conversations.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:48.876Z",
+    "statusCode": 200,
+    "fingerprint": "86acbc8aac8548c50f87d0703a843d63458dba4891e008dc186a474a6b621df8",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "86acbc8aac8548c50f87d0703a843d63458dba4891e008dc186a474a6b621df8"
+  },
+  {
+    "category": "calendars",
+    "resource": "calendars",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/calendars/calendars",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "calendars.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:49.225Z",
+    "statusCode": 200,
+    "fingerprint": "93d08da19f5b0a842c28748b3b19295b0462d3efaf2be545114173dcc1b5e157",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "93d08da19f5b0a842c28748b3b19295b0462d3efaf2be545114173dcc1b5e157"
+  },
+  {
+    "category": "locations",
+    "resource": "sub_accounts",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/locations/sub-account-formerly-location-api",
+    "accessLevel": "agency",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "locations.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:49.539Z",
+    "statusCode": 200,
+    "fingerprint": "732800f1fdd7a8831270fd49282e8ca98e155bdae7afe4a9ff66a8a9bbfb70ca",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "732800f1fdd7a8831270fd49282e8ca98e155bdae7afe4a9ff66a8a9bbfb70ca"
+  },
+  {
+    "category": "opportunities",
+    "resource": "opportunities",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/opportunities/opportunities",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "opportunities.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:49.910Z",
+    "statusCode": 200,
+    "fingerprint": "95a8fbe3a7ccd37292056ce21986ba142e814dbafb9754b1e060789a2b05de5c",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "95a8fbe3a7ccd37292056ce21986ba142e814dbafb9754b1e060789a2b05de5c"
+  },
+  {
+    "category": "payments",
+    "resource": "payments",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/payments/payments-api",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "payments/*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:50.246Z",
+    "statusCode": 200,
+    "fingerprint": "b25a155ac894113dca2d6a3da8abad865d06812863adc26826c4211ce568686c",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "b25a155ac894113dca2d6a3da8abad865d06812863adc26826c4211ce568686c"
+  },
+  {
+    "category": "products",
+    "resource": "products",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/products/products-api",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "products.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:50.615Z",
+    "statusCode": 200,
+    "fingerprint": "dfde3e29292f058c58d23e7db489f62bb80ac7bc09d1a23a0369d6e3c873d9c0",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "dfde3e29292f058c58d23e7db489f62bb80ac7bc09d1a23a0369d6e3c873d9c0"
+  },
+  {
+    "category": "invoices",
+    "resource": "invoices",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/invoices/invoice-api",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "invoices.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:50.940Z",
+    "statusCode": 200,
+    "fingerprint": "55b918fe2b1a95d48fb95fd08bead058aa8c93bc06dde39654ef243313de2932",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "55b918fe2b1a95d48fb95fd08bead058aa8c93bc06dde39654ef243313de2932"
+  },
+  {
+    "category": "users",
+    "resource": "users",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/users/users-api",
+    "accessLevel": "both",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "users.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:51.265Z",
+    "statusCode": 200,
+    "fingerprint": "3c7edfe991e47e9815608b038e1d6805414786d640a4ec636f562dd24ee5d21e",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "3c7edfe991e47e9815608b038e1d6805414786d640a4ec636f562dd24ee5d21e"
+  },
+  {
+    "category": "snapshots",
+    "resource": "snapshots",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/snapshots/snapshots-api",
+    "accessLevel": "agency",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "snapshots.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:51.635Z",
+    "statusCode": 200,
+    "fingerprint": "cffa4726406a8de311f1c561552907c263ac12f11102456cd13478a9c851117e",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "cffa4726406a8de311f1c561552907c263ac12f11102456cd13478a9c851117e"
+  },
+  {
+    "category": "social_planner",
+    "resource": "social_media_posting",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/social-planner/social-media-posting-api",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "socialplanner/*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:51.940Z",
+    "statusCode": 200,
+    "fingerprint": "ac7bbb8717540215c7ebe68643fb7bf5e92c21d23ad93f32c95d16c7c78d38f5",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "ac7bbb8717540215c7ebe68643fb7bf5e92c21d23ad93f32c95d16c7c78d38f5"
+  },
+  {
+    "category": "voice_ai",
+    "resource": "voice_ai",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/voice-ai/voice-ai-api",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "voice-ai-*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:52.316Z",
+    "statusCode": 200,
+    "fingerprint": "07a21b5e0f33b96a48f641e280616a408ec17c5f7cf5b0c9d022877ac79d4310",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "07a21b5e0f33b96a48f641e280616a408ec17c5f7cf5b0c9d022877ac79d4310"
+  },
+  {
+    "category": "phone_system",
+    "resource": "phone_system",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/phone-system/phone-system-api",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "phonenumbers.read",
+    "status": "conditional",
+    "fetchedAt": "2026-05-06T03:12:52.686Z",
+    "statusCode": 200,
+    "fingerprint": "eae9f59fb900c1b9f3eeb8046ad452b4d1e50be281287d803e7397b5ef3d37d3",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "eae9f59fb900c1b9f3eeb8046ad452b4d1e50be281287d803e7397b5ef3d37d3"
+  },
+  {
+    "category": "workflows",
+    "resource": "workflows",
+    "url": "https://marketplace.gohighlevel.com/docs/ghl/workflows/workflows-api",
+    "accessLevel": "location",
+    "tokenTypes": [
+      "oauth_access_token",
+      "private_integration_token"
+    ],
+    "scopeHint": "workflows.readonly",
+    "status": "conditional",
+    "fetchedAt": "2026-05-06T03:12:53.053Z",
+    "statusCode": 200,
+    "fingerprint": "d178370e30ee820963fb65fd092624084851bdcc709de869cbb91bb3b3c51636",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "d178370e30ee820963fb65fd092624084851bdcc709de869cbb91bb3b3c51636"
+  },
+  {
+    "category": "webhooks",
+    "resource": "event_catalog",
+    "url": "https://marketplace.gohighlevel.com/docs/category/webhook/",
+    "accessLevel": "agency",
+    "tokenTypes": [
+      "oauth_access_token"
+    ],
+    "scopeHint": "webhook",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:53.330Z",
+    "statusCode": 200,
+    "fingerprint": "e7a88cefe60cf6c3009b0739b37616756a651f1e5a491721be682a125981ac36",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [],
+    "bodyHash": "e7a88cefe60cf6c3009b0739b37616756a651f1e5a491721be682a125981ac36"
+  },
+  {
+    "category": "oauth",
+    "resource": "faq",
+    "url": "https://marketplace.gohighlevel.com/docs/oauth/Faqs",
+    "accessLevel": "agency",
+    "tokenTypes": [
+      "oauth_access_token"
+    ],
+    "scopeHint": "oauth.*",
+    "status": "supported",
+    "fetchedAt": "2026-05-06T03:12:53.699Z",
+    "statusCode": 200,
+    "fingerprint": "956c9db822111ee4e9e000cf0e7012c1a61fc749584292ac24aa63bf60f3ed27",
+    "version": "2023-02-21",
+    "endpoints": [],
+    "rateLimitHints": [
+      "100 API requests per 10 seconds",
+      "200,000 API requests per day"
+    ],
+    "bodyHash": "956c9db822111ee4e9e000cf0e7012c1a61fc749584292ac24aa63bf60f3ed27"
+  }
+]

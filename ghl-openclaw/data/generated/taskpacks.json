@@ -1,0 +1,524 @@
+{
+  "generatedAt": "2026-05-06T03:12:53.732Z",
+  "taskpacks": [
+    {
+      "name": "sub_account_onboarding_pack",
+      "owner_agent_type": "ghl-agency-lead",
+      "purpose": "sub_account_onboarding_pack",
+      "required_scopes": [
+        "locations.write",
+        "snapshots.readonly"
+      ],
+      "required_endpoints": [
+        "/locations/",
+        "/snapshots"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "sub_account_onboarding_pack:input",
+      "output_schema": "sub_account_onboarding_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "sub_account_onboarding_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "manual_rollback_review"
+      ],
+      "permission_level": "approved_write",
+      "approval_required": true
+    },
+    {
+      "name": "lead_management_pack",
+      "owner_agent_type": "ghl-contacts-agent-{locationId}",
+      "purpose": "lead_management_pack",
+      "required_scopes": [
+        "contacts.write"
+      ],
+      "required_endpoints": [
+        "/contacts/"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "lead_management_pack:input",
+      "output_schema": "lead_management_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "lead_management_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "best_effort_safe_rollback"
+      ],
+      "permission_level": "standard",
+      "approval_required": false
+    },
+    {
+      "name": "sales_pipeline_pack",
+      "owner_agent_type": "ghl-sales-pipeline-agent-{locationId}",
+      "purpose": "sales_pipeline_pack",
+      "required_scopes": [
+        "opportunities.write"
+      ],
+      "required_endpoints": [
+        "/opportunities"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "sales_pipeline_pack:input",
+      "output_schema": "sales_pipeline_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "sales_pipeline_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "best_effort_safe_rollback"
+      ],
+      "permission_level": "standard",
+      "approval_required": false
+    },
+    {
+      "name": "conversation_management_pack",
+      "owner_agent_type": "ghl-conversations-agent-{locationId}",
+      "purpose": "conversation_management_pack",
+      "required_scopes": [
+        "conversations.write"
+      ],
+      "required_endpoints": [
+        "/conversations/",
+        "/conversations/messages"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "conversation_management_pack:input",
+      "output_schema": "conversation_management_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "conversation_management_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "best_effort_safe_rollback"
+      ],
+      "permission_level": "standard",
+      "approval_required": false
+    },
+    {
+      "name": "calendar_appointment_pack",
+      "owner_agent_type": "ghl-calendar-agent-{locationId}",
+      "purpose": "calendar_appointment_pack",
+      "required_scopes": [
+        "calendars.write"
+      ],
+      "required_endpoints": [
+        "/calendars/",
+        "/calendars/events/appointments"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "calendar_appointment_pack:input",
+      "output_schema": "calendar_appointment_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "calendar_appointment_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "best_effort_safe_rollback"
+      ],
+      "permission_level": "standard",
+      "approval_required": false
+    },
+    {
+      "name": "workflow_automation_qa_pack",
+      "owner_agent_type": "ghl-workflow-agent-{locationId}",
+      "purpose": "workflow_automation_qa_pack",
+      "required_scopes": [
+        "workflows.readonly"
+      ],
+      "required_endpoints": [
+        "/workflows/"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "workflow_automation_qa_pack:input",
+      "output_schema": "workflow_automation_qa_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "workflow_automation_qa_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "best_effort_safe_rollback"
+      ],
+      "permission_level": "standard",
+      "approval_required": false
+    },
+    {
+      "name": "payments_invoicing_pack",
+      "owner_agent_type": "ghl-payments-agent-{locationId}",
+      "purpose": "payments_invoicing_pack",
+      "required_scopes": [
+        "invoices.write",
+        "products.write"
+      ],
+      "required_endpoints": [
+        "/invoices",
+        "/products/"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "payments_invoicing_pack:input",
+      "output_schema": "payments_invoicing_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "payments_invoicing_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "manual_rollback_review"
+      ],
+      "permission_level": "approved_write",
+      "approval_required": true
+    },
+    {
+      "name": "marketing_asset_pack",
+      "owner_agent_type": "ghl-marketing-agent-{locationId}",
+      "purpose": "marketing_asset_pack",
+      "required_scopes": [
+        "links.write",
+        "socialplanner/posts.write"
+      ],
+      "required_endpoints": [
+        "/social-media-posting/:locationId/posts"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "marketing_asset_pack:input",
+      "output_schema": "marketing_asset_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "marketing_asset_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "best_effort_safe_rollback"
+      ],
+      "permission_level": "standard",
+      "approval_required": false
+    },
+    {
+      "name": "user_permission_pack",
+      "owner_agent_type": "ghl-agency-lead",
+      "purpose": "user_permission_pack",
+      "required_scopes": [
+        "users.write"
+      ],
+      "required_endpoints": [
+        "/users/"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "user_permission_pack:input",
+      "output_schema": "user_permission_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "user_permission_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "manual_rollback_review"
+      ],
+      "permission_level": "approved_write",
+      "approval_required": true
+    },
+    {
+      "name": "reporting_pack",
+      "owner_agent_type": "ghl-reporting-agent-{locationId}",
+      "purpose": "reporting_pack",
+      "required_scopes": [
+        "reporting.read"
+      ],
+      "required_endpoints": [],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "reporting_pack:input",
+      "output_schema": "reporting_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "reporting_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "best_effort_safe_rollback"
+      ],
+      "permission_level": "standard",
+      "approval_required": false
+    },
+    {
+      "name": "snapshot_template_pack",
+      "owner_agent_type": "ghl-agency-lead",
+      "purpose": "snapshot_template_pack",
+      "required_scopes": [
+        "snapshots.write"
+      ],
+      "required_endpoints": [
+        "/snapshots"
+      ],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "snapshot_template_pack:input",
+      "output_schema": "snapshot_template_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "snapshot_template_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "manual_rollback_review"
+      ],
+      "permission_level": "approved_write",
+      "approval_required": true
+    },
+    {
+      "name": "compliance_audit_pack",
+      "owner_agent_type": "ghl-compliance-audit-agent-{locationId}",
+      "purpose": "compliance_audit_pack",
+      "required_scopes": [
+        "audit.read"
+      ],
+      "required_endpoints": [],
+      "required_token_type": [
+        "oauth_access_token",
+        "private_integration_token"
+      ],
+      "input_schema": "compliance_audit_pack:input",
+      "output_schema": "compliance_audit_pack:output",
+      "trigger_events": [],
+      "manual_execution_command": "compliance_audit_pack",
+      "validation_rules": [
+        "scope_check",
+        "token_context_check",
+        "capability_check"
+      ],
+      "error_handling_rules": [
+        "retry_safe_reads",
+        "escalate_missing_scope",
+        "block_undocumented"
+      ],
+      "logging_requirements": [
+        "correlation_id",
+        "agent_id",
+        "location_id",
+        "result_summary"
+      ],
+      "success_criteria": [
+        "completed_without_policy_violation"
+      ],
+      "rollback_plan": [
+        "best_effort_safe_rollback"
+      ],
+      "permission_level": "standard",
+      "approval_required": false
+    }
+  ]
+}
