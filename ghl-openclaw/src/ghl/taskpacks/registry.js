@@ -238,6 +238,25 @@ function facebookAdMutationRequestFrom(event) {
   };
 }
 
+function googleAdMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+
+  const campaign = normalizePlainObject(request.campaign || request.campaignBody || request.googleCampaign);
+  const query = normalizePlainObject(request.query);
+  const publish = normalizeBoolean(request.publishAfterCreate ?? request.publish ?? request.pushLive);
+
+  return {
+    action: request.action || null,
+    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    adId: normalizeString(request.adId) || normalizeString(request.googleAdId) || normalizeString(request.campaignId) || normalizeString(campaign?.id),
+    entityType: normalizeString(request.entityType) || normalizeString(query?.entityType),
+    campaign,
+    query: query || {},
+    publish: publish === true
+  };
+}
+
 function socialAccountResumeData(liveResult) {
   const accounts = Array.isArray(liveResult?.data?.results?.accounts)
     ? liveResult.data.results.accounts
@@ -694,6 +713,126 @@ function facebookPromotionAdBody(context, mutationRequest) {
       ...(normalizePlainObject(mutationRequest?.promotion?.creative) || {}),
       ...(normalizePlainObject(mutationRequest?.ad?.creative) || {})
     }
+  };
+}
+
+function collectGoogleEntityRecords(data) {
+  const candidateArrays = [
+    data?.results?.entities,
+    data?.results?.items,
+    data?.entities,
+    data?.items,
+    Array.isArray(data?.results) ? data.results : null,
+    Array.isArray(data) ? data : null
+  ];
+  const records = candidateArrays.find((candidate) => Array.isArray(candidate)) || [];
+  return records.filter((record) => record && typeof record === 'object');
+}
+
+function extractGoogleEntityId(value, keys = []) {
+  const queue = [value];
+  const seen = new Set();
+  const preferredKeys = [...keys, 'id', 'adId', 'campaignId', 'resourceName'];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== 'object') continue;
+    if (seen.has(current)) continue;
+    seen.add(current);
+
+    for (const key of preferredKeys) {
+      const candidate = current[key];
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    }
+
+    if (Array.isArray(current)) {
+      queue.push(...current.slice(0, 10));
+      continue;
+    }
+
+    queue.push(...Object.values(current).filter((item) => item && typeof item === 'object').slice(0, 10));
+  }
+
+  return null;
+}
+
+function googleEntityListResumeData(liveResult, context) {
+  const mutationRequest = googleAdMutationRequestFrom(context?.event);
+  const entities = collectGoogleEntityRecords(liveResult?.data);
+  return {
+    entityType: mutationRequest?.entityType || null,
+    entityCount: entities.length,
+    entities: entities.slice(0, 20).map((entity) => ({
+      id: extractGoogleEntityId(entity),
+      name: entity?.name || entity?.campaignName || entity?.adName || null,
+      status: entity?.status || entity?.primaryStatus || null,
+      type: entity?.entityType || entity?.type || mutationRequest?.entityType || null
+    })),
+    raw: liveResult?.data || null
+  };
+}
+
+function googleCampaignResumeData(liveResult) {
+  const campaign = liveResult?.data?.campaign || liveResult?.data?.results?.campaign || liveResult?.data || null;
+  return {
+    campaign: campaign && typeof campaign === 'object'
+      ? {
+          id: extractGoogleEntityId(campaign),
+          name: campaign.name || campaign.campaignName || null,
+          status: campaign.status || campaign.primaryStatus || null,
+          advertisingChannelType: campaign.advertisingChannelType || campaign.channelType || null
+        }
+      : null,
+    raw: liveResult?.data || null
+  };
+}
+
+function googleCampaignUpsertResumeData(liveResult, context) {
+  const mutationRequest = googleAdMutationRequestFrom(context?.event);
+  const entity = liveResult?.data?.campaign || liveResult?.data?.results?.campaign || liveResult?.data || null;
+  return {
+    campaign: entity && typeof entity === 'object'
+      ? {
+          id: extractGoogleEntityId(entity),
+          name: entity.name || entity.campaignName || mutationRequest?.campaign?.name || null,
+          status: entity.status || entity.primaryStatus || mutationRequest?.campaign?.status || null,
+          advertisingChannelType: entity.advertisingChannelType || entity.channelType || mutationRequest?.campaign?.advertisingChannelType || null
+        }
+      : {
+          id: extractGoogleEntityId(liveResult?.data),
+          name: mutationRequest?.campaign?.name || null,
+          status: mutationRequest?.campaign?.status || null,
+          advertisingChannelType: mutationRequest?.campaign?.advertisingChannelType || null
+        },
+    requested: mutationRequest?.campaign || null,
+    raw: liveResult?.data || null
+  };
+}
+
+function resolvedGoogleAdId(context, mutationRequest) {
+  return mutationRequest?.adId
+    || normalizeString(mutationRequest?.campaign?.adId)
+    || normalizeString(mutationRequest?.campaign?.campaignId)
+    || extractGoogleEntityId(context?.runtime?.stepOutputs?.upsert_google_campaign?.data)
+    || null;
+}
+
+function googleCampaignBody(mutationRequest) {
+  const campaign = mutationRequest?.campaign;
+  if (!campaign || Object.keys(campaign).length === 0) {
+    throw new Error('Google campaign upsert requires a campaign object.');
+  }
+  return {
+    ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
+    ...campaign
+  };
+}
+
+function googleEntityQuery(mutationRequest) {
+  return {
+    ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
+    ...(normalizeString(mutationRequest?.entityType) ? { entityType: normalizeString(mutationRequest.entityType) } : {}),
+    ...(normalizePlainObject(mutationRequest?.query) || {})
   };
 }
 
@@ -2234,6 +2373,114 @@ function taskPackHandlers() {
               requestedAction: mutationRequest?.action || null
             },
             skipIf: () => explicitEntityList || explicitCampaignFetch || explicitCampaignUpsert || explicitAdsetUpsert || explicitAdUpsert || explicitPublish || explicitPromoteSocialPost
+          }
+        ];
+      }
+    },
+    google_ad_pack: {
+      trigger_events: ['ManualRun'],
+      buildExecutionPlan(context) {
+        const mutationRequest = googleAdMutationRequestFrom(context.event);
+        const explicitEntityList = mutationRequest?.action === 'list_google_ad_entities'
+          && Boolean(mutationRequest?.entityType || mutationRequest?.query?.entityType);
+        const explicitCampaignFetch = mutationRequest?.action === 'get_google_campaign'
+          && Boolean(mutationRequest?.adId);
+        const explicitCampaignUpsert = ['upsert_google_campaign', 'build_google_ad_campaign'].includes(mutationRequest?.action)
+          && Boolean(mutationRequest?.campaign)
+          && Object.keys(mutationRequest.campaign).length > 0;
+        const explicitPublish = mutationRequest?.action === 'publish_google_ad'
+          || ((mutationRequest?.action === 'build_google_ad_campaign') && mutationRequest?.publish === true);
+
+        return [
+          {
+            name: 'list_google_ad_entities',
+            kind: 'adapter_call',
+            adapter: 'GoogleAdsAdapter',
+            method: 'listEntities',
+            pathHint: '/ad-publishing/google/entity',
+            args: () => [context.credentialRef || defaultLocationCredential(context), googleEntityQuery(mutationRequest)],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: googleEntityListResumeData,
+            details: {
+              action: 'list_google_ad_entities',
+              entityType: mutationRequest?.entityType || mutationRequest?.query?.entityType || null,
+              locationId: mutationRequest?.locationId || context.event.locationId || null
+            },
+            skipIf: () => !explicitEntityList
+          },
+          {
+            name: 'get_google_campaign',
+            kind: 'adapter_call',
+            adapter: 'GoogleAdsAdapter',
+            method: 'getCampaign',
+            pathHint: '/ad-publishing/google/ads/:adId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.adId, mutationRequest.query || {}],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: googleCampaignResumeData,
+            details: {
+              action: 'get_google_campaign',
+              adId: mutationRequest?.adId || null
+            },
+            skipIf: () => !explicitCampaignFetch
+          },
+          {
+            name: 'upsert_google_campaign',
+            kind: 'adapter_call',
+            adapter: 'GoogleAdsAdapter',
+            method: 'upsertCampaign',
+            httpMethod: 'PUT',
+            pathHint: '/ad-publishing/google/ads',
+            args: () => [context.credentialRef || defaultLocationCredential(context), googleCampaignBody(mutationRequest)],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            resumeData: googleCampaignUpsertResumeData,
+            details: {
+              action: 'upsert_google_campaign',
+              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              adId: mutationRequest?.adId || null,
+              name: mutationRequest?.campaign?.name || null,
+              status: mutationRequest?.campaign?.status || null,
+              advertisingChannelType: mutationRequest?.campaign?.advertisingChannelType || mutationRequest?.campaign?.channelType || null
+            },
+            skipIf: () => !explicitCampaignUpsert
+          },
+          {
+            name: 'publish_google_ad',
+            kind: 'adapter_call',
+            adapter: 'GoogleAdsAdapter',
+            method: 'publishAd',
+            httpMethod: 'POST',
+            pathHint: '/ad-publishing/google/ads/:adId/publish',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedGoogleAdId(runtimeContext, mutationRequest), {}],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => ({
+              action: 'publish_google_ad',
+              adId: resolvedGoogleAdId(runtimeContext, mutationRequest),
+              publishRequested: true
+            }),
+            skipIf: (runtimeContext) => !explicitPublish || !resolvedGoogleAdId(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'plan_google_ad_actions',
+            kind: 'intent',
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            details: {
+              action: 'possible_google_ad_campaign_bundle',
+              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              requestedAction: mutationRequest?.action || null
+            },
+            skipIf: () => explicitEntityList || explicitCampaignFetch || explicitCampaignUpsert || explicitPublish
           }
         ];
       }

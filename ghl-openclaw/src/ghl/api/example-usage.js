@@ -7,6 +7,7 @@ import {
   CustomMenusAdapter,
   FormsAdapter,
   FacebookAdsAdapter,
+  GoogleAdsAdapter,
   InvoicesAdapter,
   LocationCustomFieldsAdapter,
   LocationCustomValuesAdapter,
@@ -54,6 +55,7 @@ export function buildAdapterExamples() {
       phoneSystem: new PhoneSystemAdapter(),
       socialPlanner: new SocialPlannerAdapter(),
       facebookAds: new FacebookAdsAdapter(),
+      googleAds: new GoogleAdsAdapter(),
       voiceAi: new VoiceAiAdapter(),
       workflows: new WorkflowsAdapter()
     }
@@ -290,6 +292,26 @@ export const EXAMPLE_CALLS = {
     adapter: 'FacebookAdsAdapter',
     method: 'publishCampaign',
     args: ['location-oauth', 'CAMPAIGN_ID', {}]
+  },
+  listGoogleAdEntities: {
+    adapter: 'GoogleAdsAdapter',
+    method: 'listEntities',
+    args: ['location-oauth', { locationId: 'LOCATION_ID', entityType: 'CAMPAIGN' }]
+  },
+  getGoogleCampaign: {
+    adapter: 'GoogleAdsAdapter',
+    method: 'getCampaign',
+    args: ['location-oauth', 'GOOGLE_AD_ID', { locationId: 'LOCATION_ID' }]
+  },
+  upsertGoogleCampaign: {
+    adapter: 'GoogleAdsAdapter',
+    method: 'upsertCampaign',
+    args: ['location-oauth', { locationId: 'LOCATION_ID', name: 'OpenClaw Google validation campaign', status: 'PAUSED', advertisingChannelType: 'SEARCH' }]
+  },
+  publishGoogleAd: {
+    adapter: 'GoogleAdsAdapter',
+    method: 'publishAd',
+    args: ['location-oauth', 'GOOGLE_AD_ID', {}]
   },
   promoteSocialPostToFacebookAd: {
     adapter: 'TaskPackExecutor',

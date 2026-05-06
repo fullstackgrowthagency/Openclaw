@@ -568,6 +568,28 @@ export class FacebookAdsAdapter {
   }
 }
 
+export class GoogleAdsAdapter {
+  constructor({ client = new GhlApiClient() } = {}) {
+    this.client = client;
+  }
+
+  listEntities(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/google/entity', query });
+  }
+
+  getCampaign(credentialRef, adId, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/ad-publishing/google/ads/${adId}`, query });
+  }
+
+  upsertCampaign(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'PUT', path: '/ad-publishing/google/ads', body });
+  }
+
+  publishAd(credentialRef, adId, body = {}) {
+    return this.client.request({ credentialRef, method: 'POST', path: `/ad-publishing/google/ads/${adId}/publish`, body });
+  }
+}
+
 export class VoiceAiAdapter {
   constructor({ client = new GhlApiClient() } = {}) {
     this.client = client;
