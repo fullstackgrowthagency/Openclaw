@@ -11,5 +11,5 @@
   "hasClientId": false,
   "hasClientSecret": false,
   "hasAgencyPit": false,
-  "hasSecretKey": false
+  "hasSecretKey": true
 }

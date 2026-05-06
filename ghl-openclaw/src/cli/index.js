@@ -19,7 +19,7 @@ import { WebhookStore } from '../ghl/webhooks/store.js';
 import { WebhookProcessor } from '../ghl/webhooks/processor.js';
 import { ingestTestEvent } from '../ghl/webhooks/test-ingest.js';
 
-const command = process.argv[2] || 'status';
+const command = normalizeCommand(process.argv[2] || 'status');
 const args = process.argv.slice(3);
 
 async function main() {
@@ -92,13 +92,13 @@ async function main() {
       return;
     }
     case 'approval:show': {
-      const id = requireArg(args, '--id');
+      const id = await resolveApprovalIdArg(args, approvalStore, { requirePending: false });
       const approval = await approvalStore.get(id);
       console.log(JSON.stringify({ ok: Boolean(approval), approval: approval ? enrichApproval(approval) : null, approvalPrompt: approval ? buildApprovalChatPrompt(approval) : null }, null, 2));
       return;
     }
     case 'approval:approve': {
-      const id = requireArg(args, '--id');
+      const id = await resolveApprovalIdArg(args, approvalStore);
       const decider = optionalArg(args, '--decider') || 'human_admin';
       const note = optionalArg(args, '--note') || null;
       const resumeRun = parseBooleanArg(args, '--resume-run', true);
@@ -108,7 +108,7 @@ async function main() {
       return;
     }
     case 'approval:reject': {
-      const id = requireArg(args, '--id');
+      const id = await resolveApprovalIdArg(args, approvalStore);
       const decider = optionalArg(args, '--decider') || 'human_admin';
       const note = optionalArg(args, '--note') || null;
       const resumeRun = parseBooleanArg(args, '--resume-run', true);
@@ -305,6 +305,14 @@ function parseLocationIds(args) {
   return locationArg.replace('--locations=', '').split(',').map((item) => item.trim()).filter(Boolean);
 }
 
+function normalizeCommand(command) {
+  if (command === 'approve') return 'approval:approve';
+  if (command === 'reject') return 'approval:reject';
+  if (command === 'approval:approve-latest') return 'approval:approve';
+  if (command === 'approval:reject-latest') return 'approval:reject';
+  return command;
+}
+
 function requireArg(args, name) {
   const value = optionalArg(args, name);
   if (!value) throw new Error(`Missing required argument: ${name}`);
@@ -320,6 +328,20 @@ function parseBooleanArg(args, name, defaultValue) {
   const value = optionalArg(args, name);
   if (value == null) return defaultValue;
   return value !== 'false' && value !== '0' && value !== 'no';
+}
+
+async function resolveApprovalIdArg(args, approvalStore, { requirePending = true } = {}) {
+  const explicitId = optionalArg(args, '--id');
+  if (explicitId) return explicitId;
+
+  const pending = await approvalStore.list(1000, 'pending');
+  if (pending.length === 1) return pending[0].id;
+  if (pending.length === 0) {
+    if (requirePending) throw new Error('No pending approvals found, pass --id to target a non-pending approval.');
+    throw new Error('Missing required argument: --id');
+  }
+  const ids = pending.slice(0, 10).map((approval) => approval.id).join(', ');
+  throw new Error(`Multiple pending approvals found, pass --id explicitly. Pending approvals: ${ids}`);
 }
 
 function parseJsonArg(value) {

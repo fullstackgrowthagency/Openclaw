@@ -25,6 +25,17 @@ function normalizeNumber(value) {
   return null;
 }
 
+function normalizeTimestampLike(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const asNumber = Number(value);
+    if (Number.isFinite(asNumber)) return asNumber;
+    const asDate = Date.parse(value);
+    return Number.isNaN(asDate) ? null : asDate;
+  }
+  return null;
+}
+
 function contactSearchResumeData(liveResult) {
   return {
     contacts: Array.isArray(liveResult?.data?.contacts)
@@ -119,13 +130,17 @@ function conversationMutationRequestFrom(event) {
 function appointmentMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
+  const action = request.action || null;
+  const shouldFallbackToEventObjectId = !action || ['update_appointment', 'cancel_appointment', 'delete_appointment'].includes(action);
   return {
-    action: request.action || null,
-    appointmentId: request.appointmentId || request.eventId || objectIdFrom(event),
+    action,
+    appointmentId: request.appointmentId || request.eventId || (shouldFallbackToEventObjectId ? objectIdFrom(event) : null),
     locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
     calendarId: request.calendarId || null,
     contactId: request.contactId || null,
     contactName: normalizeString(request.contactName) || normalizeString(request.name),
+    startDate: normalizeTimestampLike(request.startDate),
+    endDate: normalizeTimestampLike(request.endDate),
     startTime: normalizeString(request.startTime),
     endTime: normalizeString(request.endTime),
     durationMinutes: normalizeNumber(request.durationMinutes ?? request.duration),
@@ -137,6 +152,7 @@ function appointmentMutationRequestFrom(event) {
     meetingLocationId: normalizeString(request.meetingLocationId),
     overrideLocationConfig: normalizeBoolean(request.overrideLocationConfig),
     appointmentStatus: normalizeString(request.appointmentStatus),
+    timezone: normalizeString(request.timezone),
     toNotify: normalizeBoolean(request.toNotify),
     ignoreDateRange: normalizeBoolean(request.ignoreDateRange),
     ignoreFreeSlotValidation: normalizeBoolean(request.ignoreFreeSlotValidation),
@@ -210,17 +226,33 @@ function appointmentAvailabilityRequested(mutationRequest) {
   return Boolean(mutationRequest?.startTime || mutationRequest?.endTime || mutationRequest?.durationMinutes !== null);
 }
 
-function appointmentAvailabilityQuery(context, mutationRequest) {
-  const startTime = mutationRequest?.startTime;
-  const endTime = mutationRequest?.endTime || computedEndTime(startTime, mutationRequest?.durationMinutes);
-  if (!startTime || !endTime) {
-    throw new Error('Availability check requires startTime and endTime (or durationMinutes).');
+function appointmentFreeSlotsRequested(mutationRequest) {
+  return Boolean(
+    mutationRequest?.startDate !== null
+    || mutationRequest?.endDate !== null
+    || mutationRequest?.startTime
+    || mutationRequest?.endTime
+    || mutationRequest?.durationMinutes !== null
+  );
+}
+
+function appointmentFreeSlotsQuery(context, mutationRequest) {
+  const computedEndTimeValue = mutationRequest?.endTime || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes);
+  const startDate = mutationRequest?.startDate ?? (mutationRequest?.startTime ? new Date(mutationRequest.startTime).getTime() : null);
+  const endDate = mutationRequest?.endDate ?? (computedEndTimeValue ? new Date(computedEndTimeValue).getTime() : null);
+  if (startDate === null || endDate === null) {
+    throw new Error('Free-slots lookup requires startDate/endDate or startTime/endTime (or durationMinutes).');
   }
   return {
-    startDate: new Date(startTime).getTime(),
-    endDate: new Date(endTime).getTime(),
-    userId: resolvedAppointmentAssignedUserId(context, mutationRequest)
+    startDate,
+    endDate,
+    ...(resolvedAppointmentAssignedUserId(context, mutationRequest) ? { userId: resolvedAppointmentAssignedUserId(context, mutationRequest) } : {}),
+    ...(mutationRequest?.timezone ? { timezone: mutationRequest.timezone } : {})
   };
+}
+
+function appointmentAvailabilityQuery(context, mutationRequest) {
+  return appointmentFreeSlotsQuery(context, mutationRequest);
 }
 
 function collectAppointmentSlotStartTimes(value, output = []) {
@@ -992,6 +1024,9 @@ function taskPackHandlers() {
           && Boolean(mutationRequest.calendarId)
           && (Boolean(mutationRequest.contactId) || Boolean(mutationRequest.contactName))
           && Boolean(mutationRequest.startTime);
+        const explicitGetFreeSlots = mutationRequest?.action === 'get_free_slots'
+          && Boolean(mutationRequest.calendarId || mutationRequest.appointmentId)
+          && appointmentFreeSlotsRequested(mutationRequest);
         const explicitAppointmentUpdate = mutationRequest?.action === 'update_appointment'
           && Boolean(mutationRequest.appointmentId)
           && Object.keys(appointmentUpdateBody(context, mutationRequest)).length > 0;
@@ -1061,6 +1096,29 @@ function taskPackHandlers() {
             skipIf: () => !explicitAppointmentAvailabilityCheck
           },
           {
+            name: 'get_free_slots',
+            kind: 'adapter_call',
+            adapter: 'CalendarsAdapter',
+            method: 'getFreeSlots',
+            pathHint: '/calendars/:calendarId/free-slots',
+            args: (runtimeContext) => [
+              runtimeContext.credentialRef || defaultLocationCredential(runtimeContext),
+              resolvedAppointmentCalendarId(runtimeContext, mutationRequest),
+              appointmentFreeSlotsQuery(runtimeContext, mutationRequest)
+            ],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: appointmentFreeSlotsResumeData,
+            details: (runtimeContext) => ({
+              action: 'get_free_slots',
+              appointmentId: mutationRequest?.appointmentId || null,
+              calendarId: resolvedAppointmentCalendarId(runtimeContext, mutationRequest),
+              query: appointmentFreeSlotsQuery(runtimeContext, mutationRequest)
+            }),
+            skipIf: () => !explicitGetFreeSlots
+          },
+          {
             name: 'refresh_calendar_event_window',
             kind: 'adapter_call',
             adapter: 'CalendarsAdapter',
@@ -1070,7 +1128,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             requiresCredential: true,
-            skipIf: () => explicitAppointmentCreate || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
+            skipIf: () => explicitAppointmentCreate || explicitGetFreeSlots || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
           },
           {
             name: 'create_appointment',
@@ -1143,7 +1201,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             details: { action: 'evaluate_booking_followups', locationId: context.event.locationId, mutationRequest },
-            skipIf: () => explicitAppointmentCreate || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
+            skipIf: () => explicitAppointmentCreate || explicitGetFreeSlots || explicitAppointmentUpdate || explicitAppointmentCancel || explicitAppointmentDelete
           }
         ];
       }
