@@ -476,7 +476,7 @@ function resolvedAppointmentListDetails(context, mutationRequest) {
     action: 'list_appointments',
     locationId: mutationRequest?.locationId || null,
     calendarId: mutationRequest?.calendarId || null,
-    contactId: mutationRequest?.contactId || null,
+    contactId: resolvedAppointmentListContactId(context, mutationRequest),
     contactName: mutationRequest?.contactName || null,
     assignedUserId: resolvedAppointmentAssignedUserId(context, mutationRequest),
     appointmentStatus: mutationRequest?.appointmentStatus || null,
@@ -1142,7 +1142,7 @@ function taskPackHandlers() {
               action: 'search_appointment_contact_by_name',
               contactName: mutationRequest?.contactName || null
             },
-            skipIf: () => !explicitAppointmentCreate || Boolean(mutationRequest.contactId) || !mutationRequest.contactName
+            skipIf: () => !(explicitAppointmentCreate || explicitListAppointments) || Boolean(mutationRequest.contactId) || !mutationRequest.contactName
           },
           {
             name: 'fetch_appointment',
@@ -1162,6 +1162,24 @@ function taskPackHandlers() {
             skipIf: () => !mutationRequest?.appointmentId || explicitAppointmentCreate || explicitListAppointments
           },
           {
+            name: 'list_contact_appointments',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'listAppointments',
+            pathHint: '/contacts/:contactId/appointments',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedAppointmentListContactId(runtimeContext, mutationRequest)],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: appointmentListResumeData,
+            details: (runtimeContext) => ({
+              ...resolvedAppointmentListDetails(runtimeContext, mutationRequest),
+              path: '/contacts/:contactId/appointments',
+              strategy: 'contact_appointments'
+            }),
+            skipIf: () => !explicitListAppointments || !resolvedAppointmentListContactId(context, mutationRequest)
+          },
+          {
             name: 'list_appointments',
             kind: 'adapter_call',
             adapter: 'CalendarsAdapter',
@@ -1172,8 +1190,12 @@ function taskPackHandlers() {
             mutation: false,
             requiresCredential: true,
             resumeData: appointmentListResumeData,
-            details: (runtimeContext) => resolvedAppointmentListDetails(runtimeContext, mutationRequest),
-            skipIf: () => !explicitListAppointments
+            details: (runtimeContext) => ({
+              ...resolvedAppointmentListDetails(runtimeContext, mutationRequest),
+              path: '/calendars/events',
+              strategy: 'calendar_events'
+            }),
+            skipIf: () => !explicitListAppointments || Boolean(resolvedAppointmentListContactId(context, mutationRequest))
           },
           {
             name: 'check_requested_appointment_slot',

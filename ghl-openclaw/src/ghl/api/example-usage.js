@@ -196,6 +196,11 @@ export const EXAMPLE_CALLS = {
     method: 'listEvents',
     args: ['location-oauth', { locationId: 'LOCATION_ID', calendarId: 'CALENDAR_ID', startTime: '2026-05-14T00:00:00-05:00', endTime: '2026-05-15T00:00:00-05:00' }]
   },
+  listContactAppointments: {
+    adapter: 'ContactsAdapter',
+    method: 'listAppointments',
+    args: ['location-oauth', 'CONTACT_ID']
+  },
   getFreeSlots: {
     adapter: 'CalendarsAdapter',
     method: 'getFreeSlots',

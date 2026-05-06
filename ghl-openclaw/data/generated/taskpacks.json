@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-06T17:24:39.780Z",
+  "generatedAt": "2026-05-06T17:36:59.496Z",
   "taskpacks": [
     {
       "name": "sub_account_onboarding_pack",
@@ -185,7 +185,8 @@
       ],
       "required_endpoints": [
         "/calendars/",
-        "/calendars/events/appointments"
+        "/calendars/events/appointments",
+        "/contacts/:contactId/appointments"
       ],
       "required_token_type": [
         "oauth_access_token",

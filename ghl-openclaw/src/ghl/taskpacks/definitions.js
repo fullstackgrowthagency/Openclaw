@@ -30,7 +30,7 @@ export function buildTaskPacks() {
     pack('lead_management_pack', 'ghl-contacts-agent-{locationId}', ['contacts.write'], ['/contacts/']),
     pack('sales_pipeline_pack', 'ghl-sales-pipeline-agent-{locationId}', ['opportunities.write'], ['/opportunities']),
     pack('conversation_management_pack', 'ghl-conversations-agent-{locationId}', ['conversations.write'], ['/conversations/', '/conversations/messages']),
-    pack('calendar_appointment_pack', 'ghl-calendar-agent-{locationId}', ['calendars.write'], ['/calendars/', '/calendars/events/appointments']),
+    pack('calendar_appointment_pack', 'ghl-calendar-agent-{locationId}', ['calendars.write'], ['/calendars/', '/calendars/events/appointments', '/contacts/:contactId/appointments']),
     pack('workflow_automation_qa_pack', 'ghl-workflow-agent-{locationId}', ['workflows.readonly'], ['/workflows/']),
     pack('payments_invoicing_pack', 'ghl-payments-agent-{locationId}', ['invoices.write', 'products.write'], ['/invoices', '/products/'], true),
     pack('marketing_asset_pack', 'ghl-marketing-agent-{locationId}', ['links.write', 'socialplanner/posts.write'], ['/social-media-posting/:locationId/posts']),

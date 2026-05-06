@@ -55,6 +55,10 @@ export class ContactsAdapter {
     return this.client.request({ credentialRef, method: 'GET', path: `/contacts/${contactId}/tasks` });
   }
 
+  listAppointments(credentialRef, contactId) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/contacts/${contactId}/appointments` });
+  }
+
   createTask(credentialRef, contactId, body) {
     return this.client.request({ credentialRef, method: 'POST', path: `/contacts/${contactId}/tasks`, body });
   }
