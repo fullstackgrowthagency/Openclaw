@@ -237,6 +237,7 @@ export class TaskPackExecutor {
             runtime.stepOutputs[step.name] = liveResult;
             await this.runStore.setStep(run.id, index, stepResult(step, 'executed', {
               ...sanitizeLiveResult(liveResult),
+              ...(step.resumeData ? { resumeData: step.resumeData(liveResult, context) } : {}),
               approval: approvalSnapshot(resolvedApproval)
             }, index));
           } else {
@@ -332,6 +333,9 @@ function sanitizeLiveResult(result) {
 
 function restoreStepOutput(step) {
   if (step?.status !== 'executed') return null;
+  if (step?.payload?.resumeData) {
+    return { data: step.payload.resumeData };
+  }
   const preview = step?.payload?.dataPreview;
   if (typeof preview !== 'string' || !preview) return null;
   if (preview.endsWith('...')) return null;

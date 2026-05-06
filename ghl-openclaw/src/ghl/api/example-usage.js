@@ -89,6 +89,16 @@ export const EXAMPLE_CALLS = {
     method: 'removeTags',
     args: ['location-oauth', 'CONTACT_ID', { tags: ['openclaw-validation'] }]
   },
+  addContactFollowers: {
+    adapter: 'ContactsAdapter',
+    method: 'addFollowers',
+    args: ['location-oauth', 'CONTACT_ID', { followers: ['USER_ID'] }]
+  },
+  removeContactFollowers: {
+    adapter: 'ContactsAdapter',
+    method: 'removeFollowers',
+    args: ['location-oauth', 'CONTACT_ID', { followers: ['USER_ID'] }]
+  },
   createContactTask: {
     adapter: 'ContactsAdapter',
     method: 'createTask',
@@ -167,7 +177,14 @@ export const EXAMPLE_CALLS = {
   createAppointment: {
     adapter: 'CalendarsAdapter',
     method: 'createAppointment',
-    args: ['location-oauth', { calendarId: 'CALENDAR_ID' }]
+    args: ['location-oauth', {
+      calendarId: 'CALENDAR_ID',
+      locationId: 'LOCATION_ID',
+      contactId: 'CONTACT_ID',
+      startTime: '2026-05-07T15:00:00Z',
+      endTime: '2026-05-07T15:30:00Z',
+      title: 'OpenClaw validation appointment'
+    }]
   },
   createInvoice: {
     adapter: 'InvoicesAdapter',

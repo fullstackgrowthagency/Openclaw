@@ -4,11 +4,61 @@ function objectIdFrom(event) {
   return event?.objectId || event?.payload?.data?.id || event?.payload?.id || null;
 }
 
+function normalizeString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeBoolean(value) {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function normalizeStringArray(values) {
+  return Array.isArray(values) ? values.map((value) => normalizeString(value)).filter(Boolean) : [];
+}
+
+function normalizeNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function contactSearchResumeData(liveResult) {
+  return {
+    contacts: Array.isArray(liveResult?.data?.contacts)
+      ? liveResult.data.contacts.slice(0, 5).map((contact) => ({
+          id: contact.id,
+          name: contact.contactName || null,
+          email: contact.email || null,
+          phone: contact.phone || null
+        }))
+      : []
+  };
+}
+
+function resolvedSingleContactId(context, stepName, contactName) {
+  const contacts = context?.runtime?.stepOutputs?.[stepName]?.data?.contacts;
+  if (!Array.isArray(contacts) || contacts.length === 0) {
+    throw new Error(`No contact matched \"${contactName || 'unknown'}\".`);
+  }
+  if (contacts.length > 1) {
+    const options = contacts
+      .slice(0, 5)
+      .map((contact) => contact.name || contact.email || contact.phone || contact.id)
+      .join(', ');
+    throw new Error(`Multiple contacts matched \"${contactName || 'unknown'}\": ${options}`);
+  }
+  return contacts[0].id;
+}
+
 function leadMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
   return {
     action: request.action || null,
+    contactName: normalizeString(request.contactName) || normalizeString(request.name),
     tags: Array.isArray(request.tags) ? request.tags.filter(Boolean) : [],
     note: request.note || null,
     title: request.title || null,
@@ -23,10 +73,11 @@ function leadMutationRequestFrom(event) {
           .map((field) => ({ id: field.id, value: field.value ?? null }))
       : [],
     workflowId: request.workflowId || null,
+    followers: normalizeStringArray(request.followers || request.userIds || request.followerIds),
     pinned: Boolean(request.pinned),
     noteId: request.noteId || null,
     taskId: request.taskId || null,
-    contactId: request.contactId || objectIdFrom(event)
+    contactId: request.contactId || (normalizeString(request.contactName) || normalizeString(request.name) ? null : objectIdFrom(event))
   };
 }
 
@@ -50,39 +101,76 @@ function opportunityMutationRequestFrom(event) {
 function conversationMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
-  const normalizedMessageType = typeof request.messageType === 'string' && request.messageType.trim()
-    ? request.messageType.trim()
-    : (typeof request.type === 'string' && request.type.trim() ? request.type.trim() : null);
-  const normalizedContactName = typeof request.contactName === 'string' && request.contactName.trim()
-    ? request.contactName.trim()
-    : (typeof request.name === 'string' && request.name.trim() ? request.name.trim() : null);
+  const normalizedMessageType = normalizeString(request.messageType) || normalizeString(request.type);
+  const normalizedContactName = normalizeString(request.contactName) || normalizeString(request.name);
   return {
     action: request.action || null,
     conversationId: request.conversationId || objectIdFrom(event),
     contactId: request.contactId || null,
     contactName: normalizedContactName,
-    message: typeof request.message === 'string' && request.message.trim() ? request.message : null,
+    message: normalizeString(request.message),
     messageType: normalizedMessageType,
-    channel: typeof request.channel === 'string' && request.channel.trim() ? request.channel.trim() : null,
-    fromNumber: typeof request.fromNumber === 'string' && request.fromNumber.trim() ? request.fromNumber.trim() : null,
-    toNumber: typeof request.toNumber === 'string' && request.toNumber.trim() ? request.toNumber.trim() : null
+    channel: normalizeString(request.channel),
+    fromNumber: normalizeString(request.fromNumber),
+    toNumber: normalizeString(request.toNumber)
+  };
+}
+
+function appointmentMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+  return {
+    action: request.action || null,
+    appointmentId: request.appointmentId || objectIdFrom(event),
+    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    calendarId: request.calendarId || null,
+    contactId: request.contactId || null,
+    contactName: normalizeString(request.contactName) || normalizeString(request.name),
+    startTime: normalizeString(request.startTime),
+    endTime: normalizeString(request.endTime),
+    durationMinutes: normalizeNumber(request.durationMinutes ?? request.duration),
+    title: normalizeString(request.title),
+    address: normalizeString(request.address),
+    assignedUserId: request.assignedUserId || request.assignedTo || null,
+    description: normalizeString(request.description),
+    meetingLocationType: normalizeString(request.meetingLocationType),
+    meetingLocationId: normalizeString(request.meetingLocationId),
+    overrideLocationConfig: normalizeBoolean(request.overrideLocationConfig),
+    appointmentStatus: normalizeString(request.appointmentStatus),
+    toNotify: normalizeBoolean(request.toNotify),
+    ignoreDateRange: normalizeBoolean(request.ignoreDateRange),
+    ignoreFreeSlotValidation: normalizeBoolean(request.ignoreFreeSlotValidation),
+    rrule: normalizeString(request.rrule)
+  };
+}
+
+function computedEndTime(startTime, durationMinutes) {
+  if (!startTime || durationMinutes === null) return null;
+  const start = new Date(startTime);
+  if (Number.isNaN(start.getTime())) {
+    throw new Error(`Invalid startTime for duration calculation: ${startTime}`);
+  }
+  return new Date(start.getTime() + durationMinutes * 60 * 1000).toISOString();
+}
+
+function resolvedLeadContactId(context, mutationRequest) {
+  if (mutationRequest?.contactId) return mutationRequest.contactId;
+  return resolvedSingleContactId(context, 'search_target_contact_by_name', mutationRequest?.contactName);
+}
+
+function resolvedLeadContactDetails(context, mutationRequest, action) {
+  const resolvedContactId = mutationRequest?.contactId || context?.runtime?.stepOutputs?.search_target_contact_by_name?.data?.contacts?.[0]?.id || null;
+  return {
+    action,
+    contactId: resolvedContactId,
+    contactName: mutationRequest?.contactName || null,
+    followers: mutationRequest?.followers || []
   };
 }
 
 function resolvedConversationContactId(context, mutationRequest) {
   if (mutationRequest?.contactId) return mutationRequest.contactId;
-  const contacts = context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts;
-  if (!Array.isArray(contacts) || contacts.length === 0) {
-    throw new Error(`No contact matched \"${mutationRequest?.contactName || 'unknown'}\".`);
-  }
-  if (contacts.length > 1) {
-    const options = contacts
-      .slice(0, 5)
-      .map((contact) => contact.name || contact.firstName || contact.email || contact.phone || contact.id)
-      .join(', ');
-    throw new Error(`Multiple contacts matched \"${mutationRequest?.contactName || 'unknown'}\": ${options}`);
-  }
-  return contacts[0].id;
+  return resolvedSingleContactId(context, 'search_contacts_by_name', mutationRequest?.contactName);
 }
 
 function resolvedConversationContactDetails(context, mutationRequest) {
@@ -97,6 +185,53 @@ function resolvedConversationContactDetails(context, mutationRequest) {
     fromNumber: mutationRequest?.fromNumber || null,
     toNumber: mutationRequest?.toNumber || null,
     messagePreview: mutationRequest?.message ? mutationRequest.message.slice(0, 120) : null
+  };
+}
+
+function resolvedAppointmentContactId(context, mutationRequest) {
+  if (mutationRequest?.contactId) return mutationRequest.contactId;
+  return resolvedSingleContactId(context, 'search_appointment_contact_by_name', mutationRequest?.contactName);
+}
+
+function appointmentBody(runtimeContext, mutationRequest) {
+  const endTime = mutationRequest?.endTime || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes);
+  return {
+    calendarId: mutationRequest.calendarId,
+    locationId: mutationRequest.locationId,
+    contactId: resolvedAppointmentContactId(runtimeContext, mutationRequest),
+    startTime: mutationRequest.startTime,
+    ...(endTime ? { endTime } : {}),
+    ...(mutationRequest.title ? { title: mutationRequest.title } : {}),
+    ...(mutationRequest.address ? { address: mutationRequest.address } : {}),
+    ...(mutationRequest.assignedUserId ? { assignedUserId: mutationRequest.assignedUserId } : {}),
+    ...(mutationRequest.description ? { description: mutationRequest.description } : {}),
+    ...(mutationRequest.meetingLocationType ? { meetingLocationType: mutationRequest.meetingLocationType } : {}),
+    ...(mutationRequest.meetingLocationId ? { meetingLocationId: mutationRequest.meetingLocationId } : {}),
+    ...(mutationRequest.overrideLocationConfig === null ? {} : { overrideLocationConfig: mutationRequest.overrideLocationConfig }),
+    ...(mutationRequest.appointmentStatus ? { appointmentStatus: mutationRequest.appointmentStatus } : {}),
+    ...(mutationRequest.toNotify === null ? {} : { toNotify: mutationRequest.toNotify }),
+    ...(mutationRequest.ignoreDateRange === null ? {} : { ignoreDateRange: mutationRequest.ignoreDateRange }),
+    ...(mutationRequest.ignoreFreeSlotValidation === null ? {} : { ignoreFreeSlotValidation: mutationRequest.ignoreFreeSlotValidation }),
+    ...(mutationRequest.rrule ? { rrule: mutationRequest.rrule } : {})
+  };
+}
+
+function resolvedAppointmentDetails(context, mutationRequest) {
+  const resolvedContactId = mutationRequest?.contactId || context?.runtime?.stepOutputs?.search_appointment_contact_by_name?.data?.contacts?.[0]?.id || null;
+  return {
+    action: 'create_appointment',
+    locationId: mutationRequest?.locationId || null,
+    calendarId: mutationRequest?.calendarId || null,
+    contactId: resolvedContactId,
+    contactName: mutationRequest?.contactName || null,
+    startTime: mutationRequest?.startTime || null,
+    endTime: mutationRequest?.endTime || computedEndTime(mutationRequest?.startTime, mutationRequest?.durationMinutes),
+    durationMinutes: mutationRequest?.durationMinutes ?? null,
+    title: mutationRequest?.title || null,
+    address: mutationRequest?.address || null,
+    assignedUserId: mutationRequest?.assignedUserId || null,
+    appointmentStatus: mutationRequest?.appointmentStatus || null,
+    toNotify: mutationRequest?.toNotify
   };
 }
 
@@ -152,19 +287,46 @@ function taskPackHandlers() {
         const explicitTaskComplete = mutationRequest?.action === 'update_contact_task_completed' && Boolean(mutationRequest.taskId) && typeof mutationRequest.completed === 'boolean';
         const explicitNoteAdd = mutationRequest?.action === 'add_contact_note' && Boolean(mutationRequest.note);
         const explicitNoteDelete = mutationRequest?.action === 'delete_contact_note' && Boolean(mutationRequest.noteId);
+        const explicitContactFollowerAdd = mutationRequest?.action === 'add_contact_followers'
+          && (Boolean(mutationRequest.contactId) || Boolean(mutationRequest.contactName))
+          && mutationRequest.followers.length > 0;
+        const explicitContactFollowerRemove = mutationRequest?.action === 'remove_contact_followers'
+          && (Boolean(mutationRequest.contactId) || Boolean(mutationRequest.contactName))
+          && mutationRequest.followers.length > 0;
         const explicitEnrichment = mutationRequest?.action === 'enrich_contact' && (mutationRequest.tags.length > 0 || Boolean(mutationRequest.note));
         return [
+          {
+            name: 'search_target_contact_by_name',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'listContacts',
+            pathHint: '/contacts/',
+            args: () => [context.credentialRef || defaultLocationCredential(context), {
+              locationId: context.event.locationId || null,
+              query: mutationRequest.contactName,
+              limit: 5
+            }],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: contactSearchResumeData,
+            details: {
+              action: 'search_target_contact_by_name',
+              contactName: mutationRequest?.contactName || null
+            },
+            skipIf: () => !(explicitContactFollowerAdd || explicitContactFollowerRemove) || Boolean(mutationRequest.contactId) || !mutationRequest.contactName
+          },
           {
             name: 'fetch_contact',
             kind: 'adapter_call',
             adapter: 'ContactsAdapter',
             method: 'getContact',
             pathHint: '/contacts/:contactId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), contactId],
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedLeadContactId(runtimeContext, mutationRequest)],
             safe: true,
             mutation: false,
             requiresCredential: true,
-            skipIf: () => !contactId
+            skipIf: () => !(contactId || explicitContactFollowerAdd || explicitContactFollowerRemove)
           },
           {
             name: 'evaluate_follow_up_rules',
@@ -380,13 +542,43 @@ function taskPackHandlers() {
             skipIf: () => !contactId || !explicitNoteDelete
           },
           {
+            name: 'add_contact_followers',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'addFollowers',
+            httpMethod: 'POST',
+            pathHint: '/contacts/:contactId/followers',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedLeadContactId(runtimeContext, mutationRequest), { followers: mutationRequest.followers }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => resolvedLeadContactDetails(runtimeContext, mutationRequest, 'add_contact_followers'),
+            skipIf: () => !explicitContactFollowerAdd
+          },
+          {
+            name: 'remove_contact_followers',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'removeFollowers',
+            httpMethod: 'DELETE',
+            pathHint: '/contacts/:contactId/followers',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedLeadContactId(runtimeContext, mutationRequest), { followers: mutationRequest.followers }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => resolvedLeadContactDetails(runtimeContext, mutationRequest, 'remove_contact_followers'),
+            skipIf: () => !explicitContactFollowerRemove
+          },
+          {
             name: 'plan_follow_up_write_actions',
             kind: 'intent',
             safe: false,
             mutation: true,
             requiresApproval: true,
             details: { action: 'possible_tag_note_task_or_opportunity', contactId },
-            skipIf: () => explicitContactUpdate || explicitContactCustomFieldUpdate || explicitWorkflowAdd || explicitWorkflowRemove || explicitTagAdd || explicitTagRemove || explicitTaskCreate || explicitTaskDelete || explicitTaskUpdate || explicitTaskComplete || explicitNoteAdd || explicitNoteDelete || explicitEnrichment
+            skipIf: () => explicitContactUpdate || explicitContactCustomFieldUpdate || explicitWorkflowAdd || explicitWorkflowRemove || explicitTagAdd || explicitTagRemove || explicitTaskCreate || explicitTaskDelete || explicitTaskUpdate || explicitTaskComplete || explicitNoteAdd || explicitNoteDelete || explicitContactFollowerAdd || explicitContactFollowerRemove || explicitEnrichment
           }
         ];
       }
@@ -614,6 +806,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             requiresCredential: true,
+            resumeData: contactSearchResumeData,
             details: {
               action: 'search_contacts_by_name',
               contactName: mutationRequest?.contactName || null
@@ -654,9 +847,36 @@ function taskPackHandlers() {
       }
     },
     calendar_appointment_pack: {
-      trigger_events: ['AppointmentCreate', 'AppointmentUpdate', 'AppointmentDelete'],
+      trigger_events: ['AppointmentCreate', 'AppointmentUpdate', 'AppointmentDelete', 'ManualRun'],
       buildExecutionPlan(context) {
+        const mutationRequest = appointmentMutationRequestFrom(context.event);
+        const explicitAppointmentCreate = mutationRequest?.action === 'create_appointment'
+          && Boolean(mutationRequest.locationId)
+          && Boolean(mutationRequest.calendarId)
+          && (Boolean(mutationRequest.contactId) || Boolean(mutationRequest.contactName))
+          && Boolean(mutationRequest.startTime);
         return [
+          {
+            name: 'search_appointment_contact_by_name',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'listContacts',
+            pathHint: '/contacts/',
+            args: () => [context.credentialRef || defaultLocationCredential(context), {
+              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              query: mutationRequest.contactName,
+              limit: 5
+            }],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: contactSearchResumeData,
+            details: {
+              action: 'search_appointment_contact_by_name',
+              contactName: mutationRequest?.contactName || null
+            },
+            skipIf: () => !explicitAppointmentCreate || Boolean(mutationRequest.contactId) || !mutationRequest.contactName
+          },
           {
             name: 'refresh_calendar_event_window',
             kind: 'adapter_call',
@@ -666,14 +886,31 @@ function taskPackHandlers() {
             args: () => [context.credentialRef || defaultLocationCredential(context), {}],
             safe: true,
             mutation: false,
-            requiresCredential: true
+            requiresCredential: true,
+            skipIf: () => explicitAppointmentCreate
+          },
+          {
+            name: 'create_appointment',
+            kind: 'adapter_call',
+            adapter: 'CalendarsAdapter',
+            method: 'createAppointment',
+            httpMethod: 'POST',
+            pathHint: '/calendars/events/appointments',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), appointmentBody(runtimeContext, mutationRequest)],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => resolvedAppointmentDetails(runtimeContext, mutationRequest),
+            skipIf: () => !explicitAppointmentCreate
           },
           {
             name: 'evaluate_booking_state',
             kind: 'intent',
             safe: true,
             mutation: false,
-            details: { action: 'evaluate_booking_followups', locationId: context.event.locationId }
+            details: { action: 'evaluate_booking_followups', locationId: context.event.locationId, mutationRequest },
+            skipIf: () => explicitAppointmentCreate
           }
         ];
       }

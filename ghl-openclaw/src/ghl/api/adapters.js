@@ -91,6 +91,14 @@ export class ContactsAdapter {
     return this.client.request({ credentialRef, method: 'DELETE', path: `/contacts/${contactId}/tags`, body });
   }
 
+  addFollowers(credentialRef, contactId, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: `/contacts/${contactId}/followers`, body });
+  }
+
+  removeFollowers(credentialRef, contactId, body) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/contacts/${contactId}/followers`, body });
+  }
+
   addToWorkflow(credentialRef, contactId, workflowId) {
     return this.client.request({ credentialRef, method: 'POST', path: `/contacts/${contactId}/workflow/${workflowId}` });
   }
