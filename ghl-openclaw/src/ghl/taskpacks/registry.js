@@ -288,14 +288,16 @@ function socialAccountResumeData(liveResult) {
 
 function socialPostCreateResumeData(liveResult, context) {
   const data = liveResult?.data || null;
+  const rawPost = data?.results?.post || data?.post || null;
   const mutationRequest = socialPostMutationRequestFrom(context?.event);
   return {
-    post: data && typeof data === 'object'
+    post: (rawPost && typeof rawPost === 'object') || (data && typeof data === 'object')
       ? {
-          id: data.id || data.postId || null,
-          status: data.status || mutationRequest?.status || null,
-          scheduleDate: data.scheduleDate || data.scheduledAt || mutationRequest?.scheduleDate || null,
-          summary: data.summary || data.text || mutationRequest?.summary || null
+          id: rawPost?._id || rawPost?.id || rawPost?.postId || data?.id || data?.postId || null,
+          status: rawPost?.status || data?.status || mutationRequest?.status || null,
+          scheduleDate: rawPost?.scheduleDate || rawPost?.scheduledAt || data?.scheduleDate || data?.scheduledAt || mutationRequest?.scheduleDate || null,
+          summary: rawPost?.summary || rawPost?.text || data?.summary || data?.text || mutationRequest?.summary || null,
+          media: Array.isArray(rawPost?.media) ? rawPost.media : Array.isArray(data?.media) ? data.media : []
         }
       : null,
     requested: {
@@ -318,24 +320,35 @@ function socialAccountsFromContext(context) {
 }
 
 function socialPostPreviewPayload(context, mutationRequest) {
-  const createdPost = context?.runtime?.stepOutputs?.create_social_post?.data;
+  const createStep = context?.runtime?.stepOutputs?.create_social_post?.data;
+  const createdPost = createStep?.results?.post || createStep?.post || null;
+  const openClawRequestBody = createStep?.openClaw?.requestBody || null;
   const requestedPost = mutationRequest?.post && typeof mutationRequest.post === 'object' && !Array.isArray(mutationRequest.post)
     ? mutationRequest.post
     : {};
 
   return {
     ...requestedPost,
+    ...(openClawRequestBody && typeof openClawRequestBody === 'object' && !Array.isArray(openClawRequestBody) ? openClawRequestBody : {}),
+    ...(createdPost && typeof createdPost === 'object' && !Array.isArray(createdPost) ? createdPost : {}),
     ...(mutationRequest?.accountIds?.length > 0 ? { accountIds: mutationRequest.accountIds } : {}),
     ...(mutationRequest?.status ? { status: mutationRequest.status } : {}),
     ...(mutationRequest?.scheduleDate ? { scheduleDate: mutationRequest.scheduleDate } : {}),
-    ...(mutationRequest?.summary ? { summary: mutationRequest.summary } : {}),
-    ...(createdPost && typeof createdPost === 'object' && !Array.isArray(createdPost) ? createdPost : {})
+    ...(mutationRequest?.summary ? { summary: mutationRequest.summary } : {})
   };
 }
 
 function resolvedSocialPostId(context) {
   const createdPost = context?.runtime?.stepOutputs?.create_social_post?.data;
-  return createdPost?.id || createdPost?.postId || null;
+  return createdPost?.results?.post?._id
+    || createdPost?.results?.post?.id
+    || createdPost?.results?.post?.postId
+    || createdPost?.post?._id
+    || createdPost?.post?.id
+    || createdPost?.post?.postId
+    || createdPost?.id
+    || createdPost?.postId
+    || null;
 }
 
 function socialPreviewResultResumeData(liveResult) {
@@ -2877,10 +2890,20 @@ function taskPackHandlers() {
             name: 'create_social_post',
             kind: 'adapter_call',
             adapter: 'SocialPlannerAdapter',
-            method: 'createPost',
+            method: 'createPostWithCreative',
             httpMethod: 'POST',
             pathHint: '/social-media-posting/:locationId/posts',
-            args: () => [context.credentialRef || defaultLocationCredential(context), locationId, socialPostCreateBody(mutationRequest)],
+            args: () => [
+              context.credentialRef || defaultLocationCredential(context),
+              locationId,
+              socialPostCreateBody(mutationRequest),
+              {
+                generateCreative: !Array.isArray(mutationRequest?.post?.media) || mutationRequest.post.media.length === 0,
+                businessName: normalizeString(mutationRequest?.post?.businessName)
+                  || normalizeString(mutationRequest?.businessName)
+                  || null
+              }
+            ],
             safe: false,
             mutation: true,
             requiresApproval: true,
@@ -2892,7 +2915,8 @@ function taskPackHandlers() {
               accountIds: mutationRequest?.accountIds || [],
               status: mutationRequest?.status || null,
               scheduleDate: mutationRequest?.scheduleDate || null,
-              summaryPreview: mutationRequest?.summary ? mutationRequest.summary.slice(0, 160) : null
+              summaryPreview: mutationRequest?.summary ? mutationRequest.summary.slice(0, 160) : null,
+              autoGenerateCreative: !Array.isArray(mutationRequest?.post?.media) || mutationRequest.post.media.length === 0
             },
             skipIf: () => !explicitCreateSocialPost
           },

@@ -1,4 +1,7 @@
+import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { GhlApiClient } from './client.js';
+import { generateSocialPostCreative } from '../previews/social-post-creative.js';
 
 export class LocationsAdapter {
   constructor({ client = new GhlApiClient() } = {}) {
@@ -531,6 +534,83 @@ export class SocialPlannerAdapter {
 
   listAccounts(credentialRef, locationId, query = {}) {
     return this.client.request({ credentialRef, method: 'GET', path: `/social-media-posting/${locationId}/accounts`, query });
+  }
+
+  async uploadLocalMediaFile(credentialRef, filePath, { mimeType = 'image/png', filename } = {}) {
+    const token = await this.client.credentialBroker.getResolvedAccessToken(credentialRef);
+    const bytes = await readFile(filePath);
+    const form = new FormData();
+    form.set('file', new Blob([bytes], { type: mimeType }), filename || path.basename(filePath));
+    form.set('hosted', 'false');
+
+    const response = await fetch(`${this.client.env.apiBaseUrl}/medias/upload-file`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+        Version: '2023-02-21'
+      },
+      body: form
+    });
+
+    const text = await response.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      headers: Object.fromEntries(response.headers.entries()),
+      data
+    };
+  }
+
+  async createPostWithCreative(credentialRef, locationId, body, options = {}) {
+    const payload = JSON.parse(JSON.stringify(body || {}));
+    delete payload.businessName;
+    const existingMedia = Array.isArray(payload.media) ? payload.media.filter(Boolean) : [];
+    let creative = null;
+
+    if (existingMedia.length === 0 && options.generateCreative !== false) {
+      const generated = await generateSocialPostCreative({
+        locationId,
+        post: payload,
+        businessName: options.businessName,
+        outputDir: options.outputDir
+      });
+      const uploaded = await this.uploadLocalMediaFile(credentialRef, generated.pngPath, {
+        mimeType: 'image/png',
+        filename: path.basename(generated.pngPath)
+      });
+
+      const hostedUrl = uploaded?.data?.url || uploaded?.data?.fileUrl || null;
+      if (!uploaded?.ok || !hostedUrl) {
+        throw new Error(`Failed to upload generated social creative${uploaded?.status ? ` (${uploaded.status})` : ''}.`);
+      }
+
+      payload.media = [{ url: hostedUrl, type: 'image' }];
+      creative = {
+        generated,
+        uploaded: uploaded.data,
+        media: payload.media
+      };
+    }
+
+    const created = await this.createPost(credentialRef, locationId, payload);
+    return {
+      ...created,
+      data: {
+        ...(created?.data && typeof created.data === 'object' ? created.data : {}),
+        openClaw: {
+          creative,
+          requestBody: payload
+        }
+      }
+    };
   }
 
   createPost(credentialRef, locationId, body) {
