@@ -309,6 +309,51 @@ function socialPostCreateResumeData(liveResult, context) {
   };
 }
 
+function socialAccountsFromContext(context) {
+  const data = context?.runtime?.stepOutputs?.refresh_social_accounts?.data;
+  if (Array.isArray(data?.results?.accounts)) return data.results.accounts;
+  if (Array.isArray(data?.accounts)) return data.accounts;
+  if (Array.isArray(data)) return data;
+  return [];
+}
+
+function socialPostPreviewPayload(context, mutationRequest) {
+  const createdPost = context?.runtime?.stepOutputs?.create_social_post?.data;
+  const requestedPost = mutationRequest?.post && typeof mutationRequest.post === 'object' && !Array.isArray(mutationRequest.post)
+    ? mutationRequest.post
+    : {};
+
+  return {
+    ...requestedPost,
+    ...(mutationRequest?.accountIds?.length > 0 ? { accountIds: mutationRequest.accountIds } : {}),
+    ...(mutationRequest?.status ? { status: mutationRequest.status } : {}),
+    ...(mutationRequest?.scheduleDate ? { scheduleDate: mutationRequest.scheduleDate } : {}),
+    ...(mutationRequest?.summary ? { summary: mutationRequest.summary } : {}),
+    ...(createdPost && typeof createdPost === 'object' && !Array.isArray(createdPost) ? createdPost : {})
+  };
+}
+
+function resolvedSocialPostId(context) {
+  const createdPost = context?.runtime?.stepOutputs?.create_social_post?.data;
+  return createdPost?.id || createdPost?.postId || null;
+}
+
+function socialPreviewResultResumeData(liveResult) {
+  const data = liveResult?.data || liveResult || null;
+  return {
+    preview: data && typeof data === 'object'
+      ? {
+          htmlPath: data.htmlPath || null,
+          jsonPath: data.jsonPath || null,
+          pngPath: data.pngPath || null,
+          postId: data.postId || null,
+          locationId: data.locationId || null
+        }
+      : null,
+    raw: data
+  };
+}
+
 function resolvedSocialPostLocationId(context, mutationRequest) {
   return mutationRequest?.locationId || context?.event?.locationId || context?.event?.payload?.locationId || null;
 }
@@ -2849,6 +2894,34 @@ function taskPackHandlers() {
               scheduleDate: mutationRequest?.scheduleDate || null,
               summaryPreview: mutationRequest?.summary ? mutationRequest.summary.slice(0, 160) : null
             },
+            skipIf: () => !explicitCreateSocialPost
+          },
+          {
+            name: 'generate_social_post_preview',
+            kind: 'adapter_call',
+            adapter: 'PreviewArtifactsAdapter',
+            method: 'generateSocialPostPreview',
+            pathHint: 'local://generated/social-post-preview',
+            args: (runtimeContext) => [
+              null,
+              {
+                locationId,
+                postId: resolvedSocialPostId(runtimeContext),
+                post: socialPostPreviewPayload(runtimeContext, mutationRequest),
+                socialAccounts: socialAccountsFromContext(runtimeContext)
+              }
+            ],
+            safe: true,
+            mutation: false,
+            requiresCredential: false,
+            resumeData: socialPreviewResultResumeData,
+            details: (runtimeContext) => ({
+              action: 'generate_social_post_preview',
+              locationId,
+              postId: resolvedSocialPostId(runtimeContext),
+              accountCount: socialAccountsFromContext(runtimeContext).length,
+              targetAccountIds: mutationRequest?.accountIds || []
+            }),
             skipIf: () => !explicitCreateSocialPost
           }
         ];
