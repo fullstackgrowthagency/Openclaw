@@ -1464,7 +1464,13 @@ function googlePromotionCampaignBody(context, mutationRequest) {
     ...(headline ? { headline } : {}),
     ...(description ? { description } : {}),
     ...(normalizeString(mutationRequest?.cta) ? { callToAction: normalizeString(mutationRequest.cta) } : {}),
-    ...(dailyBudget === null ? {} : { dailyBudget }),
+    ...(dailyBudget === null ? {} : {
+      dailyBudget,
+      budget: {
+        budgetType: 'DAILY',
+        amount: dailyBudget
+      }
+    }),
     ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
     ...((googlePromotionAssetImages(mutationRequest).length > 0 || callAssetResourceNames.length > 0 || sitelinkResourceNames.length > 0)
       ? {
