@@ -869,9 +869,9 @@ function googlePublishReadinessFrom(context) {
   return context?.runtime?.stepOutputs?.preflight_google_publish?.data?.publishReadiness || null;
 }
 
-function googleCampaignBody(mutationRequest) {
+function googleCampaignBody(context, mutationRequest) {
   if (googlePromotionRequested(mutationRequest)) {
-    return googlePromotionCampaignBody(mutationRequest);
+    return googlePromotionCampaignBody(context, mutationRequest);
   }
   const campaign = mutationRequest?.campaign;
   if (!campaign || Object.keys(campaign).length === 0) {
@@ -903,6 +903,10 @@ function googleCampaignQuery(mutationRequest, fallbackLocationId = null) {
 
 function googlePromotionRequested(mutationRequest) {
   return ['promote_social_post_to_google_ad', 'promote_social_post', 'build_google_ad_from_social_post'].includes(mutationRequest?.action);
+}
+
+function googlePromotionWebsiteUrl(mutationRequest) {
+  return mutationRequest?.websiteUrl || normalizeString(mutationRequest?.sourcePost?.websiteUrl) || normalizeString(mutationRequest?.sourcePost?.link) || null;
 }
 
 function googlePromotionMediaUrls(mutationRequest) {
@@ -1022,6 +1026,143 @@ function googlePromotionPathParts(websiteUrl) {
   }
 }
 
+function googlePromotionSitelinkSpecs(mutationRequest) {
+  const explicit = Array.isArray(mutationRequest?.promotion?.sitelinks) ? mutationRequest.promotion.sitelinks : null;
+  if (explicit && explicit.length > 0) {
+    return explicit.map((entry, index) => {
+      if (typeof entry === 'string') {
+        return {
+          linkText: clampText(entry, 25),
+          finalUrls: googlePromotionWebsiteUrl(mutationRequest)
+        };
+      }
+      return {
+        resourceName: normalizeString(entry?.resourceName),
+        linkText: clampText(normalizeString(entry?.linkText) || normalizeString(entry?.text) || `Link ${index + 1}`, 25),
+        finalUrls: normalizeString(entry?.finalUrls) || normalizeString(entry?.finalUrl) || googlePromotionWebsiteUrl(mutationRequest),
+        description1: clampText(normalizeString(entry?.description1), 35),
+        description2: clampText(normalizeString(entry?.description2), 35)
+      };
+    }).filter((entry) => entry.resourceName || (entry.linkText && entry.finalUrls));
+  }
+
+  if (mutationRequest?.promotion?.autoSitelinks === false) return [];
+
+  const websiteUrl = googlePromotionWebsiteUrl(mutationRequest);
+  if (!websiteUrl) return [];
+  try {
+    const parsed = new URL(websiteUrl);
+    const origin = parsed.origin;
+    return [
+      {
+        linkText: 'Learn More',
+        finalUrls: websiteUrl,
+        description1: 'See how it works',
+        description2: 'Get the overview'
+      },
+      {
+        linkText: 'Contact Us',
+        finalUrls: `${origin}/contact`,
+        description1: 'Talk with our team',
+        description2: 'Get in touch fast'
+      },
+      {
+        linkText: 'Our Services',
+        finalUrls: `${origin}/services`,
+        description1: 'See service options',
+        description2: 'Find the right fit'
+      }
+    ];
+  } catch {
+    return [];
+  }
+}
+
+function googlePromotionCallPayload(mutationRequest) {
+  const call = normalizePlainObject(mutationRequest?.promotion?.call || mutationRequest?.promotion?.callAsset);
+  if (!call) return null;
+  const phoneNumber = normalizeString(call.phoneNumber);
+  if (!phoneNumber) return null;
+  return {
+    phoneNumber,
+    ...(normalizeString(call.countryCode) ? { countryCode: normalizeString(call.countryCode) } : {})
+  };
+}
+
+function googleAssetsListResumeData(type, liveResult) {
+  const assets = Array.isArray(liveResult?.data) ? liveResult.data : [];
+  return {
+    type,
+    assets: assets.map((asset) => ({
+      resourceName: asset.resourceName || null,
+      type: asset.type || type || null,
+      linkText: asset.linkText || null,
+      phoneNumber: asset.phoneNumber || null,
+      finalUrls: asset.finalUrls || asset.finalUrl || null
+    }))
+  };
+}
+
+function googleAssetsUpsertResumeData(liveResult) {
+  const items = Array.isArray(liveResult?.data) ? liveResult.data : [liveResult?.data].filter(Boolean);
+  return {
+    assets: items.filter((item) => item && typeof item === 'object').map((item) => ({
+      resourceName: item.resourceName || item.results?.resourceName || null,
+      type: item.type || item.results?.type || null,
+      linkText: item.linkText || null,
+      phoneNumber: item.phoneNumber || null,
+      finalUrls: item.finalUrls || item.finalUrl || null,
+      raw: item
+    }))
+  };
+}
+
+function resolvedGoogleCallAssetResourceNames(context) {
+  const existing = context?.runtime?.stepOutputs?.get_google_call_assets?.data?.assets;
+  const created = context?.runtime?.stepOutputs?.upsert_google_extension_assets?.data?.assets;
+  return [...new Set([
+    ...(Array.isArray(existing) ? existing : []),
+    ...(Array.isArray(created) ? created : [])
+  ].filter((asset) => asset?.type === 'CALL' && normalizeString(asset?.resourceName)).map((asset) => asset.resourceName))];
+}
+
+function resolvedGoogleSitelinkResourceNames(context, mutationRequest) {
+  const created = context?.runtime?.stepOutputs?.upsert_google_extension_assets?.data?.assets;
+  const explicit = googlePromotionSitelinkSpecs(mutationRequest)
+    .map((entry) => normalizeString(entry?.resourceName))
+    .filter(Boolean);
+  return [...new Set([
+    ...explicit,
+    ...(Array.isArray(created) ? created : []).filter((asset) => asset?.type === 'SITELINK' && normalizeString(asset?.resourceName)).map((asset) => asset.resourceName)
+  ])];
+}
+
+function googleExtensionAssetBodies(context, mutationRequest) {
+  const locationId = mutationRequest?.locationId || context?.event?.locationId || null;
+  const sitelinks = googlePromotionSitelinkSpecs(mutationRequest)
+    .filter((entry) => !normalizeString(entry?.resourceName))
+    .map((entry) => ({
+      locationId,
+      type: 'SITELINK',
+      payload: {
+        linkText: entry.linkText,
+        finalUrls: entry.finalUrls,
+        ...(entry.description1 ? { description1: entry.description1 } : {}),
+        ...(entry.description2 ? { description2: entry.description2 } : {})
+      }
+    }));
+
+  const callPayload = googlePromotionCallPayload(mutationRequest);
+  const shouldCreateCall = Boolean(callPayload) && resolvedGoogleCallAssetResourceNames(context).length === 0;
+  const calls = shouldCreateCall ? [{
+    locationId,
+    type: 'CALL',
+    payload: callPayload
+  }] : [];
+
+  return [...sitelinks, ...calls];
+}
+
 function googlePromotionMediaItems(mutationRequest) {
   return googlePromotionMediaUrls(mutationRequest).slice(0, 5).map((src) => ({ type: 'IMAGE', src }));
 }
@@ -1080,9 +1221,9 @@ function googlePromotionAdGroupBody(mutationRequest, websiteUrl) {
   };
 }
 
-function googlePromotionCampaignBody(mutationRequest) {
+function googlePromotionCampaignBody(context, mutationRequest) {
   const mediaUrls = googlePromotionMediaUrls(mutationRequest);
-  const websiteUrl = mutationRequest?.websiteUrl || normalizeString(mutationRequest?.sourcePost?.websiteUrl) || normalizeString(mutationRequest?.sourcePost?.link) || null;
+  const websiteUrl = googlePromotionWebsiteUrl(mutationRequest);
   const headline = inferredPromotionHeadline(mutationRequest);
   const description = inferredPromotionDescription(mutationRequest);
   const dailyBudget = normalizeNumber(mutationRequest?.promotion?.dailyBudget);
@@ -1094,6 +1235,8 @@ function googlePromotionCampaignBody(mutationRequest) {
   const adGroups = Array.isArray(mutationRequest?.promotion?.adGroups) && mutationRequest.promotion.adGroups.length > 0
     ? mutationRequest.promotion.adGroups
     : [googlePromotionAdGroupBody(mutationRequest, websiteUrl)];
+  const callAssetResourceNames = resolvedGoogleCallAssetResourceNames(context);
+  const sitelinkResourceNames = resolvedGoogleSitelinkResourceNames(context, mutationRequest);
 
   return {
     ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
@@ -1107,7 +1250,15 @@ function googlePromotionCampaignBody(mutationRequest) {
     ...(normalizeString(mutationRequest?.cta) ? { callToAction: normalizeString(mutationRequest.cta) } : {}),
     ...(dailyBudget === null ? {} : { dailyBudget }),
     ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
-    ...(googlePromotionAssetImages(mutationRequest).length > 0 ? { assets: { images: googlePromotionAssetImages(mutationRequest) } } : {}),
+    ...((googlePromotionAssetImages(mutationRequest).length > 0 || callAssetResourceNames.length > 0 || sitelinkResourceNames.length > 0)
+      ? {
+          assets: {
+            ...(callAssetResourceNames.length > 0 ? { calls: callAssetResourceNames } : {}),
+            ...(sitelinkResourceNames.length > 0 ? { sitelinks: sitelinkResourceNames } : {}),
+            ...(googlePromotionAssetImages(mutationRequest).length > 0 ? { images: googlePromotionAssetImages(mutationRequest) } : {})
+          }
+        }
+      : {}),
     adGroups,
     ...(mutationRequest?.promotion?.campaign || {}),
     ...(mutationRequest?.campaign || {})
@@ -2674,6 +2825,10 @@ function taskPackHandlers() {
         );
         const explicitPublish = mutationRequest?.action === 'publish_google_ad'
           || ((mutationRequest?.action === 'build_google_ad_campaign' || explicitPromoteSocialPost) && mutationRequest?.publish === true);
+        const wantsGoogleExtensions = explicitPromoteSocialPost
+          || Array.isArray(mutationRequest?.promotion?.sitelinks)
+          || Boolean(mutationRequest?.promotion?.call)
+          || Boolean(mutationRequest?.promotion?.callAsset);
 
         return [
           {
@@ -2729,28 +2884,69 @@ function taskPackHandlers() {
             skipIf: () => !explicitCampaignFetch
           },
           {
+            name: 'get_google_call_assets',
+            kind: 'adapter_call',
+            adapter: 'GoogleAdsAdapter',
+            method: 'getAssets',
+            pathHint: '/ad-publishing/google/assets',
+            args: () => [context.credentialRef || defaultLocationCredential(context), { locationId: mutationRequest?.locationId || context.event.locationId || null, type: 'CALL' }],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: (liveResult) => googleAssetsListResumeData('CALL', liveResult),
+            details: {
+              action: 'get_google_call_assets',
+              locationId: mutationRequest?.locationId || context.event.locationId || null
+            },
+            skipIf: () => !wantsGoogleExtensions
+          },
+          {
+            name: 'upsert_google_extension_assets',
+            kind: 'adapter_call',
+            adapter: 'GoogleAdsAdapter',
+            method: 'upsertAssets',
+            httpMethod: 'POST',
+            pathHint: '/ad-publishing/google/assets',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), googleExtensionAssetBodies(runtimeContext, mutationRequest)],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            resumeData: googleAssetsUpsertResumeData,
+            details: (runtimeContext) => ({
+              action: 'upsert_google_extension_assets',
+              locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
+              assetCount: googleExtensionAssetBodies(runtimeContext, mutationRequest).length,
+              sitelinks: googlePromotionSitelinkSpecs(mutationRequest).map((entry) => entry.linkText || entry.resourceName).filter(Boolean),
+              createCallAsset: Boolean(googlePromotionCallPayload(mutationRequest)) && resolvedGoogleCallAssetResourceNames(runtimeContext).length === 0
+            }),
+            skipIf: (runtimeContext) => googleExtensionAssetBodies(runtimeContext, mutationRequest).length === 0
+          },
+          {
             name: 'upsert_google_campaign',
             kind: 'adapter_call',
             adapter: 'GoogleAdsAdapter',
             method: 'upsertCampaign',
             httpMethod: 'PUT',
             pathHint: '/ad-publishing/google/ads',
-            args: () => [context.credentialRef || defaultLocationCredential(context), googleCampaignBody(mutationRequest)],
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), googleCampaignBody(runtimeContext, mutationRequest)],
             safe: false,
             mutation: true,
             requiresApproval: true,
             requiresCredential: true,
             resumeData: googleCampaignUpsertResumeData,
-            details: {
+            details: (runtimeContext) => ({
               action: 'upsert_google_campaign',
-              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
               adId: mutationRequest?.adId || null,
               name: mutationRequest?.campaign?.name || inferredPromotionCampaignName(mutationRequest),
               status: mutationRequest?.campaign?.status || inferredPromotionStatus(mutationRequest),
               advertisingChannelType: mutationRequest?.campaign?.advertisingChannelType || mutationRequest?.campaign?.channelType || inferredGoogleAdvertisingChannelType(mutationRequest),
               websiteUrl: mutationRequest?.websiteUrl || null,
-              mediaUrls: googlePromotionMediaUrls(mutationRequest)
-            },
+              mediaUrls: googlePromotionMediaUrls(mutationRequest),
+              callAssetCount: resolvedGoogleCallAssetResourceNames(runtimeContext).length,
+              sitelinkAssetCount: resolvedGoogleSitelinkResourceNames(runtimeContext, mutationRequest).length
+            }),
             skipIf: () => !explicitCampaignUpsert
           },
           {

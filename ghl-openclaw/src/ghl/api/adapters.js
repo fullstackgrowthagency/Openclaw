@@ -611,6 +611,21 @@ export class GoogleAdsAdapter {
     return this.client.request({ credentialRef, method: 'GET', path: `/ad-publishing/google/ads/${adId}`, query });
   }
 
+  getAssets(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/google/assets', query });
+  }
+
+  async upsertAssets(credentialRef, body) {
+    const items = Array.isArray(body) ? body : [body];
+    const results = [];
+    for (const item of items) {
+      results.push(await this.client.request({ credentialRef, method: 'POST', path: '/ad-publishing/google/assets', body: item }));
+    }
+    return Array.isArray(body)
+      ? { ok: results.every((entry) => entry?.ok !== false), status: results.at(-1)?.status ?? null, headers: results.at(-1)?.headers ?? {}, data: results.map((entry) => entry?.data ?? null) }
+      : results[0];
+  }
+
   upsertCampaign(credentialRef, body) {
     return this.client.request({ credentialRef, method: 'PUT', path: '/ad-publishing/google/ads', body });
   }
