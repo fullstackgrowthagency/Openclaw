@@ -1110,11 +1110,23 @@ function normalizeGoogleTargetingEntries(values) {
   }).filter(Boolean);
 }
 
+function normalizeGoogleLocaleEntries(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map((entry) => {
+    if (typeof entry === 'string') {
+      const code = normalizeString(entry);
+      return code ? { code } : null;
+    }
+    if (!entry || typeof entry !== 'object') return null;
+    return { ...entry };
+  }).filter(Boolean);
+}
+
 function googlePromotionTargeting(mutationRequest) {
   const targeting = normalizePlainObject(mutationRequest?.promotion?.targeting)
     || normalizePlainObject(mutationRequest?.campaign?.targeting)
     || {};
-  const locales = normalizeStringArray(targeting.locales || targeting.languages);
+  const locales = normalizeGoogleLocaleEntries(targeting.locales || targeting.languages);
   const geoLocations = normalizeGoogleTargetingEntries(targeting.geoLocations || targeting.locations);
   const segments = normalizeGoogleTargetingEntries(targeting.segments || targeting.audienceSegments);
   const targetInterests = normalizeGoogleTargetingEntries(targeting.targetInterests || targeting.interests);
@@ -1212,12 +1224,12 @@ function googleAssetsListResumeData(type, liveResult) {
   };
 }
 
-function googleAssetsUpsertResumeData(liveResult) {
+function googleAssetsUpsertResumeData(liveResult, requestedAssets = []) {
   const items = Array.isArray(liveResult?.data) ? liveResult.data : [liveResult?.data].filter(Boolean);
   return {
-    assets: items.filter((item) => item && typeof item === 'object').map((item) => ({
+    assets: items.filter((item) => item && typeof item === 'object').map((item, index) => ({
       resourceName: item.resourceName || item.results?.resourceName || null,
-      type: item.type || item.results?.type || null,
+      type: item.type || item.results?.type || requestedAssets[index]?.type || null,
       linkText: item.linkText || null,
       phoneNumber: item.phoneNumber || null,
       finalUrls: item.finalUrls || item.finalUrl || null,
@@ -3023,7 +3035,7 @@ function taskPackHandlers() {
             mutation: true,
             requiresApproval: true,
             requiresCredential: true,
-            resumeData: googleAssetsUpsertResumeData,
+            resumeData: (liveResult, runtimeContext) => googleAssetsUpsertResumeData(liveResult, googleExtensionAssetBodies(runtimeContext, mutationRequest)),
             details: (runtimeContext) => ({
               action: 'upsert_google_extension_assets',
               locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
