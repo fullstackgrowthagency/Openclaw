@@ -653,6 +653,89 @@ function sourcePostTheme(sourcePost) {
   return normalizeString(sourcePost?.theme) || normalizeString(sourcePost?.topic) || null;
 }
 
+function splitCamelCaseWords(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return [];
+  return normalized
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .split(/[^a-zA-Z0-9]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function toTitleCase(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  return normalized
+    .split(/\s+/)
+    .map((part) => part ? `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}` : part)
+    .join(' ')
+    .trim() || null;
+}
+
+function sourcePostHashtags(sourcePost) {
+  const summary = sourcePostSummary(sourcePost);
+  if (!summary) return [];
+  const matches = summary.match(/#[A-Za-z0-9_]+/g) || [];
+  return [...new Set(matches.map((tag) => splitCamelCaseWords(tag.replace(/^#/, '')).join(' ')).map(toTitleCase).filter(Boolean))];
+}
+
+function sourcePostTitle(sourcePost) {
+  return normalizeString(sourcePost?.title)
+    || normalizeString(sourcePost?.name)
+    || normalizeString(sourcePost?.headline)
+    || normalizeString(sourcePost?.subject)
+    || null;
+}
+
+function sourcePostWebsiteUrl(sourcePost) {
+  return normalizeString(sourcePost?.websiteUrl)
+    || normalizeString(sourcePost?.link)
+    || normalizeString(sourcePost?.url)
+    || normalizeString(sourcePost?.destinationUrl)
+    || normalizeString(sourcePost?.callToActionUrl)
+    || normalizeString(sourcePost?.ogTagsDetails?.url)
+    || normalizeString(sourcePost?.linkDetails?.url)
+    || normalizeString(sourcePost?.cta?.url)
+    || null;
+}
+
+function cleanedPromotionPhrase(value, maxLength = 48) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  const cleaned = normalized
+    .replace(/[#*_`]+/g, ' ')
+    .replace(/[.!?]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return null;
+  return clampText(cleaned, maxLength);
+}
+
+function inferredPromotionThemeLabel(sourcePost) {
+  const explicitTheme = cleanedPromotionPhrase(sourcePostTheme(sourcePost), 48);
+  if (explicitTheme) return explicitTheme;
+
+  const explicitTitle = cleanedPromotionPhrase(sourcePostTitle(sourcePost), 48);
+  if (explicitTitle) return explicitTitle;
+
+  const hashtags = sourcePostHashtags(sourcePost);
+  if (hashtags.length > 0) {
+    const preferred = hashtags.slice(0, 2).join(' and ');
+    return cleanedPromotionPhrase(preferred, 48);
+  }
+
+  const firstLine = firstNonHashtagLine(sourcePostSummary(sourcePost));
+  if (!firstLine) return null;
+
+  const softened = firstLine
+    .replace(/^(great|good|strong|better|best)\s+/i, '')
+    .replace(/\b(gets|is|are|was|were|feels|looks|becomes)\b.*$/i, '')
+    .trim();
+
+  return cleanedPromotionPhrase(softened || firstLine, 48);
+}
+
 function sourcePostMediaUrls(sourcePost) {
   const urls = [];
   const push = (value) => {
@@ -754,6 +837,7 @@ function clampText(value, maxLength) {
 function inferredPromotionHeadline(mutationRequest) {
   return mutationRequest?.headline
     || clampText(firstNonHashtagLine(sourcePostSummary(mutationRequest?.sourcePost)), 60)
+    || inferredPromotionThemeLabel(mutationRequest?.sourcePost)
     || clampText(sourcePostTheme(mutationRequest?.sourcePost), 60)
     || 'Learn more';
 }
@@ -768,7 +852,7 @@ function inferredPromotionDescription(mutationRequest) {
 function inferredPromotionCampaignName(mutationRequest) {
   const explicit = normalizeString(mutationRequest?.promotion?.campaignName) || normalizeString(mutationRequest?.campaign?.name);
   if (explicit) return explicit;
-  const theme = sourcePostTheme(mutationRequest?.sourcePost);
+  const theme = inferredPromotionThemeLabel(mutationRequest?.sourcePost);
   if (theme) return `Promote ${theme}`;
   const headline = inferredPromotionHeadline(mutationRequest);
   return headline ? `Promote ${headline}` : 'Promote social post';
@@ -840,7 +924,7 @@ function facebookPromotionAdBody(context, mutationRequest) {
   const mediaUrls = resolvedFacebookPromotionMediaUrls(context, mutationRequest);
   const campaignId = resolvedFacebookCampaignId(context, mutationRequest);
   const adsetId = resolvedFacebookAdsetId(context, mutationRequest);
-  const websiteUrl = mutationRequest?.websiteUrl || normalizeString(sourcePost?.websiteUrl) || normalizeString(sourcePost?.link) || null;
+  const websiteUrl = mutationRequest?.websiteUrl || sourcePostWebsiteUrl(sourcePost) || null;
   const creative = {
     primaryText: sourcePostSummary(sourcePost),
     headline: inferredPromotionHeadline(mutationRequest),
