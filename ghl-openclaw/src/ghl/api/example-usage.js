@@ -308,6 +308,21 @@ export const EXAMPLE_CALLS = {
     method: 'getCampaign',
     args: ['location-oauth', 'GOOGLE_AD_ID', { locationId: 'LOCATION_ID' }]
   },
+  searchGoogleTargeting: {
+    adapter: 'GoogleAdsAdapter',
+    method: 'searchTargeting',
+    args: ['location-oauth', { locationId: 'LOCATION_ID', type: 'geolocation', query: 'Boise' }]
+  },
+  getGoogleTargetInterests: {
+    adapter: 'GoogleAdsAdapter',
+    method: 'getTargetInterests',
+    args: ['location-oauth', { locationId: 'LOCATION_ID', type: 'IN_MARKET', advertisingChannelType: 'SEARCH' }]
+  },
+  getGoogleSegments: {
+    adapter: 'GoogleAdsAdapter',
+    method: 'getSegments',
+    args: ['location-oauth', { locationId: 'LOCATION_ID' }]
+  },
   upsertGoogleCampaign: {
     adapter: 'GoogleAdsAdapter',
     method: 'upsertCampaign',
@@ -341,7 +356,27 @@ export const EXAMPLE_CALLS = {
             promotion: {
               advertisingChannelType: 'SEARCH',
               dailyBudget: 20,
-              status: 'PAUSED'
+              status: 'PAUSED',
+              businessName: 'Example Agency',
+              copy: {
+                headlines: ['Marketing clarity that converts', 'Turn clicks into clients'],
+                descriptions: ['Get clearer growth decisions with stronger tracking and offers.'],
+                path1: 'growth',
+                path2: 'clarity'
+              },
+              keywords: {
+                positives: ['analytics clarity', { keyword: 'lead generation', matchType: 'EXACT' }],
+                negatives: ['jobs', 'free']
+              },
+              targeting: {
+                locales: ['en'],
+                selectedChannels: ['gmail', 'discover'],
+                geoLocations: [{ name: 'Boise, Idaho' }]
+              },
+              sitelinks: [
+                { linkText: 'Pricing', finalUrl: 'https://example.com/pricing', description1: 'See plans', description2: 'Find your fit' },
+                { linkText: 'Book a Call', finalUrl: 'https://example.com/contact' }
+              ]
             }
           }
         }

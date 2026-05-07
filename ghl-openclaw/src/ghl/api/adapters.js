@@ -615,6 +615,18 @@ export class GoogleAdsAdapter {
     return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/google/assets', query });
   }
 
+  searchTargeting(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/google/targeting/search', query });
+  }
+
+  getTargetInterests(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/google/target-interests', query });
+  }
+
+  getSegments(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/google/segments', query });
+  }
+
   async upsertAssets(credentialRef, body) {
     const items = Array.isArray(body) ? body : [body];
     const results = [];
