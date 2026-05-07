@@ -18,6 +18,7 @@ import { GhlWebhookServer } from '../ghl/webhooks/server.js';
 import { WebhookStore } from '../ghl/webhooks/store.js';
 import { WebhookProcessor } from '../ghl/webhooks/processor.js';
 import { ingestTestEvent } from '../ghl/webhooks/test-ingest.js';
+import { generateGoogleAdPreview } from '../ghl/previews/google-ad-preview.js';
 
 const command = normalizeCommand(process.argv[2] || 'status');
 const args = process.argv.slice(3);
@@ -234,6 +235,15 @@ async function main() {
         headers: sanitizeHeaders(result.headers || {}),
         dataPreview: previewData(result.data)
       }, null, 2));
+      return;
+    }
+    case 'preview:google-ad': {
+      const credentialRef = requireArg(args, '--credential-ref');
+      const locationId = requireArg(args, '--location-id');
+      const adId = requireArg(args, '--ad-id');
+      const outputDir = optionalArg(args, '--output-dir') || path.join(env.dataDir, 'generated', 'previews');
+      const result = await generateGoogleAdPreview({ credentialRef, locationId, adId, outputDir });
+      console.log(JSON.stringify(result, null, 2));
       return;
     }
     case 'webhook:status': {

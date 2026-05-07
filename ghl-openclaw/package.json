@@ -14,6 +14,7 @@
     "approval:status": "node src/cli/index.js approval:status",
     "report:generate": "node src/cli/index.js report:generate",
     "audit:status": "node src/cli/index.js audit:status",
+    "preview:google-ad": "node src/cli/index.js preview:google-ad",
     "auth:status": "node src/cli/index.js auth:status",
     "auth:doctor": "node src/cli/index.js auth:doctor",
     "auth:list": "node src/cli/index.js auth:list",
