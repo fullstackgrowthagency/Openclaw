@@ -573,6 +573,32 @@ export class GoogleAdsAdapter {
     this.client = client;
   }
 
+  static publishReadiness(data) {
+    const campaign = data && typeof data === 'object' ? data : null;
+    const adGroups = Array.isArray(campaign?.adGroups) ? campaign.adGroups : [];
+    const adContent = adGroups.flatMap((group) => Array.isArray(group?.adContent) ? group.adContent : []);
+    const images = Array.isArray(campaign?.assets?.images) ? campaign.assets.images : [];
+    const missing = [];
+
+    if (!campaign?.id) missing.push('campaign.id');
+    if (adGroups.length === 0) missing.push('adGroups');
+    if (adContent.length === 0) missing.push('adContent');
+    if (images.length === 0) missing.push('assets.images');
+    if (!adContent.some((entry) => Array.isArray(entry?.headlines) && entry.headlines.length > 0)) missing.push('adContent.headlines');
+    if (!adContent.some((entry) => Array.isArray(entry?.descriptions) && entry.descriptions.length > 0)) missing.push('adContent.descriptions');
+    if (!adContent.some((entry) => typeof entry?.finalUrl === 'string' && entry.finalUrl.trim())) missing.push('adContent.finalUrl');
+
+    return {
+      ready: missing.length === 0,
+      missing,
+      counts: {
+        adGroups: adGroups.length,
+        adContent: adContent.length,
+        images: images.length
+      }
+    };
+  }
+
   getIntegration(credentialRef, query = {}) {
     return this.client.request({ credentialRef, method: 'GET', path: '/ad-publishing/google/integration', query });
   }
@@ -587,6 +613,21 @@ export class GoogleAdsAdapter {
 
   upsertCampaign(credentialRef, body) {
     return this.client.request({ credentialRef, method: 'PUT', path: '/ad-publishing/google/ads', body });
+  }
+
+  async preflightPublish(credentialRef, adId, query = {}) {
+    const result = await this.getCampaign(credentialRef, adId, query);
+    const publishReadiness = GoogleAdsAdapter.publishReadiness(result?.data);
+    if (!publishReadiness.ready) {
+      throw new Error(`Google ad ${adId} is not ready to publish. Missing: ${publishReadiness.missing.join(', ')}`);
+    }
+    return {
+      ...result,
+      data: {
+        campaign: result?.data || null,
+        publishReadiness
+      }
+    };
   }
 
   publishAd(credentialRef, adId, body = {}) {

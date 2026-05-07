@@ -812,6 +812,29 @@ function googleCampaignResumeData(liveResult) {
   };
 }
 
+function googlePublishPreflightResumeData(liveResult) {
+  const campaign = liveResult?.data?.campaign || null;
+  const readiness = liveResult?.data?.publishReadiness || null;
+  return {
+    campaign: campaign && typeof campaign === 'object'
+      ? {
+          id: extractGoogleEntityId(campaign),
+          name: campaign.name || campaign.campaignName || null,
+          status: campaign.status || campaign.primaryStatus || campaign.publishingStatus || null,
+          advertisingChannelType: campaign.advertisingChannelType || campaign.channelType || null
+        }
+      : null,
+    publishReadiness: readiness && typeof readiness === 'object'
+      ? {
+          ready: readiness.ready === true,
+          missing: Array.isArray(readiness.missing) ? readiness.missing : [],
+          counts: readiness.counts || null
+        }
+      : null,
+    raw: liveResult?.data || null
+  };
+}
+
 function googleCampaignUpsertResumeData(liveResult, context) {
   const mutationRequest = googleAdMutationRequestFrom(context?.event);
   const entity = liveResult?.data?.campaign || liveResult?.data?.results?.campaign || liveResult?.data || null;
@@ -842,6 +865,10 @@ function resolvedGoogleAdId(context, mutationRequest) {
     || null;
 }
 
+function googlePublishReadinessFrom(context) {
+  return context?.runtime?.stepOutputs?.preflight_google_publish?.data?.publishReadiness || null;
+}
+
 function googleCampaignBody(mutationRequest) {
   if (googlePromotionRequested(mutationRequest)) {
     return googlePromotionCampaignBody(mutationRequest);
@@ -863,6 +890,13 @@ function googleEntityQuery(mutationRequest) {
   return {
     ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
     ...(entityType ? { entityType, type: entityType } : {}),
+    ...(normalizePlainObject(mutationRequest?.query) || {})
+  };
+}
+
+function googleCampaignQuery(mutationRequest, fallbackLocationId = null) {
+  return {
+    ...(mutationRequest?.locationId || fallbackLocationId ? { locationId: mutationRequest?.locationId || fallbackLocationId } : {}),
     ...(normalizePlainObject(mutationRequest?.query) || {})
   };
 }
@@ -2683,7 +2717,7 @@ function taskPackHandlers() {
             adapter: 'GoogleAdsAdapter',
             method: 'getCampaign',
             pathHint: '/ad-publishing/google/ads/:adId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.adId, mutationRequest.query || {}],
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.adId, googleCampaignQuery(mutationRequest, context.event.locationId || null)],
             safe: true,
             mutation: false,
             requiresCredential: true,
@@ -2720,6 +2754,25 @@ function taskPackHandlers() {
             skipIf: () => !explicitCampaignUpsert
           },
           {
+            name: 'preflight_google_publish',
+            kind: 'adapter_call',
+            adapter: 'GoogleAdsAdapter',
+            method: 'preflightPublish',
+            pathHint: '/ad-publishing/google/ads/:adId',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedGoogleAdId(runtimeContext, mutationRequest), googleCampaignQuery(mutationRequest, runtimeContext.event.locationId || null)],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: googlePublishPreflightResumeData,
+            details: (runtimeContext) => ({
+              action: 'preflight_google_publish',
+              adId: resolvedGoogleAdId(runtimeContext, mutationRequest),
+              publishRequested: true,
+              readiness: googlePublishReadinessFrom(runtimeContext)
+            }),
+            skipIf: (runtimeContext) => !explicitPublish || !resolvedGoogleAdId(runtimeContext, mutationRequest)
+          },
+          {
             name: 'publish_google_ad',
             kind: 'adapter_call',
             adapter: 'GoogleAdsAdapter',
@@ -2734,7 +2787,8 @@ function taskPackHandlers() {
             details: (runtimeContext) => ({
               action: 'publish_google_ad',
               adId: resolvedGoogleAdId(runtimeContext, mutationRequest),
-              publishRequested: true
+              publishRequested: true,
+              readiness: googlePublishReadinessFrom(runtimeContext)
             }),
             skipIf: (runtimeContext) => !explicitPublish || !resolvedGoogleAdId(runtimeContext, mutationRequest)
           },
