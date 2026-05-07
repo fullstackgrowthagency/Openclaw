@@ -217,6 +217,7 @@ function facebookAdMutationRequestFrom(event) {
   return {
     action: request.action || null,
     locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    sourcePostId: normalizeString(request.sourcePostId) || normalizeString(request.socialPostId) || normalizeString(request.postId),
     campaignId: normalizeString(request.campaignId) || normalizeString(campaign?.id),
     adsetId: normalizeString(request.adsetId) || normalizeString(adset?.id),
     adId: normalizeString(request.adId) || normalizeString(ad?.id),
@@ -235,6 +236,25 @@ function facebookAdMutationRequestFrom(event) {
     description: normalizeString(request.description) || normalizeString(promotion?.description),
     query: query || {},
     publish: publish === true
+  };
+}
+
+function socialPostFetchResumeData(liveResult) {
+  const data = liveResult?.data || null;
+  const post = data?.results?.post || data?.post || null;
+  return {
+    post: post && typeof post === 'object'
+      ? {
+          id: post._id || post.id || post.postId || null,
+          locationId: post.locationId || null,
+          status: post.status || null,
+          summary: post.summary || post.text || null,
+          media: Array.isArray(post.media) ? post.media : [],
+          accountIds: Array.isArray(post.accountIds) ? post.accountIds : [],
+          raw: post
+        }
+      : null,
+    raw: data
   };
 }
 
@@ -546,10 +566,10 @@ function facebookAdPreviewPayload(context, mutationRequest) {
     campaignId: resolvedFacebookCampaignId(context, mutationRequest),
     adsetId: resolvedFacebookAdsetId(context, mutationRequest),
     adId: resolvedFacebookAdId(context, mutationRequest),
-    campaign: facebookCampaignBody(mutationRequest),
+    campaign: facebookCampaignBody(context, mutationRequest),
     adset: facebookAdsetBody(context, mutationRequest),
     ad: facebookAdBody(context, mutationRequest),
-    sourcePost: normalizePlainObject(mutationRequest?.sourcePost) || {}
+    sourcePost: resolvedPromotionSourcePost(context, mutationRequest)
   };
 }
 
@@ -561,9 +581,9 @@ function facebookAdsetDependencyReady(context, mutationRequest) {
   return Boolean(resolvedFacebookAdsetId(context, mutationRequest));
 }
 
-function facebookCampaignBody(mutationRequest) {
+function facebookCampaignBody(context, mutationRequest) {
   if (facebookPromotionRequested(mutationRequest)) {
-    return facebookPromotionCampaignBody(mutationRequest);
+    return facebookPromotionCampaignBody({ ...mutationRequest, sourcePost: resolvedPromotionSourcePost(context, mutationRequest) });
   }
   const campaign = mutationRequest?.campaign;
   if (!campaign || Object.keys(campaign).length === 0) {
@@ -574,7 +594,7 @@ function facebookCampaignBody(mutationRequest) {
 
 function facebookAdsetBody(context, mutationRequest) {
   if (facebookPromotionRequested(mutationRequest)) {
-    return facebookPromotionAdsetBody(context, mutationRequest);
+    return facebookPromotionAdsetBody(context, { ...mutationRequest, sourcePost: resolvedPromotionSourcePost(context, mutationRequest) });
   }
   const adset = mutationRequest?.adset;
   if (!adset || Object.keys(adset).length === 0) {
@@ -592,7 +612,7 @@ function facebookAdsetBody(context, mutationRequest) {
 
 function facebookAdBody(context, mutationRequest) {
   if (facebookPromotionRequested(mutationRequest)) {
-    return facebookPromotionAdBody(context, mutationRequest);
+    return facebookPromotionAdBody(context, { ...mutationRequest, sourcePost: resolvedPromotionSourcePost(context, mutationRequest) });
   }
   const ad = mutationRequest?.ad;
   if (!ad || Object.keys(ad).length === 0) {
@@ -678,8 +698,35 @@ function sourcePostMediaUrls(sourcePost) {
   return [...new Set(urls)];
 }
 
+function fetchedPromotionSourcePost(context) {
+  return context?.runtime?.stepOutputs?.get_source_social_post?.data?.results?.post
+    || context?.runtime?.stepOutputs?.get_source_social_post?.data?.post
+    || context?.runtime?.stepOutputs?.get_source_social_post?.data?.raw
+    || null;
+}
+
+function resolvedPromotionSourcePost(context, mutationRequest) {
+  const fetched = fetchedPromotionSourcePost(context);
+  const explicit = normalizePlainObject(mutationRequest?.sourcePost) || {};
+  if (fetched && typeof fetched === 'object') {
+    return {
+      ...fetched,
+      ...explicit,
+      media: Array.isArray(explicit.media) && explicit.media.length > 0 ? explicit.media : Array.isArray(fetched.media) ? fetched.media : [],
+      mediaUrls: Array.isArray(explicit.mediaUrls) && explicit.mediaUrls.length > 0 ? explicit.mediaUrls : Array.isArray(fetched.mediaUrls) ? fetched.mediaUrls : [],
+      imageUrls: Array.isArray(explicit.imageUrls) && explicit.imageUrls.length > 0 ? explicit.imageUrls : Array.isArray(fetched.imageUrls) ? fetched.imageUrls : []
+    };
+  }
+  return explicit;
+}
+
 function facebookPromotionMediaUrls(mutationRequest) {
   return [...new Set([...(mutationRequest?.mediaUrls || []), ...sourcePostMediaUrls(mutationRequest?.sourcePost)])];
+}
+
+function resolvedFacebookPromotionMediaUrls(context, mutationRequest) {
+  const sourcePost = resolvedPromotionSourcePost(context, mutationRequest);
+  return [...new Set([...(mutationRequest?.mediaUrls || []), ...sourcePostMediaUrls(sourcePost)])];
 }
 
 function firstParagraph(text) {
@@ -789,14 +836,15 @@ function facebookPromotionAdsetBody(context, mutationRequest) {
 }
 
 function facebookPromotionAdBody(context, mutationRequest) {
-  const mediaUrls = facebookPromotionMediaUrls(mutationRequest);
+  const sourcePost = resolvedPromotionSourcePost(context, mutationRequest);
+  const mediaUrls = resolvedFacebookPromotionMediaUrls(context, mutationRequest);
   const campaignId = resolvedFacebookCampaignId(context, mutationRequest);
   const adsetId = resolvedFacebookAdsetId(context, mutationRequest);
-  const websiteUrl = mutationRequest?.websiteUrl || normalizeString(mutationRequest?.sourcePost?.websiteUrl) || normalizeString(mutationRequest?.sourcePost?.link) || null;
+  const websiteUrl = mutationRequest?.websiteUrl || normalizeString(sourcePost?.websiteUrl) || normalizeString(sourcePost?.link) || null;
   const creative = {
-    primaryText: sourcePostSummary(mutationRequest?.sourcePost),
+    primaryText: sourcePostSummary(sourcePost),
     headline: inferredPromotionHeadline(mutationRequest),
-    ...(inferredPromotionDescription(mutationRequest) ? { description: inferredPromotionDescription(mutationRequest) } : {}),
+    ...(inferredPromotionDescription({ ...mutationRequest, sourcePost }) ? { description: inferredPromotionDescription({ ...mutationRequest, sourcePost }) } : {}),
     ...(normalizeString(mutationRequest?.cta) ? { callToAction: normalizeString(mutationRequest?.cta) } : {}),
     ...(websiteUrl ? { link: websiteUrl } : {}),
     ...(mediaUrls[0] ? { mediaUrl: mediaUrls[0] } : {}),
@@ -2993,9 +3041,10 @@ function taskPackHandlers() {
       trigger_events: ['ManualRun'],
       buildExecutionPlan(context) {
         const mutationRequest = facebookAdMutationRequestFrom(context.event);
-        const explicitPromoteSocialPost = facebookPromotionRequested(mutationRequest)
-          && Boolean(sourcePostSummary(mutationRequest?.sourcePost))
+        const hasInlinePromotionSource = Boolean(sourcePostSummary(mutationRequest?.sourcePost))
           && (facebookPromotionMediaUrls(mutationRequest).length > 0 || Boolean(mutationRequest?.websiteUrl));
+        const explicitPromoteSocialPost = facebookPromotionRequested(mutationRequest)
+          && (hasInlinePromotionSource || Boolean(mutationRequest?.sourcePostId));
         const explicitEntityList = mutationRequest?.action === 'list_facebook_ad_entities'
           && Boolean(mutationRequest?.entityType || mutationRequest?.query?.entityType);
         const explicitCampaignFetch = mutationRequest?.action === 'get_facebook_campaign'
@@ -3019,6 +3068,29 @@ function taskPackHandlers() {
           || ((mutationRequest?.action === 'build_facebook_ad_campaign' || explicitPromoteSocialPost) && mutationRequest?.publish === true);
 
         return [
+          {
+            name: 'get_source_social_post',
+            kind: 'adapter_call',
+            adapter: 'SocialPlannerAdapter',
+            method: 'getPost',
+            pathHint: '/social-media-posting/:locationId/posts/:postId',
+            args: () => [
+              context.credentialRef || defaultLocationCredential(context),
+              mutationRequest?.locationId || context.event.locationId || null,
+              mutationRequest?.sourcePostId,
+              {}
+            ],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: socialPostFetchResumeData,
+            details: {
+              action: 'get_source_social_post',
+              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              postId: mutationRequest?.sourcePostId || null
+            },
+            skipIf: () => !explicitPromoteSocialPost || !mutationRequest?.sourcePostId
+          },
           {
             name: 'list_facebook_ad_entities',
             kind: 'adapter_call',
@@ -3061,21 +3133,21 @@ function taskPackHandlers() {
             method: 'upsertCampaign',
             httpMethod: 'PUT',
             pathHint: '/ad-publishing/facebook/campaigns',
-            args: () => [context.credentialRef || defaultLocationCredential(context), facebookCampaignBody(mutationRequest)],
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), facebookCampaignBody(runtimeContext, mutationRequest)],
             safe: false,
             mutation: true,
             requiresApproval: true,
             requiresCredential: true,
             resumeData: facebookCampaignUpsertResumeData,
-            details: {
+            details: (runtimeContext) => ({
               action: 'upsert_facebook_campaign',
-              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
               campaignId: mutationRequest?.campaignId || null,
-              name: mutationRequest?.campaign?.name || inferredPromotionCampaignName(mutationRequest),
+              name: mutationRequest?.campaign?.name || inferredPromotionCampaignName({ ...mutationRequest, sourcePost: resolvedPromotionSourcePost(runtimeContext, mutationRequest) }),
               objective: mutationRequest?.campaign?.objective || mutationRequest?.campaign?.goal || inferredPromotionObjective(mutationRequest),
               status: mutationRequest?.campaign?.status || inferredPromotionStatus(mutationRequest),
-              sourceSummaryPreview: sourcePostSummary(mutationRequest?.sourcePost)?.slice(0, 160) || null
-            },
+              sourceSummaryPreview: sourcePostSummary(resolvedPromotionSourcePost(runtimeContext, mutationRequest))?.slice(0, 160) || null
+            }),
             skipIf: () => !explicitCampaignUpsert
           },
           {
@@ -3096,9 +3168,9 @@ function taskPackHandlers() {
               locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
               campaignId: resolvedFacebookCampaignId(runtimeContext, mutationRequest),
               adsetId: mutationRequest?.adsetId || null,
-              name: mutationRequest?.adset?.name || inferredPromotionAdsetName(mutationRequest),
+              name: mutationRequest?.adset?.name || inferredPromotionAdsetName({ ...mutationRequest, sourcePost: resolvedPromotionSourcePost(runtimeContext, mutationRequest) }),
               status: mutationRequest?.adset?.status || inferredPromotionStatus(mutationRequest),
-              sourceMediaCount: facebookPromotionMediaUrls(mutationRequest).length
+              sourceMediaCount: resolvedFacebookPromotionMediaUrls(runtimeContext, mutationRequest).length
             }),
             skipIf: (runtimeContext) => !explicitAdsetUpsert || !facebookCampaignDependencyReady(runtimeContext, mutationRequest)
           },
@@ -3121,10 +3193,10 @@ function taskPackHandlers() {
               campaignId: resolvedFacebookCampaignId(runtimeContext, mutationRequest),
               adsetId: resolvedFacebookAdsetId(runtimeContext, mutationRequest),
               adId: mutationRequest?.adId || null,
-              name: mutationRequest?.ad?.name || inferredPromotionAdName(mutationRequest),
+              name: mutationRequest?.ad?.name || inferredPromotionAdName({ ...mutationRequest, sourcePost: resolvedPromotionSourcePost(runtimeContext, mutationRequest) }),
               status: mutationRequest?.ad?.status || inferredPromotionStatus(mutationRequest),
               websiteUrl: mutationRequest?.websiteUrl || null,
-              mediaUrls: facebookPromotionMediaUrls(mutationRequest)
+              mediaUrls: resolvedFacebookPromotionMediaUrls(runtimeContext, mutationRequest)
             }),
             skipIf: (runtimeContext) => !explicitAdUpsert || !facebookCampaignDependencyReady(runtimeContext, mutationRequest) || !facebookAdsetDependencyReady(runtimeContext, mutationRequest)
           },

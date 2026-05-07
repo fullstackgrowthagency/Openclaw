@@ -536,6 +536,10 @@ export class SocialPlannerAdapter {
     return this.client.request({ credentialRef, method: 'GET', path: `/social-media-posting/${locationId}/accounts`, query });
   }
 
+  getPost(credentialRef, locationId, postId, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/social-media-posting/${locationId}/posts/${postId}`, query });
+  }
+
   async uploadLocalMediaFile(credentialRef, filePath, { mimeType = 'image/png', filename } = {}) {
     const token = await this.client.credentialBroker.getResolvedAccessToken(credentialRef);
     const bytes = await readFile(filePath);
