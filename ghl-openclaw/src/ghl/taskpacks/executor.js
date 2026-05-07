@@ -31,6 +31,7 @@ import { evaluateApprovalRequirement } from '../approvals/policy.js';
 import { CredentialBroker } from '../auth/credential-broker.js';
 import { TaskPackRunStore } from './run-store.js';
 import { getTaskPackDefinition } from './registry.js';
+import { PreviewArtifactsAdapter } from '../previews/adapter.js';
 
 const ADAPTERS = {
   AssociationsAdapter,
@@ -58,7 +59,8 @@ const ADAPTERS = {
   TriggerLinksAdapter,
   UsersAdapter,
   VoiceAiAdapter,
-  WorkflowsAdapter
+  WorkflowsAdapter,
+  PreviewArtifactsAdapter
 };
 
 const FINAL_STEP_STATUSES = new Set(['executed', 'planned', 'skipped', 'rejected']);

@@ -1,7 +1,11 @@
 import path from 'node:path';
 import { writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { GoogleAdsAdapter } from '../api/index.js';
 import { ensureDir, writeJson } from '../../lib/fs.js';
+
+const execFileAsync = promisify(execFile);
 
 function normalizeString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -281,6 +285,18 @@ function renderHtml(model) {
 </html>`;
 }
 
+async function renderPreviewPng(htmlPath, pngPath) {
+  const chromiumBin = process.env.CHROMIUM_BIN || 'chromium';
+  await execFileAsync(chromiumBin, [
+    '--headless',
+    '--disable-gpu',
+    '--no-sandbox',
+    '--window-size=1400,1800',
+    `--screenshot=${pngPath}`,
+    `file://${htmlPath}`
+  ], { maxBuffer: 10 * 1024 * 1024 });
+}
+
 export async function generateGoogleAdPreview({ credentialRef, locationId, adId, outputDir, adapter = new GoogleAdsAdapter() }) {
   if (!credentialRef) throw new Error('Missing credentialRef');
   if (!locationId) throw new Error('Missing locationId');
@@ -303,10 +319,18 @@ export async function generateGoogleAdPreview({ credentialRef, locationId, adId,
   const fileBase = `${toSlug(model.campaignName || 'google-ad')}-${adId}`;
   const htmlPath = path.join(baseDir, `${fileBase}.html`);
   const jsonPath = path.join(baseDir, `${fileBase}.json`);
+  const pngPath = path.join(baseDir, `${fileBase}.png`);
 
   await ensureDir(baseDir);
   await writeFile(htmlPath, html, 'utf8');
   await writeJson(jsonPath, model);
+
+  let pngError = null;
+  try {
+    await renderPreviewPng(htmlPath, pngPath);
+  } catch (error) {
+    pngError = error.message;
+  }
 
   return {
     ok: true,
@@ -314,6 +338,8 @@ export async function generateGoogleAdPreview({ credentialRef, locationId, adId,
     locationId,
     htmlPath,
     jsonPath,
+    pngPath: pngError ? null : pngPath,
+    ...(pngError ? { pngError } : {}),
     model
   };
 }

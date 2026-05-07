@@ -869,6 +869,22 @@ function googlePublishReadinessFrom(context) {
   return context?.runtime?.stepOutputs?.preflight_google_publish?.data?.publishReadiness || null;
 }
 
+function googlePreviewResultResumeData(liveResult) {
+  const data = liveResult?.data || liveResult || null;
+  return {
+    preview: data && typeof data === 'object'
+      ? {
+          htmlPath: data.htmlPath || null,
+          jsonPath: data.jsonPath || null,
+          pngPath: data.pngPath || null,
+          adId: data.adId || null,
+          locationId: data.locationId || null
+        }
+      : null,
+    raw: data
+  };
+}
+
 function googleCampaignBody(context, mutationRequest) {
   if (googlePromotionRequested(mutationRequest)) {
     return googlePromotionCampaignBody(context, mutationRequest);
@@ -3091,6 +3107,33 @@ function taskPackHandlers() {
               }
             }),
             skipIf: () => !explicitCampaignUpsert
+          },
+          {
+            name: 'generate_google_ad_preview',
+            kind: 'adapter_call',
+            adapter: 'PreviewArtifactsAdapter',
+            method: 'generateGoogleAdPreview',
+            pathHint: 'local://generated/google-ad-preview',
+            args: (runtimeContext) => [
+              runtimeContext.credentialRef || defaultLocationCredential(runtimeContext),
+              {
+                locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
+                adId: resolvedGoogleAdId(runtimeContext, mutationRequest)
+              }
+            ],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: googlePreviewResultResumeData,
+            details: (runtimeContext) => ({
+              action: 'generate_google_ad_preview',
+              locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
+              adId: resolvedGoogleAdId(runtimeContext, mutationRequest)
+            }),
+            skipIf: (runtimeContext) => {
+              const campaignWrite = runtimeContext?.runtime?.stepOutputs?.upsert_google_campaign;
+              return !explicitCampaignUpsert || !resolvedGoogleAdId(runtimeContext, mutationRequest) || campaignWrite?.ok !== true;
+            }
           },
           {
             name: 'preflight_google_publish',
