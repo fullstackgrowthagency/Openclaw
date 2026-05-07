@@ -515,6 +515,44 @@ function resolvedFacebookAdsetId(context, mutationRequest) {
     || null;
 }
 
+function resolvedFacebookAdId(context, mutationRequest) {
+  return mutationRequest?.adId
+    || normalizeString(mutationRequest?.ad?.adId)
+    || extractFacebookEntityId(context?.runtime?.stepOutputs?.upsert_facebook_ad?.data, ['adId'])
+    || null;
+}
+
+function facebookPreviewResultResumeData(liveResult) {
+  const data = liveResult?.data || liveResult || null;
+  return {
+    preview: data && typeof data === 'object'
+      ? {
+          htmlPath: data.htmlPath || null,
+          jsonPath: data.jsonPath || null,
+          pngPath: data.pngPath || null,
+          campaignId: data.campaignId || null,
+          adsetId: data.adsetId || null,
+          adId: data.adId || null,
+          locationId: data.locationId || null
+        }
+      : null,
+    raw: data
+  };
+}
+
+function facebookAdPreviewPayload(context, mutationRequest) {
+  return {
+    locationId: mutationRequest?.locationId || context?.event?.locationId || context?.event?.payload?.locationId || null,
+    campaignId: resolvedFacebookCampaignId(context, mutationRequest),
+    adsetId: resolvedFacebookAdsetId(context, mutationRequest),
+    adId: resolvedFacebookAdId(context, mutationRequest),
+    campaign: facebookCampaignBody(mutationRequest),
+    adset: facebookAdsetBody(context, mutationRequest),
+    ad: facebookAdBody(context, mutationRequest),
+    sourcePost: normalizePlainObject(mutationRequest?.sourcePost) || {}
+  };
+}
+
 function facebookCampaignDependencyReady(context, mutationRequest) {
   return Boolean(resolvedFacebookCampaignId(context, mutationRequest));
 }
@@ -3089,6 +3127,31 @@ function taskPackHandlers() {
               mediaUrls: facebookPromotionMediaUrls(mutationRequest)
             }),
             skipIf: (runtimeContext) => !explicitAdUpsert || !facebookCampaignDependencyReady(runtimeContext, mutationRequest) || !facebookAdsetDependencyReady(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'generate_facebook_ad_preview',
+            kind: 'adapter_call',
+            adapter: 'PreviewArtifactsAdapter',
+            method: 'generateFacebookAdPreview',
+            safe: true,
+            mutation: false,
+            requiresCredential: false,
+            resumeData: facebookPreviewResultResumeData,
+            args: (runtimeContext) => [
+              runtimeContext.credentialRef || defaultLocationCredential(runtimeContext),
+              facebookAdPreviewPayload(runtimeContext, mutationRequest)
+            ],
+            details: (runtimeContext) => ({
+              action: 'generate_facebook_ad_preview',
+              locationId: mutationRequest?.locationId || runtimeContext.event.locationId || null,
+              campaignId: resolvedFacebookCampaignId(runtimeContext, mutationRequest),
+              adsetId: resolvedFacebookAdsetId(runtimeContext, mutationRequest),
+              adId: resolvedFacebookAdId(runtimeContext, mutationRequest)
+            }),
+            skipIf: (runtimeContext) => {
+              const adWrite = runtimeContext?.runtime?.stepOutputs?.upsert_facebook_ad;
+              return !explicitAdUpsert || !resolvedFacebookAdId(runtimeContext, mutationRequest) || adWrite?.ok !== true;
+            }
           },
           {
             name: 'publish_facebook_campaign',
