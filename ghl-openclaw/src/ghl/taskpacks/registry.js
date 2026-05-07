@@ -857,9 +857,12 @@ function googleCampaignBody(mutationRequest) {
 }
 
 function googleEntityQuery(mutationRequest) {
+  const entityType = normalizeString(mutationRequest?.entityType)
+    || normalizeString(mutationRequest?.query?.entityType)
+    || normalizeString(mutationRequest?.query?.type);
   return {
     ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
-    ...(normalizeString(mutationRequest?.entityType) ? { entityType: normalizeString(mutationRequest.entityType) } : {}),
+    ...(entityType ? { entityType, type: entityType } : {}),
     ...(normalizePlainObject(mutationRequest?.query) || {})
   };
 }
@@ -880,15 +883,187 @@ function inferredGoogleAdvertisingChannelType(mutationRequest) {
     || 'SEARCH';
 }
 
+function sanitizedPromotionTextTokens(mutationRequest) {
+  const collected = [
+    sourcePostTheme(mutationRequest?.sourcePost),
+    sourcePostSummary(mutationRequest?.sourcePost),
+    normalizeString(mutationRequest?.headline),
+    normalizeString(mutationRequest?.description)
+  ].filter(Boolean).join(' ');
+
+  return [...new Set(
+    collected
+      .toLowerCase()
+      .replace(/https?:\/\/\S+/g, ' ')
+      .replace(/[#@][\p{L}\p{N}_-]+/gu, ' ')
+      .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3)
+      .filter((token) => !['and', 'the', 'for', 'with', 'your', 'from', 'into', 'that', 'this', 'have', 'help', 'more'].includes(token))
+  )];
+}
+
+function googlePromotionKeywords(mutationRequest) {
+  const explicit = Array.isArray(mutationRequest?.promotion?.keywords?.positives)
+    ? mutationRequest.promotion.keywords.positives
+    : null;
+  if (explicit && explicit.length > 0) {
+    return explicit;
+  }
+
+  const theme = sourcePostTheme(mutationRequest?.sourcePost);
+  const tokens = sanitizedPromotionTextTokens(mutationRequest);
+  const candidates = [
+    theme,
+    tokens.slice(0, 2).join(' '),
+    tokens.slice(2, 4).join(' '),
+    tokens.slice(0, 1).join(' '),
+    tokens.slice(1, 2).join(' ')
+  ].map((value) => normalizeString(value)).filter(Boolean);
+
+  return [...new Set(candidates)].slice(0, 5).map((keyword) => ({
+    keyword,
+    matchType: 'PHRASE'
+  }));
+}
+
+function googlePromotionHeadlines(mutationRequest) {
+  const explicit = normalizeStringArray(mutationRequest?.promotion?.headlines || mutationRequest?.campaign?.headlines);
+  if (explicit.length > 0) return explicit;
+
+  const theme = sourcePostTheme(mutationRequest?.sourcePost);
+  const headline = inferredPromotionHeadline(mutationRequest);
+  const candidates = [
+    headline,
+    theme ? `Get clarity on ${theme}` : null,
+    'Turn clicks into clients',
+    'Clearer marketing decisions',
+    'Better tracking, better growth'
+  ].map((value) => clampText(value, 30)).filter(Boolean);
+
+  return [...new Set(candidates)].slice(0, 5);
+}
+
+function googlePromotionLongHeadlines(mutationRequest) {
+  const explicit = normalizeStringArray(mutationRequest?.promotion?.longHeadlines || mutationRequest?.campaign?.longHeadlines);
+  if (explicit.length > 0) return explicit;
+
+  const candidates = [
+    sourcePostTheme(mutationRequest?.sourcePost) ? `Get clearer growth decisions for ${sourcePostTheme(mutationRequest?.sourcePost)}` : null,
+    firstParagraph(sourcePostSummary(mutationRequest?.sourcePost)),
+    inferredPromotionDescription(mutationRequest)
+  ].map((value) => clampText(value, 90)).filter(Boolean);
+
+  return [...new Set(candidates)].slice(0, 3);
+}
+
+function googlePromotionDescriptions(mutationRequest) {
+  const explicit = normalizeStringArray(mutationRequest?.promotion?.descriptions || mutationRequest?.campaign?.descriptions);
+  if (explicit.length > 0) return explicit;
+
+  const candidates = [
+    inferredPromotionDescription(mutationRequest),
+    'Improve tracking, offers, and conversion paths.',
+    'Build a cleaner path from click to client.'
+  ].map((value) => clampText(value, 90)).filter(Boolean);
+
+  return [...new Set(candidates)].slice(0, 4);
+}
+
+function googlePromotionPathParts(websiteUrl) {
+  const normalized = normalizeString(websiteUrl);
+  if (!normalized) return [];
+  try {
+    const parsed = new URL(normalized);
+    return parsed.pathname
+      .split('/')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => part.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 15))
+      .filter(Boolean)
+      .slice(0, 2);
+  } catch {
+    return [];
+  }
+}
+
+function googlePromotionMediaItems(mutationRequest) {
+  return googlePromotionMediaUrls(mutationRequest).slice(0, 5).map((src) => ({ type: 'IMAGE', src }));
+}
+
+function googlePromotionAssetImages(mutationRequest) {
+  return googlePromotionMediaUrls(mutationRequest).slice(0, 5).map((url) => ({ type: 'IMAGE', url }));
+}
+
+function googlePromotionBusinessName(mutationRequest) {
+  return normalizeString(mutationRequest?.promotion?.businessName)
+    || normalizeString(mutationRequest?.campaign?.businessName)
+    || normalizeString(mutationRequest?.sourcePost?.businessName)
+    || null;
+}
+
+function googlePromotionAdContentBody(mutationRequest, websiteUrl) {
+  const pathParts = googlePromotionPathParts(websiteUrl);
+  const media = googlePromotionMediaItems(mutationRequest);
+  return {
+    name: inferredPromotionAdName(mutationRequest),
+    status: inferredPromotionStatus(mutationRequest),
+    headlines: googlePromotionHeadlines(mutationRequest),
+    longHeadlines: googlePromotionLongHeadlines(mutationRequest),
+    descriptions: googlePromotionDescriptions(mutationRequest),
+    ...(websiteUrl ? { finalUrl: websiteUrl } : {}),
+    ...(pathParts[0] ? { path1: pathParts[0] } : {}),
+    ...(pathParts[1] ? { path2: pathParts[1] } : {}),
+    ...(media.length > 0 ? { media } : {}),
+    ...(googlePromotionBusinessName(mutationRequest) ? { businessName: googlePromotionBusinessName(mutationRequest) } : {})
+  };
+}
+
+function googlePromotionAdGroupBody(mutationRequest, websiteUrl) {
+  const pathParts = googlePromotionPathParts(websiteUrl);
+  const media = googlePromotionMediaItems(mutationRequest);
+  const adContent = Array.isArray(mutationRequest?.promotion?.adContent) && mutationRequest.promotion.adContent.length > 0
+    ? mutationRequest.promotion.adContent
+    : [googlePromotionAdContentBody(mutationRequest, websiteUrl)];
+  return {
+    name: normalizeString(mutationRequest?.promotion?.adGroupName) || `${inferredPromotionCampaignName(mutationRequest)} ad group`,
+    status: inferredPromotionStatus(mutationRequest),
+    keywords: {
+      positives: googlePromotionKeywords(mutationRequest),
+      negatives: Array.isArray(mutationRequest?.promotion?.keywords?.negatives)
+        ? mutationRequest.promotion.keywords.negatives
+        : []
+    },
+    headlines: googlePromotionHeadlines(mutationRequest),
+    longHeadlines: googlePromotionLongHeadlines(mutationRequest),
+    descriptions: googlePromotionDescriptions(mutationRequest),
+    ...(websiteUrl ? { finalUrl: websiteUrl } : {}),
+    ...(pathParts[0] ? { path1: pathParts[0] } : {}),
+    ...(pathParts[1] ? { path2: pathParts[1] } : {}),
+    ...(media.length > 0 ? { media } : {}),
+    adContent
+  };
+}
+
 function googlePromotionCampaignBody(mutationRequest) {
   const mediaUrls = googlePromotionMediaUrls(mutationRequest);
   const websiteUrl = mutationRequest?.websiteUrl || normalizeString(mutationRequest?.sourcePost?.websiteUrl) || normalizeString(mutationRequest?.sourcePost?.link) || null;
   const headline = inferredPromotionHeadline(mutationRequest);
   const description = inferredPromotionDescription(mutationRequest);
   const dailyBudget = normalizeNumber(mutationRequest?.promotion?.dailyBudget);
+  const existingCampaignId = normalizeString(mutationRequest?.adId)
+    || normalizeString(mutationRequest?.campaign?.id)
+    || normalizeString(mutationRequest?.campaign?.adId)
+    || normalizeString(mutationRequest?.campaign?.campaignId)
+    || null;
+  const adGroups = Array.isArray(mutationRequest?.promotion?.adGroups) && mutationRequest.promotion.adGroups.length > 0
+    ? mutationRequest.promotion.adGroups
+    : [googlePromotionAdGroupBody(mutationRequest, websiteUrl)];
 
   return {
     ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
+    ...(existingCampaignId ? { id: existingCampaignId, adId: existingCampaignId } : {}),
     name: inferredPromotionCampaignName(mutationRequest),
     status: inferredPromotionStatus(mutationRequest),
     advertisingChannelType: inferredGoogleAdvertisingChannelType(mutationRequest),
@@ -898,6 +1073,8 @@ function googlePromotionCampaignBody(mutationRequest) {
     ...(normalizeString(mutationRequest?.cta) ? { callToAction: normalizeString(mutationRequest.cta) } : {}),
     ...(dailyBudget === null ? {} : { dailyBudget }),
     ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+    ...(googlePromotionAssetImages(mutationRequest).length > 0 ? { assets: { images: googlePromotionAssetImages(mutationRequest) } } : {}),
+    adGroups,
     ...(mutationRequest?.promotion?.campaign || {}),
     ...(mutationRequest?.campaign || {})
   };
