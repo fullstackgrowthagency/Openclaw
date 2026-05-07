@@ -1332,32 +1332,101 @@ function googlePromotionAdContentBody(mutationRequest, websiteUrl) {
   };
 }
 
-function googlePromotionAdGroupBody(mutationRequest, websiteUrl) {
-  const pathParts = googlePromotionResolvedPathParts(mutationRequest, websiteUrl);
-  const media = googlePromotionMediaItems(mutationRequest);
-  const targeting = googlePromotionTargeting(mutationRequest);
-  const adContent = Array.isArray(mutationRequest?.promotion?.adContent) && mutationRequest.promotion.adContent.length > 0
-    ? mutationRequest.promotion.adContent
-    : [googlePromotionAdContentBody(mutationRequest, websiteUrl)];
+function googleFetchedCampaignFrom(context) {
+  return context?.runtime?.stepOutputs?.get_google_campaign?.data?.campaign
+    || context?.runtime?.stepOutputs?.get_google_campaign?.data
+    || null;
+}
+
+function normalizeGooglePromotionAdContentEntry(entry, mutationRequest, options = {}) {
+  const item = normalizePlainObject(entry) || {};
+  const websiteUrl = options.websiteUrl || googlePromotionWebsiteUrl(mutationRequest);
+  const media = Array.isArray(item.media) && item.media.length > 0 ? item.media : googlePromotionMediaItems(mutationRequest);
+  const pathParts = [
+    clampText(normalizeString(item.path1), 15),
+    clampText(normalizeString(item.path2), 15)
+  ];
+  const fallbackPathParts = googlePromotionResolvedPathParts(mutationRequest, websiteUrl);
+  const googleAdGroupId = normalizeString(options.googleAdGroupId) || normalizeString(item.googleAdGroupId) || normalizeString(item.adGroupResourceName);
+  const draftAdGroupId = normalizeString(options.draftAdGroupId) || normalizeString(item.adGroupId);
+  const googleAdId = normalizeString(item.googleAdId);
+  const draftAdId = normalizeString(item.id);
+
   return {
-    name: normalizeString(mutationRequest?.promotion?.adGroupName) || `${inferredPromotionCampaignName(mutationRequest)} ad group`,
-    status: inferredPromotionStatus(mutationRequest),
-    keywords: {
-      positives: googlePromotionKeywords(mutationRequest),
-      negatives: googlePromotionNegativeKeywords(mutationRequest)
-    },
-    headlines: googlePromotionHeadlines(mutationRequest),
-    longHeadlines: googlePromotionLongHeadlines(mutationRequest),
-    descriptions: googlePromotionDescriptions(mutationRequest),
-    ...(websiteUrl ? { finalUrl: websiteUrl } : {}),
-    ...(pathParts[0] ? { path1: pathParts[0] } : {}),
-    ...(pathParts[1] ? { path2: pathParts[1] } : {}),
+    ...(googleAdId || draftAdId ? { id: googleAdId || draftAdId } : {}),
+    ...(googleAdId ? { googleAdId } : {}),
+    ...(draftAdGroupId ? { adGroupId: draftAdGroupId } : (googleAdGroupId ? { adGroupId: googleAdGroupId } : {})),
+    ...(googleAdGroupId ? { googleAdGroupId, adGroup: googleAdGroupId } : {}),
+    name: normalizeString(item.name) || inferredPromotionAdName(mutationRequest),
+    status: normalizeString(item.status) || inferredPromotionStatus(mutationRequest),
+    headlines: normalizeStringArray(item.headlines).length > 0 ? normalizeStringArray(item.headlines) : googlePromotionHeadlines(mutationRequest),
+    longHeadlines: normalizeStringArray(item.longHeadlines).length > 0 ? normalizeStringArray(item.longHeadlines) : googlePromotionLongHeadlines(mutationRequest),
+    descriptions: normalizeStringArray(item.descriptions).length > 0 ? normalizeStringArray(item.descriptions) : googlePromotionDescriptions(mutationRequest),
+    ...(websiteUrl ? { finalUrl: normalizeString(item.finalUrl) || websiteUrl } : {}),
+    ...((pathParts[0] || fallbackPathParts[0]) ? { path1: pathParts[0] || fallbackPathParts[0] } : {}),
+    ...((pathParts[1] || fallbackPathParts[1]) ? { path2: pathParts[1] || fallbackPathParts[1] } : {}),
     ...(media.length > 0 ? { media } : {}),
-    ...(targeting.customChannels === null ? {} : { customChannels: targeting.customChannels }),
-    ...(targeting.selectedChannels.length > 0 ? { selectedChannels: targeting.selectedChannels } : {}),
-    ...(Object.keys(targeting.audience).length > 0 ? { audience: targeting.audience } : {}),
-    adContent
+    ...(normalizeString(item.businessName) || googlePromotionBusinessName(mutationRequest)
+      ? { businessName: normalizeString(item.businessName) || googlePromotionBusinessName(mutationRequest) }
+      : {})
   };
+}
+
+function normalizeGooglePromotionAdGroupEntry(entry, mutationRequest, websiteUrl) {
+  const item = normalizePlainObject(entry) || {};
+  const pathParts = [
+    clampText(normalizeString(item.path1), 15),
+    clampText(normalizeString(item.path2), 15)
+  ];
+  const fallbackPathParts = googlePromotionResolvedPathParts(mutationRequest, websiteUrl);
+  const media = Array.isArray(item.media) && item.media.length > 0 ? item.media : googlePromotionMediaItems(mutationRequest);
+  const fallbackTargeting = googlePromotionTargeting(mutationRequest);
+  const audience = normalizePlainObject(item.audience) || fallbackTargeting.audience;
+  const selectedChannels = normalizeStringArray(item.selectedChannels).length > 0
+    ? normalizeStringArray(item.selectedChannels).map((value) => value.toUpperCase())
+    : fallbackTargeting.selectedChannels;
+  const customChannels = normalizeBoolean(item.customChannels);
+  const googleAdGroupId = normalizeString(item.googleAdGroupId) || normalizeString(item.resourceName);
+  const draftAdGroupId = normalizeString(item.id);
+  const explicitAdContent = Array.isArray(item.adContent) && item.adContent.length > 0
+    ? item.adContent
+    : Array.isArray(mutationRequest?.promotion?.adContent) && mutationRequest.promotion.adContent.length > 0
+      ? mutationRequest.promotion.adContent
+      : [googlePromotionAdContentBody(mutationRequest, websiteUrl)];
+
+  return {
+    ...(draftAdGroupId ? { id: draftAdGroupId } : {}),
+    ...(googleAdGroupId ? { googleAdGroupId } : {}),
+    name: normalizeString(item.name) || normalizeString(mutationRequest?.promotion?.adGroupName) || `${inferredPromotionCampaignName(mutationRequest)} ad group`,
+    status: normalizeString(item.status) || inferredPromotionStatus(mutationRequest),
+    keywords: {
+      positives: normalizeKeywordEntries(item?.keywords?.positives, 'PHRASE').length > 0
+        ? normalizeKeywordEntries(item?.keywords?.positives, 'PHRASE')
+        : googlePromotionKeywords(mutationRequest),
+      negatives: normalizeKeywordEntries(item?.keywords?.negatives, 'PHRASE').length > 0
+        ? normalizeKeywordEntries(item?.keywords?.negatives, 'PHRASE')
+        : googlePromotionNegativeKeywords(mutationRequest)
+    },
+    headlines: normalizeStringArray(item.headlines).length > 0 ? normalizeStringArray(item.headlines) : googlePromotionHeadlines(mutationRequest),
+    longHeadlines: normalizeStringArray(item.longHeadlines).length > 0 ? normalizeStringArray(item.longHeadlines) : googlePromotionLongHeadlines(mutationRequest),
+    descriptions: normalizeStringArray(item.descriptions).length > 0 ? normalizeStringArray(item.descriptions) : googlePromotionDescriptions(mutationRequest),
+    ...(websiteUrl ? { finalUrl: normalizeString(item.finalUrl) || websiteUrl } : {}),
+    ...((pathParts[0] || fallbackPathParts[0]) ? { path1: pathParts[0] || fallbackPathParts[0] } : {}),
+    ...((pathParts[1] || fallbackPathParts[1]) ? { path2: pathParts[1] || fallbackPathParts[1] } : {}),
+    ...(media.length > 0 ? { media } : {}),
+    ...(customChannels === null ? (fallbackTargeting.customChannels === null ? {} : { customChannels: fallbackTargeting.customChannels }) : { customChannels }),
+    ...(selectedChannels.length > 0 ? { selectedChannels } : {}),
+    ...(Object.keys(audience).length > 0 ? { audience } : {}),
+    adContent: explicitAdContent.map((adContentEntry) => normalizeGooglePromotionAdContentEntry(adContentEntry, mutationRequest, {
+      websiteUrl,
+      googleAdGroupId,
+      draftAdGroupId
+    }))
+  };
+}
+
+function googlePromotionAdGroupBody(mutationRequest, websiteUrl) {
+  return normalizeGooglePromotionAdGroupEntry({}, mutationRequest, websiteUrl);
 }
 
 function googlePromotionCampaignBody(context, mutationRequest) {
@@ -1371,9 +1440,17 @@ function googlePromotionCampaignBody(context, mutationRequest) {
     || normalizeString(mutationRequest?.campaign?.adId)
     || normalizeString(mutationRequest?.campaign?.campaignId)
     || null;
-  const adGroups = Array.isArray(mutationRequest?.promotion?.adGroups) && mutationRequest.promotion.adGroups.length > 0
+  const fetchedCampaign = googleFetchedCampaignFrom(context);
+  const explicitAdGroups = Array.isArray(mutationRequest?.promotion?.adGroups) && mutationRequest.promotion.adGroups.length > 0
     ? mutationRequest.promotion.adGroups
-    : [googlePromotionAdGroupBody(mutationRequest, websiteUrl)];
+    : Array.isArray(mutationRequest?.campaign?.adGroups) && mutationRequest.campaign.adGroups.length > 0
+      ? mutationRequest.campaign.adGroups
+      : null;
+  const adGroups = explicitAdGroups && explicitAdGroups.length > 0
+    ? explicitAdGroups.map((entry) => normalizeGooglePromotionAdGroupEntry(entry, mutationRequest, websiteUrl))
+    : existingCampaignId && Array.isArray(fetchedCampaign?.adGroups) && fetchedCampaign.adGroups.length > 0
+      ? fetchedCampaign.adGroups.map((entry) => normalizeGooglePromotionAdGroupEntry(entry, mutationRequest, websiteUrl))
+      : [googlePromotionAdGroupBody(mutationRequest, websiteUrl)];
   const callAssetResourceNames = resolvedGoogleCallAssetResourceNames(context);
   const sitelinkResourceNames = resolvedGoogleSitelinkResourceNames(context, mutationRequest);
 
@@ -2955,8 +3032,10 @@ function taskPackHandlers() {
           && (googlePromotionMediaUrls(mutationRequest).length > 0 || Boolean(mutationRequest?.websiteUrl));
         const explicitEntityList = mutationRequest?.action === 'list_google_ad_entities'
           && Boolean(mutationRequest?.entityType || mutationRequest?.query?.entityType);
-        const explicitCampaignFetch = mutationRequest?.action === 'get_google_campaign'
-          && Boolean(mutationRequest?.adId);
+        const explicitCampaignFetch = (
+          mutationRequest?.action === 'get_google_campaign'
+          || (explicitPromoteSocialPost && Boolean(mutationRequest?.adId))
+        ) && Boolean(mutationRequest?.adId);
         const explicitCampaignUpsert = explicitPromoteSocialPost || (
           ['upsert_google_campaign', 'build_google_ad_campaign'].includes(mutationRequest?.action)
           && Boolean(mutationRequest?.campaign)
