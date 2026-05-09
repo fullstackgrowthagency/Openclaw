@@ -244,6 +244,117 @@ function socialPostMutationRequestFrom(event) {
   };
 }
 
+function normalizeTextBlock(value) {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (Array.isArray(value)) {
+    const joined = value
+      .map((entry) => (typeof entry === 'string' && entry.trim() ? entry.trim() : null))
+      .filter(Boolean)
+      .join('\n');
+    return joined || null;
+  }
+  return null;
+}
+
+function uniqueIntegers(values = []) {
+  const seen = new Set();
+  const output = [];
+  for (const value of values) {
+    const normalized = normalizeNumber(value);
+    if (!Number.isInteger(normalized) || normalized <= 0 || seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(normalized);
+  }
+  return output;
+}
+
+function parseInstructionDayNumbers(text) {
+  if (!text) return [];
+  return uniqueIntegers(Array.from(text.matchAll(/\b(\d{1,3})\b/g)).map((match) => Number(match[1])));
+}
+
+function splitInstructionBlocks(text) {
+  if (!text) return [];
+  return text
+    .replace(/\r/g, '\n')
+    .split(/\n+/)
+    .flatMap((line) => line.split(/\s*;\s*/g))
+    .map((line) => line.replace(/^(?:[-*•]\s+|\d+[.)]\s+)/, '').trim())
+    .filter(Boolean);
+}
+
+function parseCalendarPostsFromText(text) {
+  return splitInstructionBlocks(text)
+    .map((line) => {
+      const match = line.match(/^(?:day|post)?\s*(\d+)\s*[:.-]\s*(.+)$/i);
+      if (!match) return null;
+      const day = normalizeNumber(match[1]);
+      const summary = normalizeString(match[2]);
+      return day && summary ? { day, summary } : null;
+    })
+    .filter(Boolean);
+}
+
+function mergePostInstructions(primary = [], secondary = []) {
+  return [
+    ...primary.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item })),
+    ...secondary.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
+  ];
+}
+
+function parseSocialCalendarReviewInstructions(value) {
+  const text = normalizeTextBlock(value);
+  const parsed = {
+    sourceText: text,
+    removeDays: [],
+    replacePosts: [],
+    appendPosts: [],
+    postEdits: []
+  };
+  if (!text) return parsed;
+
+  const replaceCalendarMatch = text.match(/(?:^|\n)(?:replace|swap(?:\s+out)?)\s+(?:the\s+)?(?:whole\s+)?(?:calendar|all\s+posts|all\s+days)\s*:?\s*([\s\S]+)$/i);
+  if (replaceCalendarMatch) {
+    parsed.replacePosts = parseCalendarPostsFromText(replaceCalendarMatch[1]);
+  }
+
+  for (const line of splitInstructionBlocks(text)) {
+    if (/^(?:replace|swap(?:\s+out)?)\s+(?:the\s+)?(?:whole\s+)?(?:calendar|all\s+posts|all\s+days)\b/i.test(line)) {
+      continue;
+    }
+
+    if (/\b(?:remove|drop|delete|skip)\b/i.test(line) && /\b(?:day|days|post|posts)\b/i.test(line)) {
+      parsed.removeDays.push(...parseInstructionDayNumbers(line));
+      continue;
+    }
+
+    const editMatch = line.match(/^(?:edit|rewrite|revise|update|change|replace)\s+(?:day|post)\s*(\d+)\s*[:=-]\s*(.+)$/i);
+    if (editMatch) {
+      const day = normalizeNumber(editMatch[1]);
+      const summary = normalizeString(editMatch[2]);
+      if (day && summary) parsed.postEdits.push({ day, summary });
+      continue;
+    }
+
+    const appendMatch = line.match(/^(?:add|append|include)\s+(?:a\s+|an\s+)?post(?:\s+for\s+day\s*(\d+))?\s*[:=-]\s*(.+)$/i);
+    if (appendMatch) {
+      const day = normalizeNumber(appendMatch[1]);
+      const summary = normalizeString(appendMatch[2]);
+      if (summary) parsed.appendPosts.push(day ? { day, summary } : { summary });
+      continue;
+    }
+
+    const looseAppendMatch = line.match(/^(?:new\s+post|extra\s+post)\s*[:=-]\s*(.+)$/i);
+    if (looseAppendMatch) {
+      const summary = normalizeString(looseAppendMatch[1]);
+      if (summary) parsed.appendPosts.push({ summary });
+    }
+  }
+
+  parsed.removeDays = uniqueIntegers(parsed.removeDays);
+  return parsed;
+}
+
 function socialCalendarMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
@@ -251,6 +362,29 @@ function socialCalendarMutationRequestFrom(event) {
   const business = normalizePlainObject(request.business || request.businessProfile || request.profile) || {};
   const calendar = normalizePlainObject(request.calendar || request.plan) || {};
   const review = normalizePlainObject(request.review || request.adjustments || request.reviewAdjustments) || {};
+  const reviewInstructionText = normalizeTextBlock(
+    request.reviewText
+    || request.reviewNotes
+    || request.reviewPrompt
+    || request.instructions
+    || request.prompt
+    || request.message
+    || review.instructions
+    || review.text
+    || review.notes
+    || review.prompt
+    || review.message
+  );
+  const parsedReview = parseSocialCalendarReviewInstructions(reviewInstructionText);
+  const structuredReplacePosts = Array.isArray(review.replacePosts)
+    ? review.replacePosts.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
+    : [];
+  const structuredAppendPosts = Array.isArray(review.appendPosts)
+    ? review.appendPosts.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
+    : [];
+  const structuredPostEdits = Array.isArray(review.postEdits)
+    ? review.postEdits.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
+    : [];
 
   return {
     action: request.action || null,
@@ -277,8 +411,10 @@ function socialCalendarMutationRequestFrom(event) {
       hashtags: normalizeStringArray(request.hashtags || business.hashtags),
       knowledgeBaseRef: normalizeString(request.knowledgeBaseRef)
         || normalizeString(request.knowledgeBaseId)
+        || normalizeString(request.knowledgeBase)
         || normalizeString(business.knowledgeBaseRef)
         || normalizeString(business.knowledgeBaseId)
+        || normalizeString(business.knowledgeBase)
         || null
     },
     calendar: {
@@ -290,16 +426,13 @@ function socialCalendarMutationRequestFrom(event) {
       scheduledMinuteUtc: normalizeNumber(calendar.scheduledMinuteUtc || request.scheduledMinuteUtc)
     },
     review: {
-      removeDays: normalizeIntegerArray(review.removeDays || review.removeIndexes || review.removePosts),
-      replacePosts: Array.isArray(review.replacePosts)
-        ? review.replacePosts.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
-        : [],
-      appendPosts: Array.isArray(review.appendPosts)
-        ? review.appendPosts.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
-        : [],
-      postEdits: Array.isArray(review.postEdits)
-        ? review.postEdits.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
-        : []
+      removeDays: uniqueIntegers([
+        ...normalizeIntegerArray(review.removeDays || review.removeIndexes || review.removePosts),
+        ...parsedReview.removeDays
+      ]),
+      replacePosts: structuredReplacePosts.length > 0 ? structuredReplacePosts : parsedReview.replacePosts,
+      appendPosts: mergePostInstructions(structuredAppendPosts, parsedReview.appendPosts),
+      postEdits: mergePostInstructions(structuredPostEdits, parsedReview.postEdits)
     }
   };
 }
@@ -729,6 +862,52 @@ function socialCalendarFlowBasePosts(plan, mutationRequest) {
   }).filter((item) => item.summary || item.scheduleDate);
 }
 
+function socialCalendarIsoAtUtc(startDate, dayOffset = 0, scheduledHourUtc = 16, scheduledMinuteUtc = 0, cadenceDays = 1) {
+  const base = normalizeString(startDate) ? new Date(startDate) : new Date();
+  const safeBase = Number.isNaN(base.getTime()) ? new Date() : base;
+  const scheduled = new Date(Date.UTC(
+    safeBase.getUTCFullYear(),
+    safeBase.getUTCMonth(),
+    safeBase.getUTCDate() + (dayOffset * cadenceDays),
+    scheduledHourUtc,
+    scheduledMinuteUtc,
+    0,
+    0
+  ));
+  return scheduled.toISOString();
+}
+
+function socialCalendarScheduleDateForDay(plan, day) {
+  const normalizedDay = normalizeNumber(day);
+  if (!normalizedDay) return null;
+
+  const planPosts = Array.isArray(plan?.posts) ? plan.posts : [];
+  const direct = planPosts.find((post) => Number(post?.day) === Number(normalizedDay));
+  if (normalizeString(direct?.scheduleDate)) return normalizeString(direct.scheduleDate);
+
+  const calendar = normalizePlainObject(plan?.calendar) || {};
+  const startDate = normalizeString(calendar.startDate);
+  if (!startDate) return null;
+
+  return socialCalendarIsoAtUtc(
+    startDate,
+    Math.max(0, normalizedDay - 1),
+    normalizeNumber(calendar.scheduledHourUtc) ?? 16,
+    normalizeNumber(calendar.scheduledMinuteUtc) ?? 0,
+    normalizeNumber(calendar.cadenceDays) ?? 1
+  );
+}
+
+function applyMissingScheduleDatesToFlowPosts(plan, posts = []) {
+  return posts.map((post, index) => {
+    const normalized = sanitizeSocialCalendarFlowPost(post, index + 1);
+    if (normalized.scheduleDate) return normalized;
+    const day = normalizeNumber(normalized.day) || index + 1;
+    const inferredScheduleDate = socialCalendarScheduleDateForDay(plan, day);
+    return inferredScheduleDate ? { ...normalized, scheduleDate: inferredScheduleDate } : normalized;
+  });
+}
+
 function resolveSocialCalendarFlowPostTargetIndex(posts, edit) {
   const day = normalizeNumber(edit?.day) || normalizeNumber(edit?.index);
   if (day) {
@@ -779,7 +958,7 @@ function socialCalendarFlowReviewedPosts(context, mutationRequest) {
   const reviewRemoveDays = Array.isArray(review.removeDays) ? review.removeDays : [];
 
   let posts = reviewReplacePosts.length > 0
-    ? reviewReplacePosts.map((post, index) => sanitizeSocialCalendarFlowPost(post, index + 1)).filter((item) => item.summary || item.scheduleDate)
+    ? applyMissingScheduleDatesToFlowPosts(plan, reviewReplacePosts.map((post, index) => sanitizeSocialCalendarFlowPost(post, index + 1)).filter((item) => item.summary || item.scheduleDate))
     : socialCalendarFlowBasePosts(plan, mutationRequest);
 
   if (reviewRemoveDays.length > 0) {
@@ -800,10 +979,11 @@ function socialCalendarFlowReviewedPosts(context, mutationRequest) {
     editedCount += 1;
   }
 
-  const appendedPosts = reviewAppendPosts
-    .map((post, index) => sanitizeSocialCalendarFlowPost(post, posts.length + index + 1))
-    .filter((item) => item.summary || item.scheduleDate);
-  posts = [...posts, ...appendedPosts];
+  const nextAppendDay = posts.reduce((max, post) => Math.max(max, normalizeNumber(post?.day) || 0), 0);
+  const appendedPosts = applyMissingScheduleDatesToFlowPosts(plan, reviewAppendPosts
+    .map((post, index) => sanitizeSocialCalendarFlowPost(post, nextAppendDay + index + 1))
+    .filter((item) => item.summary || item.scheduleDate));
+  posts = applyMissingScheduleDatesToFlowPosts(plan, [...posts, ...appendedPosts]);
 
   return {
     ready: true,
