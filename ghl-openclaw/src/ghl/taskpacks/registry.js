@@ -562,6 +562,7 @@ function socialCalendarMutationRequestFrom(event) {
 
   return {
     action: request.action || null,
+    sourceText: parsedRequest.sourceText,
     locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
     accountIds: normalizeStringArray(request.accountIds || calendar.accountIds || parsedRequest.accountIds),
     status: normalizeString(request.status) || normalizeString(calendar.status) || normalizeString(parsedRequest.status) || 'draft',
@@ -624,6 +625,39 @@ function isGenerateSocialCalendarAction(action) {
 
 function isRunSocialCalendarFlowAction(action) {
   return ['run_social_calendar_flow', 'create_social_calendar_flow', 'plan_review_create_social_posts'].includes(action);
+}
+
+function hasSocialCalendarReviewAdjustments(request) {
+  const review = request?.review || {};
+  return (Array.isArray(review.removeDays) && review.removeDays.length > 0)
+    || (Array.isArray(review.replacePosts) && review.replacePosts.length > 0)
+    || (Array.isArray(review.appendPosts) && review.appendPosts.length > 0)
+    || (Array.isArray(review.postEdits) && review.postEdits.length > 0);
+}
+
+function looksLikeSocialCalendarRequestText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return false;
+  if (/\bsocial calendar\b|\bcontent calendar\b/.test(source)) return true;
+  if (/\bcalendar\b/.test(source) && /\bpost(?:s)?\b/.test(source)) return true;
+  if (/\bcreate\s+(?:a\s+)?\d+\s+post(?:s)?\b/.test(source)) return true;
+  if (/\bplan\s+(?:a\s+)?\d+\s+post(?:s)?\b/.test(source)) return true;
+  if (/\bremove\s+day\b|\bedit\s+day\b|\badd\s+post\b|\breplace\s+calendar\b/.test(source)) return true;
+  return false;
+}
+
+function inferRunSocialCalendarFlowRequest(request) {
+  if (!request || request.action) return false;
+  const hasPlanningFields = Boolean(request?.business?.name)
+    || Boolean(request?.business?.industry)
+    || Boolean(request?.business?.knowledgeBaseRef)
+    || Number.isFinite(normalizeNumber(request?.calendar?.postCount))
+    || Number.isFinite(normalizeNumber(request?.calendar?.cadenceDays))
+    || Boolean(request?.calendar?.startDate)
+    || (Array.isArray(request?.creativeStyles) && request.creativeStyles.length > 0);
+  const hasReviewAdjustments = hasSocialCalendarReviewAdjustments(request);
+  const hasTextIntent = looksLikeSocialCalendarRequestText(request?.sourceText);
+  return hasTextIntent && (hasPlanningFields || hasReviewAdjustments);
 }
 
 function facebookAdMutationRequestFrom(event) {
@@ -4058,6 +4092,8 @@ function taskPackHandlers() {
         const explicitCreateSocialPostsBulk = isBulkSocialPostAction(mutationRequest?.action);
         const explicitGenerateSocialCalendar = isGenerateSocialCalendarAction(socialCalendarRequest?.action);
         const explicitRunSocialCalendarFlow = isRunSocialCalendarFlowAction(socialCalendarRequest?.action);
+        const inferredRunSocialCalendarFlow = inferRunSocialCalendarFlowRequest(socialCalendarRequest);
+        const shouldRunSocialCalendarFlow = explicitRunSocialCalendarFlow || inferredRunSocialCalendarFlow;
         return [
           {
             name: 'refresh_social_accounts',
@@ -4074,7 +4110,7 @@ function taskPackHandlers() {
               action: 'list_social_accounts',
               locationId
             },
-            skipIf: () => !locationId || explicitGenerateSocialCalendar
+            skipIf: () => !locationId || explicitGenerateSocialCalendar || shouldRunSocialCalendarFlow
           },
           {
             name: 'generate_social_calendar',
@@ -4097,7 +4133,7 @@ function taskPackHandlers() {
               knowledgeBaseRef: socialCalendarRequest?.business?.knowledgeBaseRef || null,
               creativeStyles: socialCalendarRequest?.creativeStyles || []
             },
-            skipIf: () => !(explicitGenerateSocialCalendar || explicitRunSocialCalendarFlow)
+            skipIf: () => !(explicitGenerateSocialCalendar || shouldRunSocialCalendarFlow)
           },
           {
             name: 'review_social_calendar_flow',
@@ -4105,7 +4141,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             details: (runtimeContext) => socialCalendarFlowReviewDetails(runtimeContext, socialCalendarRequest),
-            skipIf: () => !explicitRunSocialCalendarFlow
+            skipIf: () => !shouldRunSocialCalendarFlow
           },
           {
             name: 'create_social_post',
@@ -4185,7 +4221,7 @@ function taskPackHandlers() {
             pathHint: '/social-media-posting/:locationId/posts (calendar flow)',
             args: (runtimeContext) => {
               if (!locationId) {
-                throw new Error('run_social_calendar_flow requires a locationId.');
+                throw new Error('Social calendar flow requires a locationId.');
               }
               return [
                 context.credentialRef || defaultLocationCredential(context),
@@ -4211,7 +4247,7 @@ function taskPackHandlers() {
               businessName: socialCalendarRequest?.business?.name || null,
               continueOnError: socialCalendarRequest?.continueOnError === true
             }),
-            skipIf: (runtimeContext) => !explicitRunSocialCalendarFlow || !socialCalendarFlowReviewedPosts(runtimeContext, socialCalendarRequest).ready
+            skipIf: (runtimeContext) => !shouldRunSocialCalendarFlow || !socialCalendarFlowReviewedPosts(runtimeContext, socialCalendarRequest).ready
           },
           {
             name: 'generate_social_post_preview',
@@ -4239,7 +4275,7 @@ function taskPackHandlers() {
               accountCount: socialAccountsFromContext(runtimeContext).length,
               targetAccountIds: mutationRequest?.accountIds || []
             }),
-            skipIf: () => !explicitCreateSocialPost || explicitCreateSocialPostsBulk || explicitRunSocialCalendarFlow
+            skipIf: () => !explicitCreateSocialPost || explicitCreateSocialPostsBulk || shouldRunSocialCalendarFlow
           }
         ];
       }
