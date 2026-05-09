@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { buildTaskPacks } from './definitions.js';
 
 function objectIdFrom(event) {
@@ -46,6 +48,79 @@ function normalizeTimestampLike(value) {
     return Number.isNaN(asDate) ? null : asDate;
   }
   return null;
+}
+
+function normalizeBusinessNameKey(value) {
+  return normalizeString(value)?.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() || null;
+}
+
+function resolveWorkspaceRoot(fromDir = process.cwd()) {
+  let current = path.resolve(fromDir);
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (existsSync(path.join(current, 'START_PROTOCOL.md'))) return current;
+    if (existsSync(path.join(current, 'business', 'ACTIVE_BUSINESS.json'))) return current;
+    if (existsSync(path.join(current, 'business', 'ACTIVE_BUSINESS.template.json'))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return path.resolve(fromDir, '..');
+}
+
+function readActiveBusinessRecord(fromDir = process.cwd()) {
+  const activeBusinessPath = path.join(resolveWorkspaceRoot(fromDir), 'business', 'ACTIVE_BUSINESS.json');
+  if (!existsSync(activeBusinessPath)) return null;
+  try {
+    return JSON.parse(readFileSync(activeBusinessPath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function activeBusinessDefaultsFromRecord(record) {
+  const activeBusiness = normalizePlainObject(record) || {};
+  const profile = normalizePlainObject(activeBusiness.business || activeBusiness.businessProfile || activeBusiness.profile || activeBusiness.details) || {};
+  const knowledgeBase = normalizePlainObject(activeBusiness.knowledgeBase || profile.knowledgeBase) || {};
+  const brand = normalizePlainObject(activeBusiness.brand || profile.brand) || {};
+  const ghlAccess = normalizePlainObject(activeBusiness.access?.ghl || activeBusiness.ghl || profile.ghl) || {};
+
+  return {
+    name: normalizeString(activeBusiness.businessName)
+      || normalizeString(activeBusiness.name)
+      || normalizeString(profile.name)
+      || normalizeString(profile.businessName)
+      || null,
+    industry: normalizeString(activeBusiness.industry)
+      || normalizeString(activeBusiness.category)
+      || normalizeString(profile.industry)
+      || normalizeString(profile.category)
+      || null,
+    audience: normalizeStringArray(activeBusiness.audience || activeBusiness.audiences || profile.audience || profile.audiences),
+    offers: normalizeStringArray(activeBusiness.offers || activeBusiness.services || activeBusiness.solutions || profile.offers || profile.services || profile.solutions),
+    differentiators: normalizeStringArray(activeBusiness.differentiators || activeBusiness.strengths || activeBusiness.advantages || profile.differentiators || profile.strengths || profile.advantages),
+    goals: normalizeStringArray(activeBusiness.goals || activeBusiness.outcomes || profile.goals || profile.outcomes),
+    ctas: normalizeStringArray(activeBusiness.ctas || activeBusiness.callsToAction || profile.ctas || profile.callsToAction),
+    hashtags: normalizeStringArray(activeBusiness.hashtags || profile.hashtags),
+    knowledgeBaseRef: normalizeString(activeBusiness.knowledgeBaseRef)
+      || normalizeString(activeBusiness.knowledgeBaseId)
+      || normalizeString(knowledgeBase.ref)
+      || normalizeString(knowledgeBase.id)
+      || null,
+    website: normalizeString(activeBusiness.website)
+      || normalizeString(brand.website)
+      || null,
+    locationId: normalizeString(activeBusiness.locationId)
+      || normalizeString(ghlAccess.locationId)
+      || null
+  };
+}
+
+function shouldUseActiveBusinessDefaults(requestedBusinessName, activeBusiness) {
+  if (!activeBusiness) return false;
+  const activeBusinessName = normalizeString(activeBusiness.name);
+  if (!normalizeString(requestedBusinessName)) return Boolean(activeBusinessName);
+  if (!activeBusinessName) return false;
+  return normalizeBusinessNameKey(requestedBusinessName) === normalizeBusinessNameKey(activeBusinessName);
 }
 
 function contactSearchResumeData(liveResult) {
@@ -389,10 +464,7 @@ function normalizeStyleToken(value) {
   return token;
 }
 
-function parseStyleList(value) {
-  const explicit = parseInlineList(value).map((item) => normalizeStyleToken(item)).filter(Boolean);
-  if (explicit.length > 0) return [...new Set(explicit)];
-
+function detectStyleListFromText(value) {
   const text = normalizeTextBlock(value)?.toLowerCase() || '';
   const detected = [];
   if (/\brealistic(?:[-\s]+scene)?\b/.test(text)) detected.push('realistic-scene');
@@ -400,6 +472,12 @@ function parseStyleList(value) {
   if (/\binfographic\b/.test(text)) detected.push('infographic');
   if (/\beditorial\b/.test(text)) detected.push('editorial');
   return [...new Set(detected)];
+}
+
+function parseStyleList(value) {
+  const explicit = parseInlineList(value).map((item) => normalizeStyleToken(item)).filter(Boolean);
+  if (explicit.length > 0) return [...new Set(explicit)];
+  return detectStyleListFromText(value);
 }
 
 function parseDateToIso(value) {
@@ -556,14 +634,14 @@ function parseSocialCalendarRequestText(value) {
   }
 
   const inferredWindow = inferCalendarWindowFromText(text);
-  const stylesText = extractLabeledText(text, ['styles', 'style', 'creative styles', 'creative style', 'visual styles', 'visual style']) || text;
+  const stylesText = extractLabeledText(text, ['styles', 'style', 'creative styles', 'creative style', 'visual styles', 'visual style']);
   const scheduledTime = extractScheduledTimeFromText(text);
   const accountIds = parseInlineList(extractLabeledText(text, ['account ids', 'accounts', 'accountids']));
 
   return {
     sourceText: text,
     accountIds,
-    creativeStyles: parseStyleList(stylesText),
+    creativeStyles: stylesText ? parseStyleList(stylesText) : detectStyleListFromText(text),
     status: extractStatusFromText(text),
     business: {
       name: extractBusinessNameFromText(text),
@@ -604,6 +682,16 @@ function socialCalendarMutationRequestFrom(event) {
     || request.message
   );
   const parsedRequest = parseSocialCalendarRequestText(plainTextRequest);
+  const requestedBusinessName = normalizeString(request.businessName)
+    || normalizeString(business.name)
+    || normalizeString(business.businessName)
+    || normalizeString(parsedRequest.business.name)
+    || null;
+  const activeBusiness = activeBusinessDefaultsFromRecord(readActiveBusinessRecord(process.cwd()));
+  const useActiveBusiness = shouldUseActiveBusinessDefaults(requestedBusinessName, activeBusiness);
+  const activeBusinessDefaults = useActiveBusiness ? activeBusiness : null;
+  const eventLocationId = normalizeString(event?.locationId) || normalizeString(event?.payload?.locationId) || null;
+  const preferredEventLocationId = eventLocationId && eventLocationId !== 'demo-location' ? eventLocationId : null;
   const reviewInstructionText = normalizeTextBlock(
     request.reviewText
     || request.reviewNotes
@@ -629,29 +717,26 @@ function socialCalendarMutationRequestFrom(event) {
   return {
     action: request.action || null,
     sourceText: parsedRequest.sourceText,
-    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    locationId: request.locationId || preferredEventLocationId || activeBusinessDefaults?.locationId || eventLocationId || null,
     accountIds: normalizeStringArray(request.accountIds || calendar.accountIds || parsedRequest.accountIds),
     status: normalizeString(request.status) || normalizeString(calendar.status) || normalizeString(parsedRequest.status) || 'draft',
     creativeStyles: normalizeStringArray(request.creativeStyles || calendar.creativeStyles || parsedRequest.creativeStyles),
     continueOnError: normalizeBoolean(request.continueOnError),
     postDefaults: normalizePlainObject(request.postDefaults || calendar.postDefaults) || {},
     business: {
-      name: normalizeString(request.businessName)
-        || normalizeString(business.name)
-        || normalizeString(business.businessName)
-        || normalizeString(parsedRequest.business.name)
-        || null,
+      name: requestedBusinessName || normalizeString(activeBusinessDefaults?.name) || null,
       industry: normalizeString(request.industry)
         || normalizeString(business.industry)
         || normalizeString(business.category)
         || normalizeString(parsedRequest.business.industry)
+        || normalizeString(activeBusinessDefaults?.industry)
         || null,
-      audience: normalizeStringArray(request.audience || business.audience || business.audiences || parsedRequest.business.audience),
-      offers: normalizeStringArray(request.offers || request.services || business.offers || business.services || business.solutions || parsedRequest.business.offers),
-      differentiators: normalizeStringArray(request.differentiators || business.differentiators || business.strengths || business.advantages || parsedRequest.business.differentiators),
-      goals: normalizeStringArray(request.goals || business.goals || business.outcomes || parsedRequest.business.goals),
-      ctas: normalizeStringArray(request.ctas || business.ctas || business.callsToAction || parsedRequest.business.ctas),
-      hashtags: normalizeStringArray(request.hashtags || business.hashtags || parsedRequest.business.hashtags),
+      audience: normalizeStringArray(request.audience || business.audience || business.audiences || parsedRequest.business.audience || activeBusinessDefaults?.audience),
+      offers: normalizeStringArray(request.offers || request.services || business.offers || business.services || business.solutions || parsedRequest.business.offers || activeBusinessDefaults?.offers),
+      differentiators: normalizeStringArray(request.differentiators || business.differentiators || business.strengths || business.advantages || parsedRequest.business.differentiators || activeBusinessDefaults?.differentiators),
+      goals: normalizeStringArray(request.goals || business.goals || business.outcomes || parsedRequest.business.goals || activeBusinessDefaults?.goals),
+      ctas: normalizeStringArray(request.ctas || business.ctas || business.callsToAction || parsedRequest.business.ctas || activeBusinessDefaults?.ctas),
+      hashtags: normalizeStringArray(request.hashtags || business.hashtags || parsedRequest.business.hashtags || activeBusinessDefaults?.hashtags),
       knowledgeBaseRef: normalizeString(request.knowledgeBaseRef)
         || normalizeString(request.knowledgeBaseId)
         || normalizeString(request.knowledgeBase)
@@ -659,6 +744,7 @@ function socialCalendarMutationRequestFrom(event) {
         || normalizeString(business.knowledgeBaseId)
         || normalizeString(business.knowledgeBase)
         || normalizeString(parsedRequest.business.knowledgeBaseRef)
+        || normalizeString(activeBusinessDefaults?.knowledgeBaseRef)
         || null
     },
     calendar: {
@@ -4152,8 +4238,8 @@ function taskPackHandlers() {
       buildExecutionPlan(context) {
         const mutationRequest = socialPostMutationRequestFrom(context.event);
         const socialCalendarRequest = socialCalendarMutationRequestFrom(context.event);
-        const locationId = resolvedSocialPostLocationId(context, mutationRequest)
-          || socialCalendarRequest?.locationId
+        const locationId = socialCalendarRequest?.locationId
+          || resolvedSocialPostLocationId(context, mutationRequest)
           || context.event.locationId
           || null;
         const explicitCreateSocialPost = mutationRequest?.action === 'create_social_post';
