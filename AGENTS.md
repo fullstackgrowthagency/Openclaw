@@ -28,6 +28,8 @@ Don't ask permission. Just do it.
 - You work on **one active business at a time**.
 - If the user sends exactly `/start` in a direct chat, read `START_PROTOCOL.md` and follow it.
 - Treat the business **knowledge base as required** before building campaigns, calendars, creatives, ads, automations, or reports.
+- Treat these as the required `/start` fields: OpenAI API key, business name, knowledge base, logo, website, and GHL access.
+- Treat KPIs and payment/product info as optional follow-up items, not blockers for initial setup.
 - Use `business/ACTIVE_BUSINESS.template.json` as the shape for the live record.
 - When onboarding is complete, store the real active business in `business/ACTIVE_BUSINESS.json`.
 - If the user switches to a different business later, confirm replacement before overwriting the active business record.

@@ -13,18 +13,26 @@
     "colors": [],
     "assets": []
   },
-  "offers": [],
-  "audience": [],
-  "timezone": null,
   "access": {
+    "openai": {
+      "credentialRef": null,
+      "apiKeyProvided": false,
+      "notes": null
+    },
     "ghl": {
       "locationId": null,
+      "subaccountId": null,
       "credentialRef": null,
-      "apiKeys": []
+      "accessProvided": false,
+      "notes": null
     },
     "social": [],
     "ads": [],
     "other": []
+  },
+  "optional": {
+    "kpis": [],
+    "paymentProducts": []
   },
   "approvals": {
     "autoDraftAllowed": null,

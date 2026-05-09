@@ -6,11 +6,11 @@ Use this when the user sends exactly `/start` in a direct chat.
 
 Set up one active business at a time.
 
-Do not start building campaigns, calendars, creatives, ads, automations, or reports until the active business has a knowledge base reference or knowledge base content attached.
+Do not start building campaigns, calendars, creatives, ads, automations, or reports until the active business has the required `/start` setup complete.
 
 ## Core rule
 
-**Knowledge base first.**
+**Knowledge base required.**
 
 If the business knowledge base is missing, onboarding is incomplete.
 Do not proceed past setup planning.
@@ -21,7 +21,7 @@ Reply with a short onboarding message that:
 
 1. says you will set up one business at a time
 2. says the knowledge base is required
-3. asks for the required setup items below
+3. asks for the exact required setup items below
 4. asks the user to send attachments directly when possible
 5. keeps the request concise and checklist-style
 
@@ -29,38 +29,26 @@ Reply with a short onboarding message that:
 
 Ask for these on `/start`:
 
-1. **Business name**
-2. **Business knowledge base**
+1. **OpenAI API key**
+2. **Business name**
+3. **Business knowledge base**
    - file, docs link, exported notes, pasted text, or other source of truth
    - this is required before production work
-3. **Business logo**
+4. **Business logo**
    - image attachment or hosted URL
-4. **Website / domain**
-5. **Primary offer(s)**
-6. **Target audience**
-7. **Brand voice / positioning**
-8. **Timezone**
-9. **Required API keys / platform access**
-   - GHL access details
-   - social platform access if needed
-   - ad platform access if needed
-   - any other external tool credentials relevant to the requested work
-10. **Approval/contact preference**
-   - what can be drafted automatically
-   - what must wait for approval
+5. **Website / domain**
+6. **GHL access**
+   - location/subaccount access details
+   - credential reference, OAuth/PIT, or other usable connection details
 
-## Helpful optional items
+## Optional follow-up items
 
-If missing, ask later only when useful:
+Collect these right after `/start` if needed, but do not block initial setup on them:
 
-- brand colors
-- extra brand assets
-- preferred posting cadence
-- compliance constraints
-- restricted claims/topics
-- CTA preferences
-- service areas / geo targets
-- competitors / market context
+- KPIs
+- payment/product info
+
+Other useful items can be collected later when relevant.
 
 ## Response template for `/start`
 
@@ -70,32 +58,24 @@ Use this structure, adapted naturally:
 - say: one business at a time
 - say: knowledge base required
 - ask for:
+  - OpenAI API key
   - business name
   - knowledge base
   - logo
   - website
-  - offers
-  - audience
-  - brand voice
-  - timezone
-  - API keys / access
-  - approval preference
+  - GHL access
 
 Example shape:
 
 "Summary: I’m setting up your active business workspace now. We’ll do one business at a time, and I need the business knowledge base before I build anything.
 
 Please send:
+- OpenAI API key
 - Business name
 - Knowledge base or source-of-truth docs
 - Logo
 - Website/domain
-- Main offers/services
-- Target audience
-- Brand voice/positioning
-- Timezone
-- Relevant API keys/access
-- What I can draft automatically vs what should wait for approval"
+- GHL access details"
 
 ## After the user replies
 
@@ -104,6 +84,7 @@ Please send:
 3. if enough info is present, store/update `business/ACTIVE_BUSINESS.json`
 4. if the knowledge base is still missing, stop and ask for it plainly
 5. do not pretend onboarding is complete until all required items are present
+6. then collect optional follow-up items like KPIs and payment/product info
 
 ## Storage
 
