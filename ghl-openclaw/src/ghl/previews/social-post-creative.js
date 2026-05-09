@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -81,6 +82,32 @@ function initials(value) {
     .slice(0, 2)
     .join('');
   return letters || 'GO';
+}
+
+function displayHost(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  try {
+    const parsed = new URL(normalized);
+    return parsed.hostname.replace(/^www\./i, '') || null;
+  } catch {
+    return normalized.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split(/[/?#]/)[0] || null;
+  }
+}
+
+function resolveRenderableAssetUrl(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  if (/^(?:https?:|data:|file:)/i.test(normalized)) return normalized;
+  if (path.isAbsolute(normalized)) return `file://${normalized}`;
+
+  const cwdCandidate = path.resolve(process.cwd(), normalized);
+  if (existsSync(cwdCandidate)) return `file://${cwdCandidate}`;
+
+  const workspaceCandidate = path.resolve(process.cwd(), '..', normalized);
+  if (existsSync(workspaceCandidate)) return `file://${workspaceCandidate}`;
+
+  return null;
 }
 
 function extractBrand(summary, explicitBusinessName, postBusinessName) {
@@ -532,7 +559,7 @@ function resolveHeroWord(headline, theme, styleId) {
   return base;
 }
 
-function buildCreativeModel({ locationId, post, businessName } = {}) {
+function buildCreativeModel({ locationId, post, businessName, brandVoice, websiteUrl, logoUrl } = {}) {
   const summary = normalizeString(post?.summary) || normalizeString(post?.text) || '';
   const brand = extractBrand(summary, businessName, post?.businessName);
   const theme = inferCreativeTheme(summary);
@@ -547,11 +574,22 @@ function buildCreativeModel({ locationId, post, businessName } = {}) {
     .map((item) => JSON.parse(item))
     .slice(0, styleId === 'realistic-scene' ? 1 : 2);
   const nodes = uniqueCompact(theme.nodes).slice(0, 4);
+  const resolvedBrandVoice = normalizeString(brandVoice) || normalizeString(post?.brandVoice) || normalizeString(post?.voice) || null;
+  const resolvedWebsiteUrl = normalizeString(websiteUrl) || normalizeString(post?.websiteUrl) || normalizeString(post?.website) || null;
+  const resolvedLogoUrl = resolveRenderableAssetUrl(normalizeString(logoUrl) || normalizeString(post?.logoUrl) || normalizeString(post?.logo) || null);
+  const websiteHost = displayHost(resolvedWebsiteUrl);
+  const brandSub = clampText(resolvedBrandVoice || websiteHost || 'premium social creative', 36);
+  const footerTag = [styleId.replace(/-/g, ' '), theme.id.replace(/-/g, ' '), websiteHost].filter(Boolean).join(' • ');
 
   return {
     locationId: locationId || null,
     brand,
     monogram: initials(brand),
+    brandVoice: resolvedBrandVoice,
+    brandSub,
+    websiteUrl: resolvedWebsiteUrl,
+    websiteHost,
+    logoUrl: resolvedLogoUrl,
     summary,
     themeId: theme.id,
     layout: theme.layout,
@@ -566,7 +604,7 @@ function buildCreativeModel({ locationId, post, businessName } = {}) {
     metrics: metricRows,
     nodes,
     palette: theme.palette,
-    footerTag: `${styleId.replace(/-/g, ' ')} • ${theme.id.replace(/-/g, ' ')}`
+    footerTag
   };
 }
 
@@ -876,17 +914,25 @@ function renderHtml(model) {
       gap: 14px;
       min-width: 0;
     }
-    .brand-mark {
+    .brand-mark,
+    .brand-logo {
       width: 48px;
       height: 48px;
       border-radius: 16px;
+      box-shadow: 0 16px 34px rgba(0,0,0,0.24);
+    }
+    .brand-mark {
       display: grid;
       place-items: center;
       font-size: 18px;
       font-weight: 900;
       color: var(--bg-a);
       background: linear-gradient(135deg, var(--accent), var(--accent-alt));
-      box-shadow: 0 16px 34px rgba(0,0,0,0.24);
+    }
+    .brand-logo {
+      object-fit: cover;
+      display: block;
+      background: rgba(255,255,255,0.08);
     }
     .brand-name {
       font-size: 22px;
@@ -1581,10 +1627,12 @@ function renderHtml(model) {
     <section class="shell">
       <header class="topbar">
         <div class="brand-lockup">
-          <div class="brand-mark">${escapeHtml(model.monogram)}</div>
+          ${model.logoUrl
+            ? `<img class="brand-logo" src="${escapeHtml(model.logoUrl)}" alt="" />`
+            : `<div class="brand-mark">${escapeHtml(model.monogram)}</div>`}
           <div>
             <div class="brand-name">${escapeHtml(model.brand)}</div>
-            <div class="brand-sub">premium social creative</div>
+            <div class="brand-sub">${escapeHtml(model.brandSub)}</div>
           </div>
         </div>
         <div class="top-signal">${escapeHtml(model.styleLabel)} creative</div>
@@ -1621,14 +1669,14 @@ async function renderPng(htmlPath, pngPath) {
   ], { maxBuffer: 10 * 1024 * 1024 });
 }
 
-export async function generateSocialPostCreative({ locationId, post, businessName, style, outputDir } = {}) {
+export async function generateSocialPostCreative({ locationId, post, businessName, brandVoice, websiteUrl, logoUrl, style, outputDir } = {}) {
   if (!post || typeof post !== 'object' || Array.isArray(post)) {
     throw new Error('Missing post payload for social creative generation.');
   }
 
   const normalizedStyle = normalizeCreativeStyleId(style);
   const postWithStyle = normalizedStyle ? { ...post, creativeStyle: normalizedStyle } : post;
-  const model = buildCreativeModel({ locationId, post: postWithStyle, businessName });
+  const model = buildCreativeModel({ locationId, post: postWithStyle, businessName, brandVoice, websiteUrl, logoUrl });
   const html = renderHtml(model);
   const baseDir = path.resolve(outputDir || path.join(process.cwd(), 'data', 'generated', 'creatives'));
   const fileBase = `${toSlug(`${model.brand}-${model.themeId}-${model.styleId}`)}-${Date.now()}`;

@@ -27,12 +27,28 @@ function normalizeSocialCreativeRequest(body = {}, options = {}) {
     ...(Array.isArray(payload?.creative?.styles) ? payload.creative.styles : []),
     ...(Array.isArray(options.creativeStyles) ? options.creativeStyles : [])
   ]);
+  const businessName = body?.businessName || options.businessName || null;
+  const brandVoice = body?.brandVoice || body?.voice || body?.brand?.voice || options.brandVoice || null;
+  const websiteUrl = body?.websiteUrl || body?.website || body?.brand?.website || options.websiteUrl || null;
+  const logoUrl = body?.logoUrl || body?.logo || body?.brand?.logo || options.logoUrl || null;
 
   delete payload.businessName;
+  delete payload.brandVoice;
+  delete payload.voice;
+  delete payload.websiteUrl;
+  delete payload.website;
+  delete payload.logoUrl;
+  delete payload.logo;
   delete payload.creativeStyle;
   delete payload.creativeStyles;
   delete payload.visualStyle;
   delete payload.style;
+  if (payload.brand && typeof payload.brand === 'object' && !Array.isArray(payload.brand)) {
+    delete payload.brand.voice;
+    delete payload.brand.website;
+    delete payload.brand.logo;
+    if (Object.keys(payload.brand).length === 0) delete payload.brand;
+  }
   if (payload.creative && typeof payload.creative === 'object' && !Array.isArray(payload.creative)) {
     delete payload.creative.style;
     delete payload.creative.styles;
@@ -43,7 +59,10 @@ function normalizeSocialCreativeRequest(body = {}, options = {}) {
     payload,
     creativeStyle,
     creativeStyles,
-    businessName: body?.businessName || options.businessName || null
+    businessName,
+    brandVoice,
+    websiteUrl,
+    logoUrl
   };
 }
 
@@ -626,7 +645,7 @@ export class SocialPlannerAdapter {
   }
 
   async createPostWithCreative(credentialRef, locationId, body, options = {}) {
-    const { payload, creativeStyle, creativeStyles, businessName } = normalizeSocialCreativeRequest(body, options);
+    const { payload, creativeStyle, creativeStyles, businessName, brandVoice, websiteUrl, logoUrl } = normalizeSocialCreativeRequest(body, options);
     const existingMedia = Array.isArray(payload.media) ? payload.media.filter(Boolean) : [];
     let creative = null;
 
@@ -640,6 +659,9 @@ export class SocialPlannerAdapter {
           locationId,
           post: payload,
           businessName,
+          brandVoice,
+          websiteUrl,
+          logoUrl,
           style,
           outputDir: options.outputDir
         });
@@ -650,6 +672,9 @@ export class SocialPlannerAdapter {
         locationId,
         post: payload,
         businessName,
+        brandVoice,
+        websiteUrl,
+        logoUrl,
         style: creativeStyle,
         outputDir: options.outputDir
       });
@@ -700,6 +725,9 @@ export class SocialPlannerAdapter {
         const created = await this.createPostWithCreative(credentialRef, locationId, post, {
           ...options,
           businessName: post?.businessName || options.businessName || null,
+          brandVoice: post?.brandVoice || post?.voice || options.brandVoice || null,
+          websiteUrl: post?.websiteUrl || post?.website || options.websiteUrl || null,
+          logoUrl: post?.logoUrl || post?.logo || options.logoUrl || null,
           creativeStyles: Array.isArray(post?.creativeStyles) ? post.creativeStyles : options.creativeStyles
         });
         results.push({

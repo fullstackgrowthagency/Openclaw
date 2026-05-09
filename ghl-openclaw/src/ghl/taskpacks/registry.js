@@ -106,8 +106,17 @@ function activeBusinessDefaultsFromRecord(record) {
       || normalizeString(knowledgeBase.ref)
       || normalizeString(knowledgeBase.id)
       || null,
-    website: normalizeString(activeBusiness.website)
+    websiteUrl: normalizeString(activeBusiness.website)
+      || normalizeString(activeBusiness.websiteUrl)
       || normalizeString(brand.website)
+      || null,
+    logoUrl: normalizeString(activeBusiness.logo)
+      || normalizeString(activeBusiness.logoUrl)
+      || normalizeString(brand.logo)
+      || null,
+    brandVoice: normalizeString(activeBusiness.brandVoice)
+      || normalizeString(activeBusiness.voice)
+      || normalizeString(brand.voice)
       || null,
     locationId: normalizeString(activeBusiness.locationId)
       || normalizeString(ghlAccess.locationId)
@@ -275,9 +284,16 @@ function socialPostMutationRequestFrom(event) {
     || normalizeString(request.text)
     || normalizeString(rawPost.summary)
     || normalizeString(rawPost.text);
-  const businessName = normalizeString(request.businessName)
+  const requestedBusinessName = normalizeString(request.businessName)
     || normalizeString(rawPost.businessName)
-    || normalizeString(rawPostDefaults.businessName);
+    || normalizeString(rawPostDefaults.businessName)
+    || null;
+  const activeBusiness = activeBusinessDefaultsFromRecord(readActiveBusinessRecord(process.cwd()));
+  const useActiveBusiness = shouldUseActiveBusinessDefaults(requestedBusinessName, activeBusiness);
+  const activeBusinessDefaults = useActiveBusiness ? activeBusiness : null;
+  const eventLocationId = normalizeString(event?.locationId) || normalizeString(event?.payload?.locationId) || null;
+  const preferredEventLocationId = eventLocationId && eventLocationId !== 'demo-location' ? eventLocationId : null;
+  const businessName = requestedBusinessName || normalizeString(activeBusinessDefaults?.name) || null;
   const creativeStyle = normalizeString(request.creativeStyle)
     || normalizeString(request.visualStyle)
     || normalizeString(request.style)
@@ -293,6 +309,30 @@ function socialPostMutationRequestFrom(event) {
     || rawPost.creativeStyles
     || rawPostDefaults.creativeStyles
   );
+  const brandVoice = normalizeString(request.brandVoice)
+    || normalizeString(request.voice)
+    || normalizeString(rawPost.brandVoice)
+    || normalizeString(rawPost.voice)
+    || normalizeString(rawPostDefaults.brandVoice)
+    || normalizeString(rawPostDefaults.voice)
+    || normalizeString(activeBusinessDefaults?.brandVoice)
+    || null;
+  const websiteUrl = normalizeString(request.websiteUrl)
+    || normalizeString(request.website)
+    || normalizeString(rawPost.websiteUrl)
+    || normalizeString(rawPost.website)
+    || normalizeString(rawPostDefaults.websiteUrl)
+    || normalizeString(rawPostDefaults.website)
+    || normalizeString(activeBusinessDefaults?.websiteUrl)
+    || null;
+  const logoUrl = normalizeString(request.logoUrl)
+    || normalizeString(request.logo)
+    || normalizeString(rawPost.logoUrl)
+    || normalizeString(rawPost.logo)
+    || normalizeString(rawPostDefaults.logoUrl)
+    || normalizeString(rawPostDefaults.logo)
+    || normalizeString(activeBusinessDefaults?.logoUrl)
+    || null;
 
   if (accountIds.length > 0 && !Array.isArray(rawPost.accountIds)) rawPost.accountIds = accountIds;
   if (status && !rawPost.status) rawPost.status = status;
@@ -301,10 +341,13 @@ function socialPostMutationRequestFrom(event) {
   if (businessName && !rawPost.businessName) rawPost.businessName = businessName;
   if (creativeStyle && !rawPost.creativeStyle && !rawPost.visualStyle && !rawPost.style) rawPost.creativeStyle = creativeStyle;
   if (creativeStyles.length > 0 && !Array.isArray(rawPost.creativeStyles)) rawPost.creativeStyles = creativeStyles;
+  if (brandVoice && !rawPost.brandVoice && !rawPost.voice) rawPost.brandVoice = brandVoice;
+  if (websiteUrl && !rawPost.websiteUrl && !rawPost.website) rawPost.websiteUrl = websiteUrl;
+  if (logoUrl && !rawPost.logoUrl && !rawPost.logo) rawPost.logoUrl = logoUrl;
 
   return {
     action: request.action || null,
-    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    locationId: request.locationId || preferredEventLocationId || normalizeString(activeBusinessDefaults?.locationId) || eventLocationId || null,
     accountIds,
     status,
     scheduleDate,
@@ -312,6 +355,9 @@ function socialPostMutationRequestFrom(event) {
     businessName,
     creativeStyle,
     creativeStyles,
+    brandVoice,
+    websiteUrl,
+    logoUrl,
     continueOnError: normalizeBoolean(request.continueOnError),
     postDefaults: rawPostDefaults,
     post: rawPost,
@@ -745,6 +791,24 @@ function socialCalendarMutationRequestFrom(event) {
         || normalizeString(business.knowledgeBase)
         || normalizeString(parsedRequest.business.knowledgeBaseRef)
         || normalizeString(activeBusinessDefaults?.knowledgeBaseRef)
+        || null,
+      brandVoice: normalizeString(request.brandVoice)
+        || normalizeString(request.voice)
+        || normalizeString(business.brandVoice)
+        || normalizeString(business.voice)
+        || normalizeString(activeBusinessDefaults?.brandVoice)
+        || null,
+      websiteUrl: normalizeString(request.websiteUrl)
+        || normalizeString(request.website)
+        || normalizeString(business.websiteUrl)
+        || normalizeString(business.website)
+        || normalizeString(activeBusinessDefaults?.websiteUrl)
+        || null,
+      logoUrl: normalizeString(request.logoUrl)
+        || normalizeString(request.logo)
+        || normalizeString(business.logoUrl)
+        || normalizeString(business.logo)
+        || normalizeString(activeBusinessDefaults?.logoUrl)
         || null
     },
     calendar: {
@@ -1153,9 +1217,24 @@ function socialPostBulkCreateBodies(mutationRequest) {
       summary: normalizeString(post?.summary) || normalizeString(post?.text) || null
     });
 
-    const businessName = normalizeString(post?.businessName)
+      const businessName = normalizeString(post?.businessName)
       || normalizeString(defaults?.businessName)
       || mutationRequest?.businessName;
+    const brandVoice = normalizeString(post?.brandVoice)
+      || normalizeString(post?.voice)
+      || normalizeString(defaults?.brandVoice)
+      || normalizeString(defaults?.voice)
+      || normalizeString(mutationRequest?.brandVoice);
+    const websiteUrl = normalizeString(post?.websiteUrl)
+      || normalizeString(post?.website)
+      || normalizeString(defaults?.websiteUrl)
+      || normalizeString(defaults?.website)
+      || normalizeString(mutationRequest?.websiteUrl);
+    const logoUrl = normalizeString(post?.logoUrl)
+      || normalizeString(post?.logo)
+      || normalizeString(defaults?.logoUrl)
+      || normalizeString(defaults?.logo)
+      || normalizeString(mutationRequest?.logoUrl);
     const creativeStyle = normalizeString(post?.creativeStyle)
       || normalizeString(post?.visualStyle)
       || normalizeString(post?.style)
@@ -1172,6 +1251,9 @@ function socialPostBulkCreateBodies(mutationRequest) {
     return {
       ...body,
       ...(businessName ? { businessName } : {}),
+      ...(brandVoice ? { brandVoice } : {}),
+      ...(websiteUrl ? { websiteUrl } : {}),
+      ...(logoUrl ? { logoUrl } : {}),
       ...(creativeStyle ? { creativeStyle } : {}),
       ...(creativeStyles.length > 0 ? { creativeStyles } : {})
     };
@@ -1188,6 +1270,9 @@ function sanitizeSocialCalendarFlowPost(post, fallbackDay = null) {
   const scheduleDate = normalizeString(value.scheduleDate) || normalizeString(value.scheduledAt);
   const status = normalizeString(value.status);
   const businessName = normalizeString(value.businessName);
+  const brandVoice = normalizeString(value.brandVoice) || normalizeString(value.voice);
+  const websiteUrl = normalizeString(value.websiteUrl) || normalizeString(value.website);
+  const logoUrl = normalizeString(value.logoUrl) || normalizeString(value.logo);
   const creativeStyle = normalizeString(value.creativeStyle) || normalizeString(value.visualStyle) || normalizeString(value.style);
   const creativeStyles = normalizeStringArray(value.creativeStyles);
   const accountIds = normalizeStringArray(value.accountIds);
@@ -1199,6 +1284,9 @@ function sanitizeSocialCalendarFlowPost(post, fallbackDay = null) {
     ...(summary ? { summary } : {}),
     ...(scheduleDate ? { scheduleDate } : {}),
     ...(status ? { status } : {}),
+    ...(brandVoice ? { brandVoice } : {}),
+    ...(websiteUrl ? { websiteUrl } : {}),
+    ...(logoUrl ? { logoUrl } : {}),
     ...(accountIds.length > 0 ? { accountIds } : {}),
     ...(creativeStyle ? { creativeStyle } : {}),
     ...(creativeStyles.length > 0 ? { creativeStyles } : {})
@@ -1220,6 +1308,9 @@ function socialCalendarFlowBasePosts(plan, mutationRequest) {
       summary: mutationPost.summary || planPost.summary || null,
       scheduleDate: mutationPost.scheduleDate || planPost.scheduleDate || null,
       status: mutationPost.status || plan?.calendar?.status || mutationRequest?.status || 'draft',
+      brandVoice: mutationPost.brandVoice || planPost.brandVoice || mutationRequest?.business?.brandVoice || null,
+      websiteUrl: mutationPost.websiteUrl || planPost.websiteUrl || mutationRequest?.business?.websiteUrl || null,
+      logoUrl: mutationPost.logoUrl || planPost.logoUrl || mutationRequest?.business?.logoUrl || null,
       accountIds: mutationPost.accountIds || plan?.calendar?.accountIds || mutationRequest?.accountIds || [],
       creativeStyle: mutationPost.creativeStyle || planPost.creativeStyle || null,
       creativeStyles: mutationPost.creativeStyles || planPost.creativeStyles || mutationRequest?.creativeStyles || []
@@ -1375,6 +1466,9 @@ function socialCalendarFlowCreateBodies(context, mutationRequest) {
     accountIds: mutationRequest?.accountIds || [],
     status: mutationRequest?.status || 'draft',
     businessName: mutationRequest?.business?.name || null,
+    brandVoice: mutationRequest?.business?.brandVoice || null,
+    websiteUrl: mutationRequest?.business?.websiteUrl || null,
+    logoUrl: mutationRequest?.business?.logoUrl || null,
     creativeStyles: mutationRequest?.creativeStyles || [],
     postDefaults: mutationRequest?.postDefaults || {},
     posts: reviewed.posts.map((post) => {
@@ -4312,6 +4406,18 @@ function taskPackHandlers() {
                 generateCreative: !Array.isArray(mutationRequest?.post?.media) || mutationRequest.post.media.length === 0,
                 businessName: normalizeString(mutationRequest?.post?.businessName)
                   || normalizeString(mutationRequest?.businessName)
+                  || null,
+                brandVoice: normalizeString(mutationRequest?.post?.brandVoice)
+                  || normalizeString(mutationRequest?.post?.voice)
+                  || normalizeString(mutationRequest?.brandVoice)
+                  || null,
+                websiteUrl: normalizeString(mutationRequest?.post?.websiteUrl)
+                  || normalizeString(mutationRequest?.post?.website)
+                  || normalizeString(mutationRequest?.websiteUrl)
+                  || null,
+                logoUrl: normalizeString(mutationRequest?.post?.logoUrl)
+                  || normalizeString(mutationRequest?.post?.logo)
+                  || normalizeString(mutationRequest?.logoUrl)
                   || null
               }
             ],
@@ -4345,6 +4451,9 @@ function taskPackHandlers() {
               {
                 generateCreative: true,
                 businessName: normalizeString(mutationRequest?.businessName) || null,
+                brandVoice: normalizeString(mutationRequest?.brandVoice) || null,
+                websiteUrl: normalizeString(mutationRequest?.websiteUrl) || null,
+                logoUrl: normalizeString(mutationRequest?.logoUrl) || null,
                 creativeStyles: mutationRequest?.creativeStyles || [],
                 continueOnError: mutationRequest?.continueOnError === true
               }
@@ -4384,6 +4493,9 @@ function taskPackHandlers() {
                 {
                   generateCreative: true,
                   businessName: normalizeString(socialCalendarRequest?.business?.name) || null,
+                  brandVoice: normalizeString(socialCalendarRequest?.business?.brandVoice) || null,
+                  websiteUrl: normalizeString(socialCalendarRequest?.business?.websiteUrl) || null,
+                  logoUrl: normalizeString(socialCalendarRequest?.business?.logoUrl) || null,
                   creativeStyles: socialCalendarRequest?.creativeStyles || [],
                   continueOnError: socialCalendarRequest?.continueOnError === true
                 }
