@@ -355,6 +355,172 @@ function parseSocialCalendarReviewInstructions(value) {
   return parsed;
 }
 
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractLabeledText(text, labels = []) {
+  const source = normalizeTextBlock(text);
+  if (!source) return null;
+  for (const label of labels) {
+    const match = source.match(new RegExp(`(?:^|\\n)\\s*${escapeRegex(label)}\\s*[:=-]\\s*(.+)$`, 'im'));
+    const value = normalizeString(match?.[1]);
+    if (value) return value;
+  }
+  return null;
+}
+
+function parseInlineList(value) {
+  const text = normalizeTextBlock(value);
+  if (!text) return [];
+  return text
+    .split(/\s*,\s*|\s+\band\b\s+/i)
+    .map((item) => normalizeString(item?.replace(/^[-*•]\s*/, '')))
+    .filter(Boolean);
+}
+
+function normalizeStyleToken(value) {
+  const token = normalizeString(value)?.toLowerCase().replace(/[_\s]+/g, '-');
+  if (!token) return null;
+  if (['realistic', 'realistic-scene'].includes(token)) return 'realistic-scene';
+  if (['hybrid', 'hybrid-system', 'system'].includes(token)) return 'hybrid-system';
+  if (['infographic', 'info-graphic'].includes(token)) return 'infographic';
+  if (['editorial', 'magazine'].includes(token)) return 'editorial';
+  return token;
+}
+
+function parseStyleList(value) {
+  const explicit = parseInlineList(value).map((item) => normalizeStyleToken(item)).filter(Boolean);
+  if (explicit.length > 0) return [...new Set(explicit)];
+
+  const text = normalizeTextBlock(value)?.toLowerCase() || '';
+  const detected = [];
+  if (/\brealistic(?:[-\s]+scene)?\b/.test(text)) detected.push('realistic-scene');
+  if (/\bhybrid(?:[-\s]+system)?\b/.test(text)) detected.push('hybrid-system');
+  if (/\binfographic\b/.test(text)) detected.push('infographic');
+  if (/\beditorial\b/.test(text)) detected.push('editorial');
+  return [...new Set(detected)];
+}
+
+function parseDateToIso(value) {
+  const text = normalizeString(value);
+  if (!text) return null;
+  const parsed = Date.parse(text);
+  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
+}
+
+function extractPostCountFromText(text) {
+  const labeled = normalizeNumber(extractLabeledText(text, ['post count', 'posts', 'number of posts']));
+  if (Number.isFinite(labeled) && labeled > 0) return labeled;
+  const natural = text?.match(/\b(\d{1,3})\s*(?:-|\s)?post(?:s)?\b/i);
+  return normalizeNumber(natural?.[1]);
+}
+
+function extractCadenceDaysFromText(text) {
+  const labeled = normalizeNumber(extractLabeledText(text, ['cadence days', 'cadence', 'every']));
+  if (Number.isFinite(labeled) && labeled > 0) return labeled;
+
+  const lines = splitInstructionBlocks(text);
+  for (const line of lines) {
+    const everyDays = line.match(/\bevery\s+(\d{1,3})\s+days?\b/i);
+    if (everyDays) return normalizeNumber(everyDays[1]);
+    if (/^(?:post|publish|schedule)\s+daily\b/i.test(line) || /^(?:daily)\b/i.test(line)) return 1;
+    if (/^(?:post|publish|schedule)\s+weekly\b/i.test(line) || /^(?:weekly)\b/i.test(line)) return 7;
+  }
+
+  return null;
+}
+
+function extractStartDateFromText(text) {
+  const labeled = parseDateToIso(extractLabeledText(text, ['start date', 'start', 'starting']));
+  if (labeled) return labeled;
+  const natural = text?.match(/\bstart(?:ing)?(?:\s+on)?\s*[:=-]?\s*([^\n.;]+)/i);
+  return parseDateToIso(natural?.[1]);
+}
+
+function extractTimezoneFromText(text) {
+  return extractLabeledText(text, ['timezone', 'time zone']);
+}
+
+function extractStatusFromText(text) {
+  return extractLabeledText(text, ['status']);
+}
+
+function extractKnowledgeBaseRefFromText(text) {
+  return extractLabeledText(text, ['knowledge base', 'knowledgebase', 'kb']);
+}
+
+function extractBusinessNameFromText(text) {
+  const labeled = extractLabeledText(text, ['business name', 'business', 'company', 'brand']);
+  if (labeled) return labeled;
+  const natural = text?.match(/\b(?:calendar|plan|posts?)\s+for\s+["“]?([^"”\n.,;]+?)["”]?(?=(?:,|\.|\n|\s+(?:industry|audience|offers?|services|goals?|knowledge|start|every|styles?|remove|edit|add)\b|$))/i);
+  return normalizeString(natural?.[1]);
+}
+
+function extractIndustryFromText(text) {
+  const labeled = extractLabeledText(text, ['industry', 'category', 'niche']);
+  if (labeled) return labeled;
+  const natural = text?.match(/\bfor\s+["“]?[^"”\n.,;]+["”]?,\s+(?:an?|the)\s+([^,\n.]+?)(?=(?:,|\.|\n|\s+(?:audience|offers?|services|goals?|knowledge|start|every|styles?)\b|$))/i);
+  return normalizeString(natural?.[1]);
+}
+
+function extractScheduledTimeFromText(text) {
+  const labeled = extractLabeledText(text, ['time', 'post time', 'schedule time']);
+  const natural = labeled || text?.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\s*(utc)?\b/i)?.[0] || null;
+  const source = normalizeString(natural);
+  if (!source) return { scheduledHourUtc: null, scheduledMinuteUtc: null };
+  const match = source.match(/(\d{1,2})(?::(\d{2}))?/);
+  const hour = normalizeNumber(match?.[1]);
+  const minute = normalizeNumber(match?.[2] || 0);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return { scheduledHourUtc: null, scheduledMinuteUtc: null };
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return { scheduledHourUtc: null, scheduledMinuteUtc: null };
+  return { scheduledHourUtc: hour, scheduledMinuteUtc: minute };
+}
+
+function parseSocialCalendarRequestText(value) {
+  const text = normalizeTextBlock(value);
+  if (!text) {
+    return {
+      sourceText: null,
+      accountIds: [],
+      creativeStyles: [],
+      status: null,
+      business: {},
+      calendar: {}
+    };
+  }
+
+  const stylesText = extractLabeledText(text, ['styles', 'style', 'creative styles', 'creative style', 'visual styles', 'visual style']) || text;
+  const scheduledTime = extractScheduledTimeFromText(text);
+  const accountIds = parseInlineList(extractLabeledText(text, ['account ids', 'accounts', 'accountids']));
+
+  return {
+    sourceText: text,
+    accountIds,
+    creativeStyles: parseStyleList(stylesText),
+    status: extractStatusFromText(text),
+    business: {
+      name: extractBusinessNameFromText(text),
+      industry: extractIndustryFromText(text),
+      audience: parseInlineList(extractLabeledText(text, ['audience', 'target audience'])),
+      offers: parseInlineList(extractLabeledText(text, ['offers', 'services', 'solutions'])),
+      differentiators: parseInlineList(extractLabeledText(text, ['differentiators', 'strengths', 'advantages'])),
+      goals: parseInlineList(extractLabeledText(text, ['goals', 'goal', 'outcomes'])),
+      ctas: parseInlineList(extractLabeledText(text, ['ctas', 'calls to action', 'call to action'])),
+      hashtags: parseInlineList(extractLabeledText(text, ['hashtags', 'tags'])),
+      knowledgeBaseRef: extractKnowledgeBaseRefFromText(text)
+    },
+    calendar: {
+      postCount: extractPostCountFromText(text),
+      cadenceDays: extractCadenceDaysFromText(text),
+      startDate: extractStartDateFromText(text),
+      timezone: extractTimezoneFromText(text),
+      scheduledHourUtc: scheduledTime.scheduledHourUtc,
+      scheduledMinuteUtc: scheduledTime.scheduledMinuteUtc
+    }
+  };
+}
+
 function socialCalendarMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
@@ -362,18 +528,26 @@ function socialCalendarMutationRequestFrom(event) {
   const business = normalizePlainObject(request.business || request.businessProfile || request.profile) || {};
   const calendar = normalizePlainObject(request.calendar || request.plan) || {};
   const review = normalizePlainObject(request.review || request.adjustments || request.reviewAdjustments) || {};
+  const plainTextRequest = normalizeTextBlock(
+    request.requestText
+    || request.brief
+    || request.description
+    || request.text
+    || request.instructions
+    || request.prompt
+    || request.message
+  );
+  const parsedRequest = parseSocialCalendarRequestText(plainTextRequest);
   const reviewInstructionText = normalizeTextBlock(
     request.reviewText
     || request.reviewNotes
     || request.reviewPrompt
-    || request.instructions
-    || request.prompt
-    || request.message
     || review.instructions
     || review.text
     || review.notes
     || review.prompt
     || review.message
+    || parsedRequest.sourceText
   );
   const parsedReview = parseSocialCalendarReviewInstructions(reviewInstructionText);
   const structuredReplacePosts = Array.isArray(review.replacePosts)
@@ -389,41 +563,44 @@ function socialCalendarMutationRequestFrom(event) {
   return {
     action: request.action || null,
     locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
-    accountIds: normalizeStringArray(request.accountIds || calendar.accountIds),
-    status: normalizeString(request.status) || normalizeString(calendar.status) || 'draft',
-    creativeStyles: normalizeStringArray(request.creativeStyles || calendar.creativeStyles),
+    accountIds: normalizeStringArray(request.accountIds || calendar.accountIds || parsedRequest.accountIds),
+    status: normalizeString(request.status) || normalizeString(calendar.status) || normalizeString(parsedRequest.status) || 'draft',
+    creativeStyles: normalizeStringArray(request.creativeStyles || calendar.creativeStyles || parsedRequest.creativeStyles),
     continueOnError: normalizeBoolean(request.continueOnError),
     postDefaults: normalizePlainObject(request.postDefaults || calendar.postDefaults) || {},
     business: {
       name: normalizeString(request.businessName)
         || normalizeString(business.name)
         || normalizeString(business.businessName)
+        || normalizeString(parsedRequest.business.name)
         || null,
       industry: normalizeString(request.industry)
         || normalizeString(business.industry)
         || normalizeString(business.category)
+        || normalizeString(parsedRequest.business.industry)
         || null,
-      audience: normalizeStringArray(request.audience || business.audience || business.audiences),
-      offers: normalizeStringArray(request.offers || request.services || business.offers || business.services || business.solutions),
-      differentiators: normalizeStringArray(request.differentiators || business.differentiators || business.strengths || business.advantages),
-      goals: normalizeStringArray(request.goals || business.goals || business.outcomes),
-      ctas: normalizeStringArray(request.ctas || business.ctas || business.callsToAction),
-      hashtags: normalizeStringArray(request.hashtags || business.hashtags),
+      audience: normalizeStringArray(request.audience || business.audience || business.audiences || parsedRequest.business.audience),
+      offers: normalizeStringArray(request.offers || request.services || business.offers || business.services || business.solutions || parsedRequest.business.offers),
+      differentiators: normalizeStringArray(request.differentiators || business.differentiators || business.strengths || business.advantages || parsedRequest.business.differentiators),
+      goals: normalizeStringArray(request.goals || business.goals || business.outcomes || parsedRequest.business.goals),
+      ctas: normalizeStringArray(request.ctas || business.ctas || business.callsToAction || parsedRequest.business.ctas),
+      hashtags: normalizeStringArray(request.hashtags || business.hashtags || parsedRequest.business.hashtags),
       knowledgeBaseRef: normalizeString(request.knowledgeBaseRef)
         || normalizeString(request.knowledgeBaseId)
         || normalizeString(request.knowledgeBase)
         || normalizeString(business.knowledgeBaseRef)
         || normalizeString(business.knowledgeBaseId)
         || normalizeString(business.knowledgeBase)
+        || normalizeString(parsedRequest.business.knowledgeBaseRef)
         || null
     },
     calendar: {
-      postCount: normalizeNumber(calendar.postCount || request.postCount),
-      cadenceDays: normalizeNumber(calendar.cadenceDays || request.cadenceDays),
-      startDate: normalizeString(calendar.startDate) || normalizeString(request.startDate) || null,
-      timezone: normalizeString(calendar.timezone) || normalizeString(request.timezone) || null,
-      scheduledHourUtc: normalizeNumber(calendar.scheduledHourUtc || request.scheduledHourUtc),
-      scheduledMinuteUtc: normalizeNumber(calendar.scheduledMinuteUtc || request.scheduledMinuteUtc)
+      postCount: normalizeNumber(calendar.postCount || request.postCount || parsedRequest.calendar.postCount),
+      cadenceDays: normalizeNumber(calendar.cadenceDays || request.cadenceDays || parsedRequest.calendar.cadenceDays),
+      startDate: normalizeString(calendar.startDate) || normalizeString(request.startDate) || normalizeString(parsedRequest.calendar.startDate) || null,
+      timezone: normalizeString(calendar.timezone) || normalizeString(request.timezone) || normalizeString(parsedRequest.calendar.timezone) || null,
+      scheduledHourUtc: normalizeNumber(calendar.scheduledHourUtc || request.scheduledHourUtc || parsedRequest.calendar.scheduledHourUtc),
+      scheduledMinuteUtc: normalizeNumber(calendar.scheduledMinuteUtc || request.scheduledMinuteUtc || parsedRequest.calendar.scheduledMinuteUtc)
     },
     review: {
       removeDays: uniqueIntegers([
