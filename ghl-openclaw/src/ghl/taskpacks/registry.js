@@ -29,6 +29,14 @@ function normalizeNumber(value) {
   return null;
 }
 
+function normalizeIntegerArray(values) {
+  return Array.isArray(values)
+    ? values
+      .map((value) => normalizeNumber(value))
+      .filter((value) => Number.isInteger(value) && value > 0)
+    : [];
+}
+
 function normalizeTimestampLike(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim()) {
@@ -242,6 +250,7 @@ function socialCalendarMutationRequestFrom(event) {
 
   const business = normalizePlainObject(request.business || request.businessProfile || request.profile) || {};
   const calendar = normalizePlainObject(request.calendar || request.plan) || {};
+  const review = normalizePlainObject(request.review || request.adjustments || request.reviewAdjustments) || {};
 
   return {
     action: request.action || null,
@@ -249,6 +258,7 @@ function socialCalendarMutationRequestFrom(event) {
     accountIds: normalizeStringArray(request.accountIds || calendar.accountIds),
     status: normalizeString(request.status) || normalizeString(calendar.status) || 'draft',
     creativeStyles: normalizeStringArray(request.creativeStyles || calendar.creativeStyles),
+    continueOnError: normalizeBoolean(request.continueOnError),
     postDefaults: normalizePlainObject(request.postDefaults || calendar.postDefaults) || {},
     business: {
       name: normalizeString(request.businessName)
@@ -278,6 +288,18 @@ function socialCalendarMutationRequestFrom(event) {
       timezone: normalizeString(calendar.timezone) || normalizeString(request.timezone) || null,
       scheduledHourUtc: normalizeNumber(calendar.scheduledHourUtc || request.scheduledHourUtc),
       scheduledMinuteUtc: normalizeNumber(calendar.scheduledMinuteUtc || request.scheduledMinuteUtc)
+    },
+    review: {
+      removeDays: normalizeIntegerArray(review.removeDays || review.removeIndexes || review.removePosts),
+      replacePosts: Array.isArray(review.replacePosts)
+        ? review.replacePosts.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
+        : [],
+      appendPosts: Array.isArray(review.appendPosts)
+        ? review.appendPosts.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
+        : [],
+      postEdits: Array.isArray(review.postEdits)
+        ? review.postEdits.filter((item) => item && typeof item === 'object' && !Array.isArray(item)).map((item) => ({ ...item }))
+        : []
     }
   };
 }
@@ -288,6 +310,10 @@ function isBulkSocialPostAction(action) {
 
 function isGenerateSocialCalendarAction(action) {
   return ['generate_social_calendar', 'plan_social_calendar', 'create_social_calendar_plan'].includes(action);
+}
+
+function isRunSocialCalendarFlowAction(action) {
+  return ['run_social_calendar_flow', 'create_social_calendar_flow', 'plan_review_create_social_posts'].includes(action);
 }
 
 function facebookAdMutationRequestFrom(event) {
@@ -435,6 +461,44 @@ function socialCalendarGenerateResumeData(liveResult, context) {
           lastScheduleDate: Array.isArray(data?.posts) && data.posts.length > 0 ? data.posts[data.posts.length - 1].scheduleDate || null : null
         }
       : null,
+    raw: data
+  };
+}
+
+function socialCalendarFlowCreateResumeData(liveResult, context) {
+  const data = liveResult?.data || null;
+  const mutationRequest = socialCalendarMutationRequestFrom(context?.event);
+  const reviewed = socialCalendarFlowReviewedPosts(context, mutationRequest);
+  const items = Array.isArray(data?.results?.items)
+    ? data.results.items
+    : Array.isArray(data?.items)
+      ? data.items
+      : [];
+
+  return {
+    posts: items.map((item) => {
+      const rawPost = item?.data?.results?.post || item?.data?.post || null;
+      return {
+        index: item?.index ?? null,
+        ok: item?.ok !== false,
+        id: rawPost?._id || rawPost?.id || rawPost?.postId || item?.data?.id || item?.data?.postId || null,
+        status: rawPost?.status || item?.data?.status || null,
+        scheduleDate: rawPost?.scheduleDate || rawPost?.scheduledAt || item?.data?.scheduleDate || item?.data?.scheduledAt || null,
+        summary: rawPost?.summary || rawPost?.text || item?.data?.summary || item?.data?.text || null,
+        error: item?.error || null
+      };
+    }),
+    requested: {
+      locationId: mutationRequest?.locationId || null,
+      businessName: mutationRequest?.business?.name || null,
+      generatedCount: reviewed.generatedCount,
+      finalCount: reviewed.finalCount,
+      removedDays: reviewed.removedDays,
+      editedCount: reviewed.editedCount,
+      appendedCount: reviewed.appendedCount,
+      replaced: reviewed.replaced,
+      creativeStyles: mutationRequest?.creativeStyles || []
+    },
     raw: data
   };
 }
@@ -614,6 +678,188 @@ function socialPostBulkCreateBodies(mutationRequest) {
       ...(creativeStyles.length > 0 ? { creativeStyles } : {})
     };
   });
+}
+
+function socialCalendarPlanFromContext(context) {
+  return context?.runtime?.stepOutputs?.generate_social_calendar?.data || null;
+}
+
+function sanitizeSocialCalendarFlowPost(post, fallbackDay = null) {
+  const value = normalizePlainObject(post) || {};
+  const summary = normalizeString(value.summary) || normalizeString(value.text);
+  const scheduleDate = normalizeString(value.scheduleDate) || normalizeString(value.scheduledAt);
+  const status = normalizeString(value.status);
+  const businessName = normalizeString(value.businessName);
+  const creativeStyle = normalizeString(value.creativeStyle) || normalizeString(value.visualStyle) || normalizeString(value.style);
+  const creativeStyles = normalizeStringArray(value.creativeStyles);
+  const accountIds = normalizeStringArray(value.accountIds);
+  const day = normalizeNumber(value.day) || fallbackDay;
+
+  return {
+    ...(day ? { day } : {}),
+    ...(businessName ? { businessName } : {}),
+    ...(summary ? { summary } : {}),
+    ...(scheduleDate ? { scheduleDate } : {}),
+    ...(status ? { status } : {}),
+    ...(accountIds.length > 0 ? { accountIds } : {}),
+    ...(creativeStyle ? { creativeStyle } : {}),
+    ...(creativeStyles.length > 0 ? { creativeStyles } : {})
+  };
+}
+
+function socialCalendarFlowBasePosts(plan, mutationRequest) {
+  const planPosts = Array.isArray(plan?.posts) ? plan.posts : [];
+  const mutationPosts = Array.isArray(plan?.mutationRequest?.posts) ? plan.mutationRequest.posts : [];
+  const max = Math.max(planPosts.length, mutationPosts.length);
+
+  return Array.from({ length: max }, (_, index) => {
+    const planPost = normalizePlainObject(planPosts[index]) || {};
+    const mutationPost = normalizePlainObject(mutationPosts[index]) || {};
+    const day = normalizeNumber(planPost.day) || index + 1;
+    return sanitizeSocialCalendarFlowPost({
+      day,
+      businessName: mutationPost.businessName || planPost.businessName || mutationRequest?.business?.name || null,
+      summary: mutationPost.summary || planPost.summary || null,
+      scheduleDate: mutationPost.scheduleDate || planPost.scheduleDate || null,
+      status: mutationPost.status || plan?.calendar?.status || mutationRequest?.status || 'draft',
+      accountIds: mutationPost.accountIds || plan?.calendar?.accountIds || mutationRequest?.accountIds || [],
+      creativeStyle: mutationPost.creativeStyle || planPost.creativeStyle || null,
+      creativeStyles: mutationPost.creativeStyles || planPost.creativeStyles || mutationRequest?.creativeStyles || []
+    }, day);
+  }).filter((item) => item.summary || item.scheduleDate);
+}
+
+function resolveSocialCalendarFlowPostTargetIndex(posts, edit) {
+  const day = normalizeNumber(edit?.day) || normalizeNumber(edit?.index);
+  if (day) {
+    const byDay = posts.findIndex((post) => Number(post?.day) === Number(day));
+    if (byDay >= 0) return byDay;
+    const byIndex = day - 1;
+    if (byIndex >= 0 && byIndex < posts.length) return byIndex;
+  }
+
+  const scheduleDate = normalizeString(edit?.scheduleDate);
+  if (scheduleDate) {
+    const byScheduleDate = posts.findIndex((post) => normalizeString(post?.scheduleDate) === scheduleDate);
+    if (byScheduleDate >= 0) return byScheduleDate;
+  }
+
+  const summaryContains = normalizeString(edit?.summaryContains);
+  if (summaryContains) {
+    const needle = summaryContains.toLowerCase();
+    const bySummary = posts.findIndex((post) => normalizeString(post?.summary)?.toLowerCase().includes(needle));
+    if (bySummary >= 0) return bySummary;
+  }
+
+  return -1;
+}
+
+function socialCalendarFlowReviewedPosts(context, mutationRequest) {
+  const plan = socialCalendarPlanFromContext(context);
+  if (!plan?.ready || !plan?.mutationRequest) {
+    return {
+      ready: false,
+      reason: 'calendar_not_ready',
+      posts: [],
+      generatedCount: Array.isArray(plan?.posts) ? plan.posts.length : 0,
+      finalCount: 0,
+      removedDays: [],
+      editedCount: 0,
+      appendedCount: 0,
+      replaced: false,
+      firstScheduleDate: null,
+      lastScheduleDate: null
+    };
+  }
+
+  const review = mutationRequest?.review || {};
+  const reviewReplacePosts = Array.isArray(review.replacePosts) ? review.replacePosts : [];
+  const reviewAppendPosts = Array.isArray(review.appendPosts) ? review.appendPosts : [];
+  const reviewPostEdits = Array.isArray(review.postEdits) ? review.postEdits : [];
+  const reviewRemoveDays = Array.isArray(review.removeDays) ? review.removeDays : [];
+
+  let posts = reviewReplacePosts.length > 0
+    ? reviewReplacePosts.map((post, index) => sanitizeSocialCalendarFlowPost(post, index + 1)).filter((item) => item.summary || item.scheduleDate)
+    : socialCalendarFlowBasePosts(plan, mutationRequest);
+
+  if (reviewRemoveDays.length > 0) {
+    const removeSet = new Set(reviewRemoveDays.map((value) => Number(value)));
+    posts = posts.filter((post) => !removeSet.has(Number(post?.day)));
+  }
+
+  let editedCount = 0;
+  for (const edit of reviewPostEdits) {
+    const targetIndex = resolveSocialCalendarFlowPostTargetIndex(posts, edit);
+    if (targetIndex < 0) continue;
+    const next = sanitizeSocialCalendarFlowPost({
+      ...posts[targetIndex],
+      ...edit,
+      day: posts[targetIndex].day
+    }, posts[targetIndex].day);
+    posts[targetIndex] = next;
+    editedCount += 1;
+  }
+
+  const appendedPosts = reviewAppendPosts
+    .map((post, index) => sanitizeSocialCalendarFlowPost(post, posts.length + index + 1))
+    .filter((item) => item.summary || item.scheduleDate);
+  posts = [...posts, ...appendedPosts];
+
+  return {
+    ready: true,
+    posts,
+    generatedCount: Array.isArray(plan?.posts) ? plan.posts.length : 0,
+    finalCount: posts.length,
+    removedDays: reviewRemoveDays,
+    editedCount,
+    appendedCount: appendedPosts.length,
+    replaced: reviewReplacePosts.length > 0,
+    firstScheduleDate: posts[0]?.scheduleDate || null,
+    lastScheduleDate: posts.length > 0 ? posts[posts.length - 1]?.scheduleDate || null : null
+  };
+}
+
+function socialCalendarFlowCreateBodies(context, mutationRequest) {
+  const reviewed = socialCalendarFlowReviewedPosts(context, mutationRequest);
+  if (!reviewed.ready) {
+    throw new Error('Social calendar flow cannot create posts until a ready calendar plan exists.');
+  }
+
+  return socialPostBulkCreateBodies({
+    locationId: mutationRequest?.locationId || null,
+    accountIds: mutationRequest?.accountIds || [],
+    status: mutationRequest?.status || 'draft',
+    businessName: mutationRequest?.business?.name || null,
+    creativeStyles: mutationRequest?.creativeStyles || [],
+    postDefaults: mutationRequest?.postDefaults || {},
+    posts: reviewed.posts.map((post) => {
+      const body = {
+        ...post,
+        accountIds: Array.isArray(post.accountIds) && post.accountIds.length > 0 ? post.accountIds : mutationRequest?.accountIds || []
+      };
+      delete body.day;
+      return body;
+    })
+  });
+}
+
+function socialCalendarFlowReviewDetails(context, mutationRequest) {
+  const plan = socialCalendarPlanFromContext(context);
+  const reviewed = socialCalendarFlowReviewedPosts(context, mutationRequest);
+  return {
+    action: 'review_social_calendar_flow',
+    locationId: mutationRequest?.locationId || null,
+    businessName: mutationRequest?.business?.name || plan?.business?.name || null,
+    generatedCount: reviewed.generatedCount,
+    finalCount: reviewed.finalCount,
+    removedDays: reviewed.removedDays,
+    editedCount: reviewed.editedCount,
+    appendedCount: reviewed.appendedCount,
+    replaced: reviewed.replaced,
+    firstScheduleDate: reviewed.firstScheduleDate,
+    lastScheduleDate: reviewed.lastScheduleDate,
+    knowledgeBaseMode: plan?.knowledgeBaseMode || null
+  };
 }
 
 function collectFacebookEntityRecords(data) {
@@ -3447,10 +3693,14 @@ function taskPackHandlers() {
       buildExecutionPlan(context) {
         const mutationRequest = socialPostMutationRequestFrom(context.event);
         const socialCalendarRequest = socialCalendarMutationRequestFrom(context.event);
-        const locationId = resolvedSocialPostLocationId(context, mutationRequest);
+        const locationId = resolvedSocialPostLocationId(context, mutationRequest)
+          || socialCalendarRequest?.locationId
+          || context.event.locationId
+          || null;
         const explicitCreateSocialPost = mutationRequest?.action === 'create_social_post';
         const explicitCreateSocialPostsBulk = isBulkSocialPostAction(mutationRequest?.action);
         const explicitGenerateSocialCalendar = isGenerateSocialCalendarAction(socialCalendarRequest?.action);
+        const explicitRunSocialCalendarFlow = isRunSocialCalendarFlowAction(socialCalendarRequest?.action);
         return [
           {
             name: 'refresh_social_accounts',
@@ -3490,7 +3740,15 @@ function taskPackHandlers() {
               knowledgeBaseRef: socialCalendarRequest?.business?.knowledgeBaseRef || null,
               creativeStyles: socialCalendarRequest?.creativeStyles || []
             },
-            skipIf: () => !explicitGenerateSocialCalendar
+            skipIf: () => !(explicitGenerateSocialCalendar || explicitRunSocialCalendarFlow)
+          },
+          {
+            name: 'review_social_calendar_flow',
+            kind: 'intent',
+            safe: true,
+            mutation: false,
+            details: (runtimeContext) => socialCalendarFlowReviewDetails(runtimeContext, socialCalendarRequest),
+            skipIf: () => !explicitRunSocialCalendarFlow
           },
           {
             name: 'create_social_post',
@@ -3562,6 +3820,43 @@ function taskPackHandlers() {
             skipIf: () => !explicitCreateSocialPostsBulk
           },
           {
+            name: 'create_social_calendar_posts',
+            kind: 'adapter_call',
+            adapter: 'SocialPlannerAdapter',
+            method: 'createPostsWithCreative',
+            httpMethod: 'POST',
+            pathHint: '/social-media-posting/:locationId/posts (calendar flow)',
+            args: (runtimeContext) => {
+              if (!locationId) {
+                throw new Error('run_social_calendar_flow requires a locationId.');
+              }
+              return [
+                context.credentialRef || defaultLocationCredential(context),
+                locationId,
+                socialCalendarFlowCreateBodies(runtimeContext, socialCalendarRequest),
+                {
+                  generateCreative: true,
+                  businessName: normalizeString(socialCalendarRequest?.business?.name) || null,
+                  creativeStyles: socialCalendarRequest?.creativeStyles || [],
+                  continueOnError: socialCalendarRequest?.continueOnError === true
+                }
+              ];
+            },
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            resumeData: socialCalendarFlowCreateResumeData,
+            details: (runtimeContext) => ({
+              ...socialCalendarFlowReviewDetails(runtimeContext, socialCalendarRequest),
+              action: 'run_social_calendar_flow',
+              locationId,
+              businessName: socialCalendarRequest?.business?.name || null,
+              continueOnError: socialCalendarRequest?.continueOnError === true
+            }),
+            skipIf: (runtimeContext) => !explicitRunSocialCalendarFlow || !socialCalendarFlowReviewedPosts(runtimeContext, socialCalendarRequest).ready
+          },
+          {
             name: 'generate_social_post_preview',
             kind: 'adapter_call',
             adapter: 'PreviewArtifactsAdapter',
@@ -3587,7 +3882,7 @@ function taskPackHandlers() {
               accountCount: socialAccountsFromContext(runtimeContext).length,
               targetAccountIds: mutationRequest?.accountIds || []
             }),
-            skipIf: () => !explicitCreateSocialPost || explicitCreateSocialPostsBulk
+            skipIf: () => !explicitCreateSocialPost || explicitCreateSocialPostsBulk || explicitRunSocialCalendarFlow
           }
         ];
       }
