@@ -19,6 +19,14 @@ function uniqueStrings(values = []) {
   return result;
 }
 
+const DEFAULT_SOCIAL_CREATIVE_VARIANT_STYLES = ['hybrid-system', 'editorial', 'realistic-scene', 'infographic'];
+
+function normalizeVariantCount(value, max = DEFAULT_SOCIAL_CREATIVE_VARIANT_STYLES.length) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 1) return null;
+  return Math.min(max, Math.max(1, Math.round(numeric)));
+}
+
 function normalizeSocialCreativeRequest(body = {}, options = {}) {
   const payload = JSON.parse(JSON.stringify(body || {}));
   const creativeStyle = payload.creativeStyle || payload.visualStyle || payload.style || payload?.creative?.style || null;
@@ -31,6 +39,14 @@ function normalizeSocialCreativeRequest(body = {}, options = {}) {
   const brandVoice = body?.brandVoice || body?.voice || body?.brand?.voice || options.brandVoice || null;
   const websiteUrl = body?.websiteUrl || body?.website || body?.brand?.website || options.websiteUrl || null;
   const logoUrl = body?.logoUrl || body?.logo || body?.brand?.logo || options.logoUrl || null;
+  const variantCount = normalizeVariantCount(
+    body?.variantCount
+    || body?.variants
+    || body?.creative?.variantCount
+    || body?.creative?.variants
+    || options.variantCount
+    || options.variants
+  );
 
   delete payload.businessName;
   delete payload.brandVoice;
@@ -39,6 +55,8 @@ function normalizeSocialCreativeRequest(body = {}, options = {}) {
   delete payload.website;
   delete payload.logoUrl;
   delete payload.logo;
+  delete payload.variantCount;
+  delete payload.variants;
   delete payload.creativeStyle;
   delete payload.creativeStyles;
   delete payload.visualStyle;
@@ -50,6 +68,8 @@ function normalizeSocialCreativeRequest(body = {}, options = {}) {
     if (Object.keys(payload.brand).length === 0) delete payload.brand;
   }
   if (payload.creative && typeof payload.creative === 'object' && !Array.isArray(payload.creative)) {
+    delete payload.creative.variantCount;
+    delete payload.creative.variants;
     delete payload.creative.style;
     delete payload.creative.styles;
     if (Object.keys(payload.creative).length === 0) delete payload.creative;
@@ -62,7 +82,8 @@ function normalizeSocialCreativeRequest(body = {}, options = {}) {
     businessName,
     brandVoice,
     websiteUrl,
-    logoUrl
+    logoUrl,
+    variantCount
   };
 }
 
@@ -645,13 +666,17 @@ export class SocialPlannerAdapter {
   }
 
   async createPostWithCreative(credentialRef, locationId, body, options = {}) {
-    const { payload, creativeStyle, creativeStyles, businessName, brandVoice, websiteUrl, logoUrl } = normalizeSocialCreativeRequest(body, options);
+    const { payload, creativeStyle, creativeStyles, businessName, brandVoice, websiteUrl, logoUrl, variantCount } = normalizeSocialCreativeRequest(body, options);
     const existingMedia = Array.isArray(payload.media) ? payload.media.filter(Boolean) : [];
     let creative = null;
 
     if (existingMedia.length === 0 && options.generateCreative !== false) {
       const requestedStyles = uniqueStrings([creativeStyle, ...creativeStyles]);
-      const variantStyles = requestedStyles.length > 0 ? requestedStyles : [creativeStyle];
+      const effectiveVariantCount = variantCount || (requestedStyles.length > 0 ? requestedStyles.length : 1);
+      const variantStyles = uniqueStrings([
+        ...requestedStyles,
+        ...DEFAULT_SOCIAL_CREATIVE_VARIANT_STYLES
+      ]).slice(0, effectiveVariantCount);
       const variants = [];
 
       for (const style of variantStyles) {
@@ -694,6 +719,8 @@ export class SocialPlannerAdapter {
         generated,
         variants,
         requestedStyles,
+        variantStyles,
+        requestedVariantCount: effectiveVariantCount,
         uploaded: uploaded.data,
         media: payload.media
       };
@@ -728,6 +755,7 @@ export class SocialPlannerAdapter {
           brandVoice: post?.brandVoice || post?.voice || options.brandVoice || null,
           websiteUrl: post?.websiteUrl || post?.website || options.websiteUrl || null,
           logoUrl: post?.logoUrl || post?.logo || options.logoUrl || null,
+          variantCount: post?.variantCount || post?.variants || options.variantCount || null,
           creativeStyles: Array.isArray(post?.creativeStyles) ? post.creativeStyles : options.creativeStyles
         });
         results.push({

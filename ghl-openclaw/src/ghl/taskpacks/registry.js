@@ -260,6 +260,17 @@ function socialPostMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
 
+  const plainTextRequest = normalizeTextBlock(
+    request.requestText
+    || request.brief
+    || request.description
+    || request.text
+    || request.instructions
+    || request.prompt
+    || request.message
+  );
+  const parsedRequest = parseSocialPostRequestText(plainTextRequest);
+
   const rawPostDefaults = request.postDefaults && typeof request.postDefaults === 'object' && !Array.isArray(request.postDefaults)
     ? { ...request.postDefaults }
     : {};
@@ -271,20 +282,24 @@ function socialPostMutationRequestFrom(event) {
     : [];
   const accountIds = normalizeStringArray(
     request.accountIds
+    || parsedRequest.accountIds
     || rawPost.accountIds
     || rawPostDefaults.accountIds
     || [request.accountId, rawPost.accountId].filter(Boolean)
   );
-  const status = normalizeString(request.status) || normalizeString(rawPost.status);
+  const status = normalizeString(request.status) || normalizeString(parsedRequest.status) || normalizeString(rawPost.status) || 'draft';
   const scheduleDate = normalizeString(request.scheduleDate)
     || normalizeString(request.scheduledAt)
+    || normalizeString(parsedRequest.scheduleDate)
     || normalizeString(rawPost.scheduleDate)
     || normalizeString(rawPost.scheduledAt);
   const summary = normalizeString(request.summary)
-    || normalizeString(request.text)
+    || normalizeString(parsedRequest.summary)
+    || (request.action ? normalizeString(request.text) : null)
     || normalizeString(rawPost.summary)
     || normalizeString(rawPost.text);
   const requestedBusinessName = normalizeString(request.businessName)
+    || normalizeString(parsedRequest.businessName)
     || normalizeString(rawPost.businessName)
     || normalizeString(rawPostDefaults.businessName)
     || null;
@@ -305,9 +320,24 @@ function socialPostMutationRequestFrom(event) {
     || normalizeString(rawPostDefaults.style);
   const creativeStyles = normalizeStringArray(
     request.creativeStyles
+    || parsedRequest.creativeStyles
     || request?.creative?.styles
     || rawPost.creativeStyles
     || rawPostDefaults.creativeStyles
+  );
+  const variantCount = normalizeVariantCount(
+    request.variantCount
+    || request.variants
+    || request.versionCount
+    || request.versions
+    || request?.creative?.variantCount
+    || request?.creative?.variants
+    || parsedRequest.variantCount
+    || rawPost.variantCount
+    || rawPost.variants
+    || rawPostDefaults.variantCount
+    || rawPostDefaults.variants,
+    4
   );
   const brandVoice = normalizeString(request.brandVoice)
     || normalizeString(request.voice)
@@ -341,12 +371,14 @@ function socialPostMutationRequestFrom(event) {
   if (businessName && !rawPost.businessName) rawPost.businessName = businessName;
   if (creativeStyle && !rawPost.creativeStyle && !rawPost.visualStyle && !rawPost.style) rawPost.creativeStyle = creativeStyle;
   if (creativeStyles.length > 0 && !Array.isArray(rawPost.creativeStyles)) rawPost.creativeStyles = creativeStyles;
+  if (variantCount && !rawPost.variantCount && !rawPost.variants) rawPost.variantCount = variantCount;
   if (brandVoice && !rawPost.brandVoice && !rawPost.voice) rawPost.brandVoice = brandVoice;
   if (websiteUrl && !rawPost.websiteUrl && !rawPost.website) rawPost.websiteUrl = websiteUrl;
   if (logoUrl && !rawPost.logoUrl && !rawPost.logo) rawPost.logoUrl = logoUrl;
 
   return {
-    action: request.action || null,
+    action: request.action
+      || (!request.action && plainTextRequest && looksLikeSocialPostRequestText(plainTextRequest) ? 'create_social_post' : null),
     locationId: request.locationId || preferredEventLocationId || normalizeString(activeBusinessDefaults?.locationId) || eventLocationId || null,
     accountIds,
     status,
@@ -355,6 +387,7 @@ function socialPostMutationRequestFrom(event) {
     businessName,
     creativeStyle,
     creativeStyles,
+    variantCount,
     brandVoice,
     websiteUrl,
     logoUrl,
@@ -526,6 +559,12 @@ function parseStyleList(value) {
   return detectStyleListFromText(value);
 }
 
+function normalizeVariantCount(value, max = 4) {
+  const normalized = normalizeNumber(value);
+  if (!Number.isFinite(normalized) || normalized < 1) return null;
+  return Math.min(max, Math.max(1, Math.round(normalized)));
+}
+
 function parseDateToIso(value) {
   const text = normalizeString(value);
   if (!text) return null;
@@ -635,6 +674,74 @@ function extractStatusFromText(text) {
   return extractLabeledText(text, ['status']);
 }
 
+function extractVariantCountFromText(text) {
+  const labeled = normalizeVariantCount(extractLabeledText(text, ['variant count', 'variants', 'version count', 'versions', 'options', 'option count']));
+  if (labeled) return labeled;
+
+  const natural = text?.match(/\b(?:make|create|write|draft|generate|show|give)\s+(\d+)\s+(?:variants?|versions?|options?)\b/i)
+    || text?.match(/\b(\d+)\s+(?:variants?|versions?|options?)\b/i);
+  return normalizeVariantCount(natural?.[1]);
+}
+
+function extractSocialPostSummaryFromText(text) {
+  const cleanCandidate = (value) => normalizeString(value)
+    ?.replace(/^(?:about|on)\s+/i, '')
+    .replace(/\s*(?:[.?!]\s*)?(?:with\s+)?(?:styles?|style|variants?|versions?|options?|status|schedule(?:d)?(?:\s+at)?|account ids|accounts|business|brand|website|logo)\b[\s\S]*$/i, '')
+    .trim() || null;
+
+  const labeled = extractLabeledText(text, ['summary', 'caption', 'post copy', 'copy', 'topic', 'idea']);
+  if (labeled) return cleanCandidate(labeled);
+
+  const quoted = text?.match(/\b(?:summary|caption|post copy|copy|topic|idea)\s*[:=-]\s*["“]([^"”]+)["”]/i);
+  if (normalizeString(quoted?.[1])) return cleanCandidate(quoted[1]);
+
+  const topical = text?.match(/\b(?:about|on)\s+([^\n.]+?)(?=(?:\s+(?:with|styles?|style|variants?|versions?|options?|status|schedule|scheduled|account ids|accounts|business|brand|website|logo)\b)|$)/i);
+  if (normalizeString(topical?.[1])) return cleanCandidate(topical[1]);
+
+  const direct = text?.match(/\b(?:create|make|write|draft|generate)\b(?:\s+\d+\s+(?:variants?|versions?|options?)\s+of)?\s+(?:a\s+)?(?:social\s+post|post|caption)\b\s*[:=-]?\s*(.+)$/i);
+  if (normalizeString(direct?.[1])) return cleanCandidate(direct[1]);
+
+  return null;
+}
+
+function parseSocialPostRequestText(value) {
+  const text = normalizeTextBlock(value);
+  if (!text) {
+    return {
+      sourceText: null,
+      summary: null,
+      businessName: null,
+      accountIds: [],
+      creativeStyles: [],
+      status: null,
+      scheduleDate: null,
+      variantCount: null
+    };
+  }
+
+  const stylesText = extractLabeledText(text, ['styles', 'style', 'creative styles', 'creative style', 'visual styles', 'visual style']);
+  return {
+    sourceText: text,
+    summary: extractSocialPostSummaryFromText(text),
+    businessName: extractLabeledText(text, ['business name', 'business', 'company', 'brand']),
+    accountIds: parseInlineList(extractLabeledText(text, ['account ids', 'accounts', 'accountids'])),
+    creativeStyles: stylesText ? parseStyleList(stylesText) : detectStyleListFromText(text),
+    status: extractStatusFromText(text),
+    scheduleDate: parseDateToIso(extractLabeledText(text, ['schedule date', 'scheduled at', 'schedule', 'date'])),
+    variantCount: extractVariantCountFromText(text)
+  };
+}
+
+function looksLikeSocialPostRequestText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return false;
+  if (looksLikeSocialCalendarRequestText(source)) return false;
+  if (!extractSocialPostSummaryFromText(text) && !extractLabeledText(text, ['summary', 'caption', 'post copy', 'copy', 'topic', 'idea'])) return false;
+  if (/\b(?:make|create|write|draft|generate)\b/.test(source) && /\b(?:social\s+post|facebook\s+post|instagram\s+post|linkedin\s+post|caption)\b/.test(source)) return true;
+  if (/\b(?:variants?|versions?|options?)\b/.test(source) && /\b(?:social\s+post|post|caption)\b/.test(source)) return true;
+  return false;
+}
+
 function extractKnowledgeBaseRefFromText(text) {
   return extractLabeledText(text, ['knowledge base', 'knowledgebase', 'kb']);
 }
@@ -688,6 +795,7 @@ function parseSocialCalendarRequestText(value) {
     sourceText: text,
     accountIds,
     creativeStyles: stylesText ? parseStyleList(stylesText) : detectStyleListFromText(text),
+    variantCount: extractVariantCountFromText(text),
     status: extractStatusFromText(text),
     business: {
       name: extractBusinessNameFromText(text),
@@ -767,6 +875,7 @@ function socialCalendarMutationRequestFrom(event) {
     accountIds: normalizeStringArray(request.accountIds || calendar.accountIds || parsedRequest.accountIds),
     status: normalizeString(request.status) || normalizeString(calendar.status) || normalizeString(parsedRequest.status) || 'draft',
     creativeStyles: normalizeStringArray(request.creativeStyles || calendar.creativeStyles || parsedRequest.creativeStyles),
+    variantCount: normalizeVariantCount(request.variantCount || request.variants || calendar.variantCount || calendar.variants || parsedRequest.variantCount, 4),
     continueOnError: normalizeBoolean(request.continueOnError),
     postDefaults: normalizePlainObject(request.postDefaults || calendar.postDefaults) || {},
     business: {
@@ -986,6 +1095,8 @@ function socialPostCreateResumeData(liveResult, context) {
   const data = liveResult?.data || null;
   const rawPost = data?.results?.post || data?.post || null;
   const mutationRequest = socialPostMutationRequestFrom(context?.event);
+  const creative = normalizePlainObject(data?.openClaw?.creative) || {};
+  const variants = Array.isArray(creative.variants) ? creative.variants : [];
   return {
     post: (rawPost && typeof rawPost === 'object') || (data && typeof data === 'object')
       ? {
@@ -1001,7 +1112,14 @@ function socialPostCreateResumeData(liveResult, context) {
       accountIds: mutationRequest?.accountIds || [],
       status: mutationRequest?.status || null,
       scheduleDate: mutationRequest?.scheduleDate || null,
-      summary: mutationRequest?.summary || null
+      summary: mutationRequest?.summary || null,
+      creativeStyles: mutationRequest?.creativeStyles || [],
+      variantCount: mutationRequest?.variantCount || null
+    },
+    creative: {
+      uploadedMedia: Array.isArray(creative.media) ? creative.media : [],
+      variantCount: variants.length,
+      variantStyles: variants.map((variant) => variant?.model?.styleId || null).filter(Boolean)
     },
     raw: data
   };
@@ -1059,7 +1177,8 @@ function socialCalendarFlowCreateResumeData(liveResult, context) {
       editedCount: reviewed.editedCount,
       appendedCount: reviewed.appendedCount,
       replaced: reviewed.replaced,
-      creativeStyles: mutationRequest?.creativeStyles || []
+      creativeStyles: mutationRequest?.creativeStyles || [],
+      variantCount: mutationRequest?.variantCount || null
     },
     raw: data
   };
@@ -1077,6 +1196,8 @@ function socialPostBulkCreateResumeData(liveResult, context) {
   return {
     posts: items.map((item) => {
       const rawPost = item?.data?.results?.post || item?.data?.post || null;
+      const creative = normalizePlainObject(item?.data?.openClaw?.creative) || {};
+      const variants = Array.isArray(creative.variants) ? creative.variants : [];
       return {
         index: item?.index ?? null,
         ok: item?.ok !== false,
@@ -1084,6 +1205,8 @@ function socialPostBulkCreateResumeData(liveResult, context) {
         status: rawPost?.status || item?.data?.status || null,
         scheduleDate: rawPost?.scheduleDate || rawPost?.scheduledAt || item?.data?.scheduleDate || item?.data?.scheduledAt || null,
         summary: rawPost?.summary || rawPost?.text || item?.data?.summary || item?.data?.text || null,
+        creativeVariantCount: variants.length,
+        creativeVariantStyles: variants.map((variant) => variant?.model?.styleId || null).filter(Boolean),
         error: item?.error || null
       };
     }),
@@ -1093,7 +1216,8 @@ function socialPostBulkCreateResumeData(liveResult, context) {
       accountIds: mutationRequest?.accountIds || [],
       status: mutationRequest?.status || null,
       businessName: mutationRequest?.businessName || null,
-      creativeStyles: mutationRequest?.creativeStyles || []
+      creativeStyles: mutationRequest?.creativeStyles || [],
+      variantCount: mutationRequest?.variantCount || null
     },
     raw: data
   };
@@ -1235,6 +1359,14 @@ function socialPostBulkCreateBodies(mutationRequest) {
       || normalizeString(defaults?.logoUrl)
       || normalizeString(defaults?.logo)
       || normalizeString(mutationRequest?.logoUrl);
+    const variantCount = normalizeVariantCount(
+      post?.variantCount
+      || post?.variants
+      || defaults?.variantCount
+      || defaults?.variants
+      || mutationRequest?.variantCount,
+      4
+    );
     const creativeStyle = normalizeString(post?.creativeStyle)
       || normalizeString(post?.visualStyle)
       || normalizeString(post?.style)
@@ -1254,6 +1386,7 @@ function socialPostBulkCreateBodies(mutationRequest) {
       ...(brandVoice ? { brandVoice } : {}),
       ...(websiteUrl ? { websiteUrl } : {}),
       ...(logoUrl ? { logoUrl } : {}),
+      ...(variantCount ? { variantCount } : {}),
       ...(creativeStyle ? { creativeStyle } : {}),
       ...(creativeStyles.length > 0 ? { creativeStyles } : {})
     };
@@ -1273,6 +1406,7 @@ function sanitizeSocialCalendarFlowPost(post, fallbackDay = null) {
   const brandVoice = normalizeString(value.brandVoice) || normalizeString(value.voice);
   const websiteUrl = normalizeString(value.websiteUrl) || normalizeString(value.website);
   const logoUrl = normalizeString(value.logoUrl) || normalizeString(value.logo);
+  const variantCount = normalizeVariantCount(value.variantCount || value.variants, 4);
   const creativeStyle = normalizeString(value.creativeStyle) || normalizeString(value.visualStyle) || normalizeString(value.style);
   const creativeStyles = normalizeStringArray(value.creativeStyles);
   const accountIds = normalizeStringArray(value.accountIds);
@@ -1287,6 +1421,7 @@ function sanitizeSocialCalendarFlowPost(post, fallbackDay = null) {
     ...(brandVoice ? { brandVoice } : {}),
     ...(websiteUrl ? { websiteUrl } : {}),
     ...(logoUrl ? { logoUrl } : {}),
+    ...(variantCount ? { variantCount } : {}),
     ...(accountIds.length > 0 ? { accountIds } : {}),
     ...(creativeStyle ? { creativeStyle } : {}),
     ...(creativeStyles.length > 0 ? { creativeStyles } : {})
@@ -1311,6 +1446,7 @@ function socialCalendarFlowBasePosts(plan, mutationRequest) {
       brandVoice: mutationPost.brandVoice || planPost.brandVoice || mutationRequest?.business?.brandVoice || null,
       websiteUrl: mutationPost.websiteUrl || planPost.websiteUrl || mutationRequest?.business?.websiteUrl || null,
       logoUrl: mutationPost.logoUrl || planPost.logoUrl || mutationRequest?.business?.logoUrl || null,
+      variantCount: mutationPost.variantCount || planPost.variantCount || mutationRequest?.variantCount || null,
       accountIds: mutationPost.accountIds || plan?.calendar?.accountIds || mutationRequest?.accountIds || [],
       creativeStyle: mutationPost.creativeStyle || planPost.creativeStyle || null,
       creativeStyles: mutationPost.creativeStyles || planPost.creativeStyles || mutationRequest?.creativeStyles || []
@@ -1469,6 +1605,7 @@ function socialCalendarFlowCreateBodies(context, mutationRequest) {
     brandVoice: mutationRequest?.business?.brandVoice || null,
     websiteUrl: mutationRequest?.business?.websiteUrl || null,
     logoUrl: mutationRequest?.business?.logoUrl || null,
+    variantCount: mutationRequest?.variantCount || null,
     creativeStyles: mutationRequest?.creativeStyles || [],
     postDefaults: mutationRequest?.postDefaults || {},
     posts: reviewed.posts.map((post) => {
@@ -4418,7 +4555,8 @@ function taskPackHandlers() {
                 logoUrl: normalizeString(mutationRequest?.post?.logoUrl)
                   || normalizeString(mutationRequest?.post?.logo)
                   || normalizeString(mutationRequest?.logoUrl)
-                  || null
+                  || null,
+                variantCount: mutationRequest?.variantCount || null
               }
             ],
             safe: false,
@@ -4433,7 +4571,9 @@ function taskPackHandlers() {
               status: mutationRequest?.status || null,
               scheduleDate: mutationRequest?.scheduleDate || null,
               summaryPreview: mutationRequest?.summary ? mutationRequest.summary.slice(0, 160) : null,
-              autoGenerateCreative: !Array.isArray(mutationRequest?.post?.media) || mutationRequest.post.media.length === 0
+              autoGenerateCreative: !Array.isArray(mutationRequest?.post?.media) || mutationRequest.post.media.length === 0,
+              creativeStyles: mutationRequest?.creativeStyles || [],
+              variantCount: mutationRequest?.variantCount || null
             },
             skipIf: () => !explicitCreateSocialPost
           },
@@ -4454,6 +4594,7 @@ function taskPackHandlers() {
                 brandVoice: normalizeString(mutationRequest?.brandVoice) || null,
                 websiteUrl: normalizeString(mutationRequest?.websiteUrl) || null,
                 logoUrl: normalizeString(mutationRequest?.logoUrl) || null,
+                variantCount: mutationRequest?.variantCount || null,
                 creativeStyles: mutationRequest?.creativeStyles || [],
                 continueOnError: mutationRequest?.continueOnError === true
               }
@@ -4471,6 +4612,7 @@ function taskPackHandlers() {
               status: mutationRequest?.status || null,
               businessName: mutationRequest?.businessName || null,
               creativeStyles: mutationRequest?.creativeStyles || [],
+              variantCount: mutationRequest?.variantCount || null,
               continueOnError: mutationRequest?.continueOnError === true
             },
             skipIf: () => !explicitCreateSocialPostsBulk
@@ -4496,6 +4638,7 @@ function taskPackHandlers() {
                   brandVoice: normalizeString(socialCalendarRequest?.business?.brandVoice) || null,
                   websiteUrl: normalizeString(socialCalendarRequest?.business?.websiteUrl) || null,
                   logoUrl: normalizeString(socialCalendarRequest?.business?.logoUrl) || null,
+                  variantCount: socialCalendarRequest?.variantCount || null,
                   creativeStyles: socialCalendarRequest?.creativeStyles || [],
                   continueOnError: socialCalendarRequest?.continueOnError === true
                 }
@@ -4511,6 +4654,7 @@ function taskPackHandlers() {
               action: 'run_social_calendar_flow',
               locationId,
               businessName: socialCalendarRequest?.business?.name || null,
+              variantCount: socialCalendarRequest?.variantCount || null,
               continueOnError: socialCalendarRequest?.continueOnError === true
             }),
             skipIf: (runtimeContext) => !shouldRunSocialCalendarFlow || !socialCalendarFlowReviewedPosts(runtimeContext, socialCalendarRequest).ready
