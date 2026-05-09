@@ -409,14 +409,77 @@ function parseDateToIso(value) {
   return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
 }
 
-function extractPostCountFromText(text) {
+function utcStartOfDay(value = new Date()) {
+  const date = new Date(value);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0));
+}
+
+function utcStartOfWeek(value = new Date()) {
+  const date = utcStartOfDay(value);
+  const offset = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - offset);
+  return date;
+}
+
+function utcStartOfMonth(value = new Date()) {
+  const date = new Date(value);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+function utcAddDays(value, days = 0) {
+  const date = new Date(value);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date;
+}
+
+function inferCalendarWindowFromText(text, now = new Date()) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return null;
+
+  if (/\bnext\s+month(?:['’]s?)?\s+posts?\b|\bposts?\s+for\s+next\s+month\b/.test(source)) {
+    const start = utcStartOfMonth(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)));
+    const end = utcStartOfMonth(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 2, 1)));
+    const postCount = Math.round((end.getTime() - start.getTime()) / 86400000);
+    return { startDate: start.toISOString(), postCount, cadenceDays: 1, window: 'next_month' };
+  }
+
+  if (/\bthis\s+month(?:['’]s?)?\s+posts?\b|\bposts?\s+for\s+this\s+month\b/.test(source)) {
+    const start = utcStartOfMonth(now);
+    const end = utcStartOfMonth(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)));
+    const postCount = Math.round((end.getTime() - start.getTime()) / 86400000);
+    return { startDate: start.toISOString(), postCount, cadenceDays: 1, window: 'this_month' };
+  }
+
+  if (/\bnext\s+week(?:['’]s?)?\s+posts?\b|\bposts?\s+for\s+next\s+week\b/.test(source)) {
+    const start = utcAddDays(utcStartOfWeek(now), 7);
+    return { startDate: start.toISOString(), postCount: 7, cadenceDays: 1, window: 'next_week' };
+  }
+
+  if (/\bthis\s+week(?:['’]s?)?\s+posts?\b|\bposts?\s+for\s+this\s+week\b/.test(source)) {
+    const start = utcStartOfWeek(now);
+    return { startDate: start.toISOString(), postCount: 7, cadenceDays: 1, window: 'this_week' };
+  }
+
+  const nextDays = source.match(/\bnext\s+(\d{1,3})\s+days'?\s+posts?\b|\bposts?\s+for\s+the\s+next\s+(\d{1,3})\s+days\b/);
+  const dayCount = normalizeNumber(nextDays?.[1] || nextDays?.[2]);
+  if (Number.isFinite(dayCount) && dayCount > 0) {
+    const start = utcAddDays(utcStartOfDay(now), 1);
+    return { startDate: start.toISOString(), postCount: dayCount, cadenceDays: 1, window: 'next_days' };
+  }
+
+  return null;
+}
+
+function extractPostCountFromText(text, inferredWindow = null) {
   const labeled = normalizeNumber(extractLabeledText(text, ['post count', 'posts', 'number of posts']));
   if (Number.isFinite(labeled) && labeled > 0) return labeled;
   const natural = text?.match(/\b(\d{1,3})\s*(?:-|\s)?post(?:s)?\b/i);
-  return normalizeNumber(natural?.[1]);
+  const naturalCount = normalizeNumber(natural?.[1]);
+  if (Number.isFinite(naturalCount) && naturalCount > 0) return naturalCount;
+  return normalizeNumber(inferredWindow?.postCount);
 }
 
-function extractCadenceDaysFromText(text) {
+function extractCadenceDaysFromText(text, inferredWindow = null) {
   const labeled = normalizeNumber(extractLabeledText(text, ['cadence days', 'cadence', 'every']));
   if (Number.isFinite(labeled) && labeled > 0) return labeled;
 
@@ -428,14 +491,16 @@ function extractCadenceDaysFromText(text) {
     if (/^(?:post|publish|schedule)\s+weekly\b/i.test(line) || /^(?:weekly)\b/i.test(line)) return 7;
   }
 
-  return null;
+  return normalizeNumber(inferredWindow?.cadenceDays);
 }
 
-function extractStartDateFromText(text) {
+function extractStartDateFromText(text, inferredWindow = null) {
   const labeled = parseDateToIso(extractLabeledText(text, ['start date', 'start', 'starting']));
   if (labeled) return labeled;
   const natural = text?.match(/\bstart(?:ing)?(?:\s+on)?\s*[:=-]?\s*([^\n.;]+)/i);
-  return parseDateToIso(natural?.[1]);
+  const naturalDate = parseDateToIso(natural?.[1]);
+  if (naturalDate) return naturalDate;
+  return normalizeString(inferredWindow?.startDate);
 }
 
 function extractTimezoneFromText(text) {
@@ -490,6 +555,7 @@ function parseSocialCalendarRequestText(value) {
     };
   }
 
+  const inferredWindow = inferCalendarWindowFromText(text);
   const stylesText = extractLabeledText(text, ['styles', 'style', 'creative styles', 'creative style', 'visual styles', 'visual style']) || text;
   const scheduledTime = extractScheduledTimeFromText(text);
   const accountIds = parseInlineList(extractLabeledText(text, ['account ids', 'accounts', 'accountids']));
@@ -511,9 +577,9 @@ function parseSocialCalendarRequestText(value) {
       knowledgeBaseRef: extractKnowledgeBaseRefFromText(text)
     },
     calendar: {
-      postCount: extractPostCountFromText(text),
-      cadenceDays: extractCadenceDaysFromText(text),
-      startDate: extractStartDateFromText(text),
+      postCount: extractPostCountFromText(text, inferredWindow),
+      cadenceDays: extractCadenceDaysFromText(text, inferredWindow),
+      startDate: extractStartDateFromText(text, inferredWindow),
       timezone: extractTimezoneFromText(text),
       scheduledHourUtc: scheduledTime.scheduledHourUtc,
       scheduledMinuteUtc: scheduledTime.scheduledMinuteUtc
@@ -642,6 +708,8 @@ function looksLikeSocialCalendarRequestText(text) {
   if (/\bcalendar\b/.test(source) && /\bpost(?:s)?\b/.test(source)) return true;
   if (/\bcreate\s+(?:a\s+)?\d+\s+post(?:s)?\b/.test(source)) return true;
   if (/\bplan\s+(?:a\s+)?\d+\s+post(?:s)?\b/.test(source)) return true;
+  if (/\b(?:this|next)\s+(?:week|month)(?:['’]s?)?\s+posts?\b|\bposts?\s+for\s+(?:this|next)\s+(?:week|month)\b/.test(source)) return true;
+  if (/\bnext\s+\d{1,3}\s+days'?\s+posts?\b|\bposts?\s+for\s+the\s+next\s+\d{1,3}\s+days\b/.test(source)) return true;
   if (/\bremove\s+day\b|\bedit\s+day\b|\badd\s+post\b|\breplace\s+calendar\b/.test(source)) return true;
   return false;
 }
