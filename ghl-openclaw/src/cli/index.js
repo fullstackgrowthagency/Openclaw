@@ -20,6 +20,7 @@ import { WebhookProcessor } from '../ghl/webhooks/processor.js';
 import { ingestTestEvent } from '../ghl/webhooks/test-ingest.js';
 import { generateGoogleAdPreview } from '../ghl/previews/google-ad-preview.js';
 import { generateSocialCalendarPlan } from '../ghl/planning/social-calendar.js';
+import { StartOnboardingService } from '../ghl/onboarding/start-service.js';
 
 const command = normalizeCommand(process.argv[2] || 'status');
 const args = process.argv.slice(3);
@@ -254,6 +255,13 @@ async function main() {
       const outputPath = optionalArg(args, '--output-path') || path.join(env.dataDir, 'generated', `social-calendar-${stamp}.json`);
       await writeJson(outputPath, plan);
       console.log(JSON.stringify({ ok: true, outputPath, plan }, null, 2));
+      return;
+    }
+    case 'start:connect': {
+      const payloadJson = parseJsonArg(optionalArg(args, '--payload-json')) || {};
+      const service = new StartOnboardingService();
+      const result = await service.connect(payloadJson);
+      console.log(JSON.stringify(result, null, 2));
       return;
     }
     case 'webhook:status': {

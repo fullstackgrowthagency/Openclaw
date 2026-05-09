@@ -23,7 +23,8 @@ Reply with a short onboarding message that:
 2. says the knowledge base is required
 3. asks for the exact required setup items below
 4. asks the user to send attachments directly when possible
-5. keeps the request concise and checklist-style
+5. says keys/access will be validated and stored securely, not written into plain business files
+6. keeps the request concise and checklist-style
 
 ## Required setup items
 
@@ -81,10 +82,11 @@ Please send:
 
 1. identify which required items are present
 2. list only the missing required items
-3. if enough info is present, store/update `business/ACTIVE_BUSINESS.json`
-4. if the knowledge base is still missing, stop and ask for it plainly
-5. do not pretend onboarding is complete until all required items are present
-6. then collect optional follow-up items like KPIs and payment/product info
+3. if enough info is present, validate and securely store the OpenAI key and GHL access
+4. store/update `business/ACTIVE_BUSINESS.json` with refs and statuses only, never raw secrets
+5. if the knowledge base is still missing, stop and ask for it plainly
+6. do not pretend onboarding is complete until all required items are present
+7. then collect optional follow-up items like KPIs and payment/product info
 
 ## Storage
 
