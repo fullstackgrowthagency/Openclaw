@@ -499,6 +499,7 @@ function inferAgentId(taskPackName, locationId) {
   if (taskPackName === 'workflow_automation_qa_pack') return `ghl-workflow-agent-${locationId}`;
   if (taskPackName === 'payments_invoicing_pack') return `ghl-payments-agent-${locationId}`;
   if (taskPackName === 'marketing_asset_pack') return `ghl-marketing-agent-${locationId}`;
+  if (taskPackName === 'voice_ai_pack') return `ghl-voice-ai-agent-${locationId}`;
   if (taskPackName === 'reporting_pack') return `ghl-reporting-agent-${locationId}`;
   if (taskPackName === 'compliance_audit_pack') return `ghl-compliance-audit-agent-${locationId}`;
   return `ghl-sub-account-agent-${locationId}`;

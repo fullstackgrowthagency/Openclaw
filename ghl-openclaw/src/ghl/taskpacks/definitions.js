@@ -37,6 +37,7 @@ export function buildTaskPacks() {
     pack('marketing_asset_pack', 'ghl-marketing-agent-{locationId}', ['links.write', 'socialplanner/posts.write'], ['/social-media-posting/:locationId/accounts', '/social-media-posting/:locationId/posts'], true),
     pack('facebook_ad_pack', 'ghl-marketing-agent-{locationId}', ['admanager/campaigns.write', 'admanager/adsets.write', 'admanager/ads.write'], ['/ad-publishing/facebook/entity', '/ad-publishing/facebook/campaigns', '/ad-publishing/facebook/adsets', '/ad-publishing/facebook/ads'], true),
     pack('google_ad_pack', 'ghl-marketing-agent-{locationId}', ['admanager/campaigns.write', 'admanager/ads.write'], ['/ad-publishing/google/entity', '/ad-publishing/google/ads', '/ad-publishing/google/ads/:adId/publish'], true),
+    pack('voice_ai_pack', 'ghl-voice-ai-agent-{locationId}', ['voice-ai-dashboard.readonly', 'voice-ai-agents.readonly', 'voice-ai-agents.write', 'voice-ai-actions.readonly', 'voice-ai-actions.write'], ['/voice-ai/dashboard/call-logs', '/voice-ai/dashboard/call-logs/:callId', '/voice-ai/agents', '/voice-ai/agents/:agentId', '/voice-ai/actions', '/voice-ai/actions/:actionId'], true),
     pack('user_permission_pack', 'ghl-agency-lead', ['users.write'], ['/users/'], true),
     pack('reporting_pack', 'ghl-reporting-agent-{locationId}', ['reporting.read'], []),
     pack('snapshot_template_pack', 'ghl-agency-lead', ['snapshots.write'], ['/snapshots'], true),

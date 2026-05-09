@@ -1424,6 +1424,75 @@ function appointmentMutationRequestFrom(event) {
   };
 }
 
+function normalizeVoiceAiAction(value) {
+  const normalized = normalizeString(value)?.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!normalized) return null;
+  const aliases = new Map([
+    ['list_agents', 'list_voice_ai_agents'],
+    ['list_voice_ai_agents', 'list_voice_ai_agents'],
+    ['get_agent', 'get_voice_ai_agent'],
+    ['fetch_agent', 'get_voice_ai_agent'],
+    ['get_voice_ai_agent', 'get_voice_ai_agent'],
+    ['create_agent', 'create_voice_ai_agent'],
+    ['create_voice_ai_agent', 'create_voice_ai_agent'],
+    ['update_agent', 'update_voice_ai_agent'],
+    ['patch_agent', 'update_voice_ai_agent'],
+    ['update_voice_ai_agent', 'update_voice_ai_agent'],
+    ['delete_agent', 'delete_voice_ai_agent'],
+    ['delete_voice_ai_agent', 'delete_voice_ai_agent'],
+    ['list_call_logs', 'list_voice_ai_call_logs'],
+    ['list_voice_ai_call_logs', 'list_voice_ai_call_logs'],
+    ['get_call_log', 'get_voice_ai_call_log'],
+    ['fetch_call_log', 'get_voice_ai_call_log'],
+    ['get_voice_ai_call_log', 'get_voice_ai_call_log'],
+    ['create_action', 'create_voice_ai_action'],
+    ['create_voice_ai_action', 'create_voice_ai_action'],
+    ['get_action', 'get_voice_ai_action'],
+    ['fetch_action', 'get_voice_ai_action'],
+    ['get_voice_ai_action', 'get_voice_ai_action'],
+    ['update_action', 'update_voice_ai_action'],
+    ['patch_action', 'update_voice_ai_action'],
+    ['update_voice_ai_action', 'update_voice_ai_action'],
+    ['delete_action', 'delete_voice_ai_action'],
+    ['delete_voice_ai_action', 'delete_voice_ai_action']
+  ]);
+  return aliases.get(normalized) || null;
+}
+
+function normalizeSortOrder(value) {
+  const normalized = normalizeString(value)?.toLowerCase();
+  return normalized === 'asc' || normalized === 'desc' ? normalized : null;
+}
+
+function voiceAiMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+  const action = normalizeVoiceAiAction(request.action);
+  const body = normalizePlainObject(request.body);
+  return {
+    action,
+    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    agentId: normalizeString(request.agentId),
+    callId: normalizeString(request.callId),
+    actionId: normalizeString(request.actionId),
+    contactId: normalizeString(request.contactId),
+    page: normalizeNumber(request.page),
+    limit: normalizeNumber(request.limit ?? request.count),
+    timezone: normalizeString(request.timezone),
+    sortBy: normalizeString(request.sortBy),
+    sortOrder: normalizeSortOrder(request.sortOrder || request.order),
+    callType: normalizeString(request.callType),
+    actionTypes: normalizeStringArray(request.actionTypes || request.actionTypeIds),
+    startDate: normalizeString(request.startDate),
+    endDate: normalizeString(request.endDate),
+    query: normalizePlainObject(request.query) || normalizePlainObject(request.filters) || {},
+    agent: normalizePlainObject(request.agent) || (action === 'create_voice_ai_agent' ? body : null) || {},
+    patch: normalizePlainObject(request.patch) || normalizePlainObject(request.agentPatch) || (action === 'update_voice_ai_agent' ? body : null) || {},
+    voiceAction: normalizePlainObject(request.voiceAction) || normalizePlainObject(request.actionBody) || normalizePlainObject(request.agentAction) || ((action === 'create_voice_ai_action' || action === 'update_voice_ai_action') ? body : null) || {},
+    deleteOptions: normalizePlainObject(request.deleteOptions) || normalizePlainObject(request.options) || {}
+  };
+}
+
 function socialPostMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
@@ -7327,6 +7396,255 @@ function taskPackHandlers() {
               requestedAction: mutationRequest?.action || null
             },
             skipIf: () => explicitIntegrationStatus || explicitEntityList || explicitCampaignFetch || explicitCampaignUpsert || explicitPublish || explicitPromoteSocialPost
+          }
+        ];
+      }
+    },
+    voice_ai_pack: {
+      trigger_events: ['ManualRun'],
+      buildExecutionPlan(context) {
+        const mutationRequest = voiceAiMutationRequestFrom(context.event);
+        const logQuery = {
+          ...normalizePlainObject(mutationRequest?.query),
+          ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
+          ...(mutationRequest?.agentId ? { agentId: mutationRequest.agentId } : {}),
+          ...(mutationRequest?.contactId ? { contactId: mutationRequest.contactId } : {}),
+          ...(mutationRequest?.callType ? { callType: mutationRequest.callType } : {}),
+          ...(mutationRequest?.actionTypes?.length ? { actionTypes: mutationRequest.actionTypes } : {}),
+          ...(mutationRequest?.startDate ? { startDate: mutationRequest.startDate } : {}),
+          ...(mutationRequest?.endDate ? { endDate: mutationRequest.endDate } : {}),
+          ...(mutationRequest?.timezone ? { timezone: mutationRequest.timezone } : {}),
+          ...(mutationRequest?.sortBy ? { sortBy: mutationRequest.sortBy } : {}),
+          ...(mutationRequest?.sortOrder ? { sortOrder: mutationRequest.sortOrder } : {}),
+          ...(mutationRequest?.page ? { page: mutationRequest.page } : {}),
+          ...(mutationRequest?.limit ? { limit: mutationRequest.limit } : {})
+        };
+        const agentQuery = {
+          ...normalizePlainObject(mutationRequest?.query),
+          ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
+          ...(mutationRequest?.page ? { page: mutationRequest.page } : {}),
+          ...(mutationRequest?.limit ? { limit: mutationRequest.limit } : {})
+        };
+        const explicitListCallLogs = mutationRequest?.action === 'list_voice_ai_call_logs';
+        const explicitGetCallLog = mutationRequest?.action === 'get_voice_ai_call_log' && Boolean(mutationRequest?.callId);
+        const explicitListAgents = mutationRequest?.action === 'list_voice_ai_agents';
+        const explicitGetAgent = mutationRequest?.action === 'get_voice_ai_agent' && Boolean(mutationRequest?.agentId);
+        const explicitCreateAgent = mutationRequest?.action === 'create_voice_ai_agent' && Object.keys(mutationRequest?.agent || {}).length > 0;
+        const explicitUpdateAgent = mutationRequest?.action === 'update_voice_ai_agent' && Boolean(mutationRequest?.agentId) && Object.keys(mutationRequest?.patch || {}).length > 0;
+        const explicitDeleteAgent = mutationRequest?.action === 'delete_voice_ai_agent' && Boolean(mutationRequest?.agentId);
+        const explicitGetAction = mutationRequest?.action === 'get_voice_ai_action' && Boolean(mutationRequest?.actionId);
+        const explicitCreateAction = mutationRequest?.action === 'create_voice_ai_action' && Object.keys(mutationRequest?.voiceAction || {}).length > 0;
+        const explicitUpdateAction = mutationRequest?.action === 'update_voice_ai_action' && Boolean(mutationRequest?.actionId) && Object.keys(mutationRequest?.voiceAction || {}).length > 0;
+        const explicitDeleteAction = mutationRequest?.action === 'delete_voice_ai_action' && Boolean(mutationRequest?.actionId);
+
+        return [
+          {
+            name: 'list_voice_ai_call_logs',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'listCallLogs',
+            pathHint: '/voice-ai/dashboard/call-logs',
+            args: () => [context.credentialRef || defaultLocationCredential(context), logQuery],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            details: {
+              action: 'list_voice_ai_call_logs',
+              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              agentId: mutationRequest?.agentId || null,
+              contactId: mutationRequest?.contactId || null
+            },
+            skipIf: () => !explicitListCallLogs
+          },
+          {
+            name: 'get_voice_ai_call_log',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'getCallLog',
+            pathHint: '/voice-ai/dashboard/call-logs/:callId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.callId],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            details: {
+              action: 'get_voice_ai_call_log',
+              callId: mutationRequest?.callId || null
+            },
+            skipIf: () => !explicitGetCallLog
+          },
+          {
+            name: 'list_voice_ai_agents',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'listAgents',
+            pathHint: '/voice-ai/agents',
+            args: () => [context.credentialRef || defaultLocationCredential(context), agentQuery],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            details: {
+              action: 'list_voice_ai_agents',
+              locationId: mutationRequest?.locationId || context.event.locationId || null
+            },
+            skipIf: () => !explicitListAgents
+          },
+          {
+            name: 'get_voice_ai_agent',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'getAgent',
+            pathHint: '/voice-ai/agents/:agentId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agentId],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            details: {
+              action: 'get_voice_ai_agent',
+              agentId: mutationRequest?.agentId || null
+            },
+            skipIf: () => !explicitGetAgent
+          },
+          {
+            name: 'create_voice_ai_agent',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'createAgent',
+            httpMethod: 'POST',
+            pathHint: '/voice-ai/agents',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agent],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'create_voice_ai_agent',
+              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              name: mutationRequest?.agent?.name || null
+            },
+            skipIf: () => !explicitCreateAgent
+          },
+          {
+            name: 'update_voice_ai_agent',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'updateAgent',
+            httpMethod: 'PATCH',
+            pathHint: '/voice-ai/agents/:agentId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agentId, mutationRequest.patch],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'update_voice_ai_agent',
+              agentId: mutationRequest?.agentId || null,
+              patchKeys: Object.keys(mutationRequest?.patch || {})
+            },
+            skipIf: () => !explicitUpdateAgent
+          },
+          {
+            name: 'delete_voice_ai_agent',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'deleteAgent',
+            httpMethod: 'DELETE',
+            pathHint: '/voice-ai/agents/:agentId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agentId],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'delete_voice_ai_agent',
+              agentId: mutationRequest?.agentId || null,
+              deleteOptions: mutationRequest?.deleteOptions || {}
+            },
+            skipIf: () => !explicitDeleteAgent
+          },
+          {
+            name: 'get_voice_ai_action',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'getAction',
+            pathHint: '/voice-ai/actions/:actionId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.actionId],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            details: {
+              action: 'get_voice_ai_action',
+              actionId: mutationRequest?.actionId || null
+            },
+            skipIf: () => !explicitGetAction
+          },
+          {
+            name: 'create_voice_ai_action',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'createAction',
+            httpMethod: 'POST',
+            pathHint: '/voice-ai/actions',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.voiceAction],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'create_voice_ai_action',
+              agentId: mutationRequest?.voiceAction?.agentId || mutationRequest?.agentId || null,
+              name: mutationRequest?.voiceAction?.name || null
+            },
+            skipIf: () => !explicitCreateAction
+          },
+          {
+            name: 'update_voice_ai_action',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'updateAction',
+            httpMethod: 'PATCH',
+            pathHint: '/voice-ai/actions/:actionId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.actionId, mutationRequest.voiceAction],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'update_voice_ai_action',
+              actionId: mutationRequest?.actionId || null,
+              patchKeys: Object.keys(mutationRequest?.voiceAction || {})
+            },
+            skipIf: () => !explicitUpdateAction
+          },
+          {
+            name: 'delete_voice_ai_action',
+            kind: 'adapter_call',
+            adapter: 'VoiceAiAdapter',
+            method: 'deleteAction',
+            httpMethod: 'DELETE',
+            pathHint: '/voice-ai/actions/:actionId',
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.actionId],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: {
+              action: 'delete_voice_ai_action',
+              actionId: mutationRequest?.actionId || null
+            },
+            skipIf: () => !explicitDeleteAction
+          },
+          {
+            name: 'plan_voice_ai_actions',
+            kind: 'intent',
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            details: {
+              action: 'possible_voice_ai_management',
+              locationId: mutationRequest?.locationId || context.event.locationId || null,
+              requestedAction: mutationRequest?.action || null
+            },
+            skipIf: () => explicitListCallLogs || explicitGetCallLog || explicitListAgents || explicitGetAgent || explicitCreateAgent || explicitUpdateAgent || explicitDeleteAgent || explicitGetAction || explicitCreateAction || explicitUpdateAction || explicitDeleteAction
           }
         ];
       }

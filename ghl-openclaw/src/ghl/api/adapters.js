@@ -1023,12 +1023,44 @@ export class VoiceAiAdapter {
     return this.client.request({ credentialRef, method: 'GET', path: '/voice-ai/dashboard/call-logs', query });
   }
 
+  getCallLog(credentialRef, callId) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/voice-ai/dashboard/call-logs/${callId}` });
+  }
+
   listAgents(credentialRef, query = {}) {
     return this.client.request({ credentialRef, method: 'GET', path: '/voice-ai/agents', query });
   }
 
+  getAgent(credentialRef, agentId) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/voice-ai/agents/${agentId}` });
+  }
+
   createAgent(credentialRef, body) {
     return this.client.request({ credentialRef, method: 'POST', path: '/voice-ai/agents', body });
+  }
+
+  updateAgent(credentialRef, agentId, body) {
+    return this.client.request({ credentialRef, method: 'PATCH', path: `/voice-ai/agents/${agentId}`, body });
+  }
+
+  deleteAgent(credentialRef, agentId) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/voice-ai/agents/${agentId}` });
+  }
+
+  createAction(credentialRef, body) {
+    return this.client.request({ credentialRef, method: 'POST', path: '/voice-ai/actions', body });
+  }
+
+  getAction(credentialRef, actionId) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/voice-ai/actions/${actionId}` });
+  }
+
+  updateAction(credentialRef, actionId, body) {
+    return this.client.request({ credentialRef, method: 'PATCH', path: `/voice-ai/actions/${actionId}`, body });
+  }
+
+  deleteAction(credentialRef, actionId) {
+    return this.client.request({ credentialRef, method: 'DELETE', path: `/voice-ai/actions/${actionId}` });
   }
 }
 
