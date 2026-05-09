@@ -6,6 +6,14 @@ function objectIdFrom(event) {
   return event?.objectId || event?.payload?.data?.id || event?.payload?.id || null;
 }
 
+function conversationObjectIdFrom(event) {
+  const candidate = objectIdFrom(event);
+  if (!candidate) return null;
+  const eventType = normalizeString(event?.type || event?.payload?.type);
+  if (eventType === 'ManualRun' && candidate === 'demo-object') return null;
+  return candidate;
+}
+
 function normalizeString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -225,14 +233,14 @@ function conversationMutationRequestFrom(event) {
   const normalizedMessageType = normalizeConversationMessageType(request.messageType)
     || normalizeConversationMessageType(request.type)
     || parsedRequest.messageType;
-  const normalizedContactName = normalizeString(request.contactName)
-    || normalizeString(request.name)
+  const normalizedContactName = normalizeConversationContactName(request.contactName)
+    || normalizeConversationContactName(request.name)
     || parsedRequest.contactName;
   const normalizedMessage = normalizeString(request.message)
     || parsedRequest.message;
   return {
     action,
-    conversationId: request.conversationId || parsedRequest.conversationId || objectIdFrom(event),
+    conversationId: request.conversationId || parsedRequest.conversationId || conversationObjectIdFrom(event),
     locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
     contactId: request.contactId || null,
     contactName: normalizedContactName,
@@ -593,11 +601,11 @@ function normalizeVariantCount(value, max = 4) {
 function normalizeConversationMessageType(value) {
   const normalized = normalizeString(value)?.toLowerCase().replace(/[_\s-]+/g, ' ');
   if (!normalized) return null;
-  if (['sms', 'text', 'text message'].includes(normalized)) return 'SMS';
-  if (['email', 'e mail'].includes(normalized)) return 'Email';
-  if (['whatsapp', 'wa'].includes(normalized)) return 'WhatsApp';
-  if (['live chat', 'livechat', 'chat', 'web chat', 'webchat'].includes(normalized)) return 'Live_Chat';
-  return normalizeString(value);
+  if (['sms', 'text', 'text message', 'type sms', 'type phone', 'phone'].includes(normalized)) return 'SMS';
+  if (['email', 'e mail', 'type email'].includes(normalized)) return 'Email';
+  if (['whatsapp', 'wa', 'type whatsapp'].includes(normalized)) return 'WhatsApp';
+  if (['live chat', 'livechat', 'chat', 'web chat', 'webchat', 'type live chat'].includes(normalized)) return 'Live_Chat';
+  return null;
 }
 
 function normalizeConversationAction(value) {
@@ -608,6 +616,12 @@ function normalizeConversationAction(value) {
   if (['fetch', 'get_conversation', 'read_conversation', 'conversation_summary', 'fetch_conversation_summary'].includes(normalized)) return 'fetch_conversation_summary';
   if (['list_conversations', 'search', 'search_conversations', 'find_conversations'].includes(normalized)) return 'search_conversations';
   return normalizeString(value);
+}
+
+function normalizeConversationContactName(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  return normalized.replace(/^(?:with|for)\s+/i, '').trim() || null;
 }
 
 function detectConversationMessageTypeFromText(text) {
@@ -622,13 +636,13 @@ function detectConversationMessageTypeFromText(text) {
 
 function extractConversationContactNameFromText(text) {
   const labeled = extractLabeledText(text, ['contact', 'contact name', 'lead', 'person', 'to']);
-  if (labeled) return labeled;
+  if (labeled) return normalizeConversationContactName(labeled);
 
   const natural = text?.match(/\b(?:send\s+)?(?:an?\s+)?(?:sms|text|message|email|whatsapp|whats?app\s+message)\s+to\s+([^\n:,-]+?)(?=(?:\s+(?:saying|that)\b|\s*[:,-]|$))/i)
     || text?.match(/\b(?:text|message|email|whatsapp|whats?app)\s+([^\n:,-]+?)(?=(?:\s+(?:saying|that)\b|\s*[:,-]|$))/i)
     || text?.match(/\b(?:reply|respond|follow\s*up)(?:\s+(?:to|with))?(?:\s+(?:the\s+)?latest\s+(?:conversation|thread)(?:\s+for)?)?\s+([^\n:,-]+?)(?=(?:\s+(?:saying|that)\b|\s*[:,-]|$))/i)
     || text?.match(/\b(?:show|read|fetch|get|summari[sz]e)(?:\s+(?:the\s+)?)?(?:latest\s+|recent\s+)?(?:conversation|thread|messages?)(?:\s+(?:with|for))\s+([^\n:,-]+?)(?=(?:\s*[?.!]|$))/i);
-  return normalizeString(natural?.[1]);
+  return normalizeConversationContactName(natural?.[1]);
 }
 
 function extractConversationMessageFromText(text) {
@@ -3741,6 +3755,7 @@ function resolvedConversationContactId(context, mutationRequest) {
   if (mutationRequest?.contactId) return mutationRequest.contactId;
   const conversation = resolvedConversationRecord(context, mutationRequest);
   if (conversation?.contactId) return conversation.contactId;
+  if (!mutationRequest?.contactName) return null;
   return resolvedSingleContactId(context, 'search_contacts_by_name', mutationRequest?.contactName);
 }
 
@@ -3909,7 +3924,7 @@ function resolvedConversationId(context, mutationRequest, options = {}) {
 }
 
 function normalizeConversationReplyTypeCandidate(value) {
-  return normalizeConversationMessageType(value) || normalizeString(value);
+  return normalizeConversationMessageType(value);
 }
 
 function resolvedConversationMessageType(context, mutationRequest) {
@@ -4703,7 +4718,7 @@ function taskPackHandlers() {
       trigger_events: ['ConversationUpdate', 'ConversationUnreadWebhook', 'InboundMessage', 'OutboundMessage', 'ManualRun'],
       buildExecutionPlan(context) {
         const mutationRequest = conversationMutationRequestFrom(context.event);
-        const conversationId = mutationRequest?.conversationId || objectIdFrom(context.event);
+        const conversationId = mutationRequest?.conversationId || conversationObjectIdFrom(context.event);
         const explicitConversationSend = mutationRequest?.action === 'send_conversation_message'
           && (Boolean(mutationRequest.contactId) || Boolean(mutationRequest.contactName))
           && Boolean(mutationRequest.message)
@@ -4744,9 +4759,12 @@ function taskPackHandlers() {
             name: 'search_conversations',
             kind: 'adapter_call',
             adapter: 'ConversationsAdapter',
-            method: 'listConversations',
-            pathHint: '/conversations/',
-            args: () => [context.credentialRef || defaultLocationCredential(context)],
+            method: 'searchConversations',
+            pathHint: '/conversations/search',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), {
+              locationId: runtimeContext.event.locationId || mutationRequest?.locationId || null,
+              ...(resolvedConversationContactId(runtimeContext, mutationRequest) ? { contactId: resolvedConversationContactId(runtimeContext, mutationRequest) } : {})
+            }],
             safe: true,
             mutation: false,
             requiresCredential: true,

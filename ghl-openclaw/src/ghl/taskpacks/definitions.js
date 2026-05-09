@@ -29,7 +29,7 @@ export function buildTaskPacks() {
     pack('sub_account_onboarding_pack', 'ghl-agency-lead', ['locations.write', 'snapshots.readonly'], ['/locations/', '/snapshots'], true),
     pack('lead_management_pack', 'ghl-contacts-agent-{locationId}', ['contacts.write'], ['/contacts/']),
     pack('sales_pipeline_pack', 'ghl-sales-pipeline-agent-{locationId}', ['opportunities.write'], ['/opportunities']),
-    pack('conversation_management_pack', 'ghl-conversations-agent-{locationId}', ['conversations.write'], ['/conversations/', '/conversations/:conversationId/messages', '/conversations/messages']),
+    pack('conversation_management_pack', 'ghl-conversations-agent-{locationId}', ['conversations.write'], ['/conversations/search', '/conversations/:conversationId', '/conversations/:conversationId/messages', '/conversations/messages']),
     pack('calendar_appointment_pack', 'ghl-calendar-agent-{locationId}', ['calendars.write'], ['/calendars/', '/calendars/events/appointments', '/contacts/:contactId/appointments']),
     pack('workflow_automation_qa_pack', 'ghl-workflow-agent-{locationId}', ['workflows.readonly'], ['/workflows/']),
     pack('payments_invoicing_pack', 'ghl-payments-agent-{locationId}', ['invoices.write', 'products.write'], ['/invoices', '/products/'], true),
