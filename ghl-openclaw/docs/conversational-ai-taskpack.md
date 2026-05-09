@@ -179,6 +179,12 @@ Add a project-grounding helper that returns:
 - tone or brand voice
 - operating constraints
 
+For phase 1 grounding, the knowledge base source should support at least:
+
+- active business `knowledgeBase.notes`
+- project profile `project.knowledgeBase.notes`
+- local workspace file paths via `knowledgeBase.location`
+
 ### Layer 2.5: project profile
 
 The conversational system should load a normalized project profile, for example from:

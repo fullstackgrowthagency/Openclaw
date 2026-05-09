@@ -7,6 +7,12 @@
     "summary": "Short description of what this project is and what the assistant is trying to do.",
     "locationId": null,
     "knowledgeBaseRef": null,
+    "knowledgeBase": {
+      "ref": null,
+      "type": null,
+      "location": null,
+      "notes": null
+    },
     "openaiCredentialRef": null
   },
   "identity": {

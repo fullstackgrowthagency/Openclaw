@@ -183,6 +183,295 @@ function readConversationalProjectProfile(profileRef, fromDir = process.cwd()) {
   return null;
 }
 
+function normalizeConversationalKnowledgeBaseSource(value) {
+  const source = normalizePlainObject(value) || {};
+  return {
+    ref: normalizeString(source.ref)
+      || normalizeString(source.id)
+      || normalizeString(source.knowledgeBaseRef)
+      || normalizeString(source.knowledgeBaseId)
+      || null,
+    type: normalizeString(source.type)
+      || normalizeString(source.knowledgeBaseType)
+      || null,
+    location: normalizeString(source.location)
+      || normalizeString(source.url)
+      || normalizeString(source.path)
+      || normalizeString(source.file)
+      || normalizeString(source.knowledgeBaseLocation)
+      || normalizeString(source.knowledgeBaseUrl)
+      || null,
+    notes: normalizeTextBlock(source.notes)
+      || normalizeTextBlock(source.text)
+      || normalizeTextBlock(source.body)
+      || normalizeTextBlock(source.summary)
+      || normalizeTextBlock(source.knowledgeBaseNotes)
+      || null
+  };
+}
+
+function mergeConversationalKnowledgeBaseSources(...sources) {
+  const merged = {
+    ref: null,
+    type: null,
+    location: null,
+    notes: null
+  };
+
+  for (const source of sources.map((entry) => normalizeConversationalKnowledgeBaseSource(entry))) {
+    if (!merged.ref && source.ref) merged.ref = source.ref;
+    if (!merged.type && source.type) merged.type = source.type;
+    if (!merged.location && source.location) merged.location = source.location;
+    if (!merged.notes && source.notes) merged.notes = source.notes;
+  }
+
+  return merged;
+}
+
+function activeBusinessKnowledgeBaseSource(record) {
+  const activeBusiness = normalizePlainObject(record) || {};
+  const profile = normalizePlainObject(activeBusiness.business || activeBusiness.businessProfile || activeBusiness.profile || activeBusiness.details) || {};
+  return mergeConversationalKnowledgeBaseSources(
+    activeBusiness.knowledgeBase,
+    profile.knowledgeBase,
+    activeBusiness,
+    profile
+  );
+}
+
+function conversationalKnowledgeBaseLocationCandidates(location, fromDir = process.cwd()) {
+  const normalizedLocation = normalizeString(location);
+  if (!normalizedLocation) return [];
+  const workspaceRoot = resolveWorkspaceRoot(fromDir);
+  const candidates = [
+    path.isAbsolute(normalizedLocation) ? normalizedLocation : null,
+    path.resolve(fromDir, normalizedLocation),
+    path.join(workspaceRoot, normalizedLocation),
+    path.join(workspaceRoot, 'docs', normalizedLocation),
+    path.join(workspaceRoot, 'knowledge', normalizedLocation),
+    path.join(workspaceRoot, 'business', normalizedLocation)
+  ].filter(Boolean);
+
+  return [...new Set(candidates)];
+}
+
+function flattenKnowledgeBaseText(value, output = [], prefix = '', depth = 0) {
+  if (depth > 6 || value == null) return output;
+
+  if (typeof value === 'string' && value.trim()) {
+    output.push(prefix ? `${prefix}: ${value.trim()}` : value.trim());
+    return output;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) flattenKnowledgeBaseText(entry, output, prefix, depth + 1);
+    return output;
+  }
+
+  if (typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) {
+      const label = normalizeString(key)?.replace(/[_-]+/g, ' ') || prefix;
+      flattenKnowledgeBaseText(entry, output, label, depth + 1);
+    }
+  }
+
+  return output;
+}
+
+function readConversationalKnowledgeBaseText(location, fromDir = process.cwd()) {
+  const normalizedLocation = normalizeString(location);
+  if (!normalizedLocation) {
+    return {
+      text: null,
+      citation: null,
+      mode: 'missing'
+    };
+  }
+
+  if (/^https?:\/\//i.test(normalizedLocation)) {
+    return {
+      text: null,
+      citation: normalizedLocation,
+      mode: 'external_url'
+    };
+  }
+
+  const workspaceRoot = resolveWorkspaceRoot(fromDir);
+  for (const candidatePath of conversationalKnowledgeBaseLocationCandidates(normalizedLocation, fromDir)) {
+    if (!existsSync(candidatePath)) continue;
+    try {
+      const raw = readFileSync(candidatePath, 'utf8');
+      const ext = path.extname(candidatePath).toLowerCase();
+      let text = raw;
+      if (ext === '.json') {
+        try {
+          text = flattenKnowledgeBaseText(JSON.parse(raw)).join('\n');
+        } catch {
+          text = raw;
+        }
+      }
+      return {
+        text: normalizeTextBlock(text)?.slice(0, 40000) || null,
+        citation: path.relative(workspaceRoot, candidatePath) || candidatePath,
+        mode: 'local_file'
+      };
+    } catch {
+      return {
+        text: null,
+        citation: candidatePath,
+        mode: 'read_error'
+      };
+    }
+  }
+
+  return {
+    text: null,
+    citation: normalizedLocation,
+    mode: 'unresolved_path'
+  };
+}
+
+function conversationalGroundingTerms(text) {
+  const stopwords = new Set(['about', 'after', 'again', 'also', 'and', 'are', 'but', 'can', 'does', 'for', 'from', 'have', 'help', 'how', 'into', 'its', 'just', 'more', 'not', 'our', 'out', 'that', 'the', 'their', 'them', 'they', 'this', 'what', 'when', 'with', 'your']);
+  return [...new Set((normalizeTextBlock(text)?.toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((term) => !stopwords.has(term)))];
+}
+
+function splitGroundingSections(text, citation, source) {
+  const normalized = normalizeTextBlock(text);
+  if (!normalized) return [];
+
+  const blocks = normalized
+    .replace(/\r/g, '\n')
+    .split(/\n{2,}/)
+    .map((entry) => entry.replace(/\n+/g, ' ').trim())
+    .filter(Boolean);
+
+  const sections = (blocks.length > 1 ? blocks : normalized
+    .replace(/\r/g, ' ')
+    .split(/(?<=[.!?])\s+/g)
+    .map((entry) => entry.trim())
+    .filter(Boolean))
+    .slice(0, 40);
+
+  return sections.map((entry, index) => ({
+    text: entry,
+    citation: sections.length > 1 ? `${citation}#${index + 1}` : citation,
+    source
+  }));
+}
+
+function scoreGroundingSection(text, terms = [], requestText = null) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return 0;
+  const normalizedRequest = normalizeTextBlock(requestText)?.toLowerCase() || '';
+
+  let score = 0;
+  for (const term of terms) {
+    if (!term) continue;
+    if (source.includes(term)) score += term.length >= 6 ? 3 : 2;
+  }
+  if (/\b(price|pricing|cost|quote|how much)\b/.test(normalizedRequest) && /\b(price|pricing|cost|quote|fee|package|starts at|per month|per week|\$)\b/.test(source)) score += 5;
+  if (/\b(issue|problem|error|support|broken|not working)\b/.test(normalizedRequest) && /\b(issue|problem|error|support|reset|setup|install|troubleshoot|working|response time)\b/.test(source)) score += 5;
+  if (/\b(book|schedule|appointment|demo|consult|call)\b/.test(normalizedRequest) && /\b(book|schedule|appointment|demo|consult|call|calendar|availability)\b/.test(source)) score += 4;
+  return score;
+}
+
+function summarizeGroundingSection(text, maxLength = 220) {
+  const normalized = normalizeTextBlock(text)?.replace(/\s+/g, ' ').replace(/^[•*\-]\s*/, '').trim() || null;
+  if (!normalized) return null;
+  if (normalized.length <= maxLength) return normalized;
+  const sentence = normalized.match(new RegExp(`^.{1,${maxLength}}[.!?](?:\s|$)`));
+  if (sentence?.[0]) return sentence[0].trim();
+  return `${normalized.slice(0, maxLength - 1).trim()}…`;
+}
+
+function resolvedConversationalAiGroundingContext(context, mutationRequest) {
+  const activeBusinessRecord = readActiveBusinessRecord(process.cwd());
+  const activeBusiness = activeBusinessDefaultsFromRecord(activeBusinessRecord);
+  const profile = resolvedConversationalAiProjectProfile(context, mutationRequest);
+  const requestText = resolvedConversationalAiRequestText(context, mutationRequest);
+  const knowledgeBaseSource = mergeConversationalKnowledgeBaseSources(
+    mutationRequest?.project?.profile?.project?.knowledgeBase,
+    mutationRequest?.project?.profile?.knowledgeBase,
+    mutationRequest?.business,
+    profile?.project?.knowledgeBase,
+    profile?.knowledgeBase,
+    {
+      ref: profile?.project?.knowledgeBaseRef
+    },
+    activeBusinessKnowledgeBaseSource(activeBusinessRecord),
+    {
+      ref: activeBusiness?.knowledgeBaseRef
+    }
+  );
+  const knowledgeBaseText = readConversationalKnowledgeBaseText(knowledgeBaseSource.location, process.cwd());
+  const businessSummary = [
+    normalizeString(profile?.project?.summary)
+      || normalizeString(activeBusiness?.industry)
+      || null,
+    activeBusiness?.offers?.length ? `Offers: ${activeBusiness.offers.join(', ')}` : null,
+    activeBusiness?.audience?.length ? `Audience: ${activeBusiness.audience.join(', ')}` : null,
+    activeBusiness?.differentiators?.length ? `Differentiators: ${activeBusiness.differentiators.join(', ')}` : null,
+    activeBusiness?.goals?.length ? `Goals: ${activeBusiness.goals.join(', ')}` : null,
+    normalizeString(profile?.identity?.tone?.brandVoice) ? `Brand voice: ${profile.identity.tone.brandVoice}` : null
+  ].filter(Boolean).join('. ');
+
+  const sections = [
+    ...splitGroundingSections(businessSummary, 'active_business_context', 'business_context'),
+    ...splitGroundingSections(knowledgeBaseSource.notes, knowledgeBaseSource.ref ? `knowledge_base:${knowledgeBaseSource.ref}` : 'knowledge_base:notes', 'knowledge_base_notes'),
+    ...splitGroundingSections(knowledgeBaseText.text, knowledgeBaseText.citation || 'knowledge_base:file', 'knowledge_base_file')
+  ];
+
+  const scoredSections = sections
+    .map((section) => ({
+      ...section,
+      score: scoreGroundingSection(section.text, conversationalGroundingTerms(requestText), requestText)
+    }))
+    .sort((left, right) => right.score - left.score || left.text.length - right.text.length);
+
+  const snippets = (scoredSections.some((section) => section.score > 0) ? scoredSections.filter((section) => section.score > 0) : scoredSections)
+    .slice(0, 3)
+    .map((section) => ({
+      source: section.source,
+      citation: section.citation,
+      score: section.score,
+      text: section.text,
+      summary: summarizeGroundingSection(section.text)
+    }));
+
+  return {
+    businessName: normalizeString(profile?.project?.name) || normalizeString(activeBusiness?.name) || 'Active project',
+    projectName: normalizeString(profile?.project?.name) || null,
+    projectType: normalizeString(profile?.project?.type) || 'service_business',
+    businessContext: {
+      industry: activeBusiness?.industry || null,
+      audience: activeBusiness?.audience || [],
+      offers: activeBusiness?.offers || [],
+      differentiators: activeBusiness?.differentiators || [],
+      goals: activeBusiness?.goals || [],
+      brandVoice: normalizeString(profile?.identity?.tone?.brandVoice) || normalizeString(activeBusiness?.brandVoice) || null
+    },
+    knowledgeBase: {
+      ref: knowledgeBaseSource.ref || null,
+      type: knowledgeBaseSource.type || null,
+      location: knowledgeBaseSource.location || null,
+      notesPresent: Boolean(knowledgeBaseSource.notes),
+      sourceMode: knowledgeBaseText.mode,
+      citation: knowledgeBaseText.citation || null,
+      textLoaded: Boolean(knowledgeBaseText.text),
+      configured: Boolean(knowledgeBaseSource.ref || knowledgeBaseSource.location || knowledgeBaseSource.notes)
+    },
+    snippets,
+    groundingStatus: snippets.length > 0
+      ? 'grounded'
+      : knowledgeBaseSource.ref || knowledgeBaseSource.location || knowledgeBaseSource.notes
+        ? 'knowledge_base_reference_only'
+        : businessSummary
+          ? 'business_context_only'
+          : 'missing'
+  };
+}
+
 function defaultConversationalProjectProfile({ mutationRequest, activeBusiness, event } = {}) {
   const requestedProject = normalizePlainObject(mutationRequest?.project) || {};
   const business = normalizePlainObject(mutationRequest?.business) || {};
@@ -520,7 +809,10 @@ function conversationalAiMutationRequestFrom(event) {
     },
     business: {
       name: normalizeString(business.name || request.businessName) || null,
-      knowledgeBaseRef: normalizeString(business.knowledgeBaseRef || business.knowledgeBase || request.knowledgeBaseRef || request.knowledgeBase) || null
+      knowledgeBaseRef: normalizeString(business.knowledgeBaseRef || business.knowledgeBase || request.knowledgeBaseRef || request.knowledgeBase) || null,
+      knowledgeBaseLocation: normalizeString(business.knowledgeBaseLocation || business.knowledgeBaseUrl || request.knowledgeBaseLocation || request.knowledgeBaseUrl) || null,
+      knowledgeBaseType: normalizeString(business.knowledgeBaseType || request.knowledgeBaseType) || null,
+      knowledgeBaseNotes: normalizeTextBlock(business.knowledgeBaseNotes || request.knowledgeBaseNotes) || null
     },
     policy: {
       allowAutoReply: normalizeBoolean(policy.allowAutoReply),
@@ -615,8 +907,33 @@ function extractConversationalSlots(text) {
   };
 }
 
+function conversationalIntentRequiresKnowledgeBase(profile, evaluation) {
+  const intentId = normalizeConversationalIntentId(evaluation?.intentId);
+  const mustUseKnowledgeBaseFor = normalizeStringArray(profile?.guardrails?.mustUseKnowledgeBaseFor).map((entry) => entry.toLowerCase());
+  if (intentId === 'pricing_question') return mustUseKnowledgeBaseFor.includes('pricing');
+  if (intentId === 'support_request') return true;
+  return false;
+}
+
+function conversationalGroundingSnippetForIntent(groundingContext, evaluation) {
+  const intentId = normalizeConversationalIntentId(evaluation?.intentId);
+  const snippets = Array.isArray(groundingContext?.snippets) ? groundingContext.snippets : [];
+  if (snippets.length === 0) return null;
+
+  const intentMatcher = intentId === 'pricing_question'
+    ? /\b(price|pricing|cost|quote|fee|package|starts at|per month|per week|\$)\b/i
+    : intentId === 'support_request'
+      ? /\b(issue|problem|error|support|reset|setup|install|troubleshoot|working|response time)\b/i
+      : intentId === 'book_or_schedule'
+        ? /\b(book|schedule|appointment|demo|consult|call|calendar|availability)\b/i
+        : null;
+
+  return snippets.find((snippet) => intentMatcher?.test(snippet.text || snippet.summary || '')) || snippets[0] || null;
+}
+
 function conversationalAiEvaluation(context, mutationRequest) {
   const profile = resolvedConversationalAiProjectProfile(context, mutationRequest);
+  const groundingContext = context?.runtime?.stepOutputs?.assemble_grounding_context?.data || resolvedConversationalAiGroundingContext(context, mutationRequest);
   const requestText = resolvedConversationalAiRequestText(context, mutationRequest) || '';
   const source = requestText.toLowerCase();
   const candidateIntent = /\b(?:human|person|someone|agent|representative|call me)\b/.test(source)
@@ -631,17 +948,20 @@ function conversationalAiEvaluation(context, mutationRequest) {
   const matchedIntent = (profile.intents || []).find((intent) => normalizeConversationalIntentId(intent.id) === normalizeConversationalIntentId(candidateIntent)) || null;
   const escalation = /\b(?:lawyer|attorney|sue|legal|refund|chargeback|fraud|angry|furious|complaint)\b/.test(source);
   const slots = extractConversationalSlots(requestText);
+  const groundedSnippet = conversationalGroundingSnippetForIntent(groundingContext, { intentId: candidateIntent });
 
   return {
     projectType: profile.project?.type || 'service_business',
     intent: candidateIntent,
     intentId: candidateIntent,
-    confidence: escalation ? 0.62 : (matchedIntent ? 0.88 : 0.74),
+    confidence: escalation ? 0.62 : (matchedIntent ? (groundedSnippet ? 0.92 : 0.86) : (groundedSnippet ? 0.8 : 0.74)),
     needsHuman: escalation || normalizeConversationalIntentId(candidateIntent) === 'human_handoff',
     needsReply: Boolean(requestText),
     replyMode: normalizeString(matchedIntent?.replyMode) || 'answer_then_clarify',
     slots,
     knowledgeBaseRef: profile.project?.knowledgeBaseRef || null,
+    groundingStatus: groundingContext?.groundingStatus || 'missing',
+    citations: Array.isArray(groundingContext?.snippets) ? groundingContext.snippets.map((snippet) => snippet.citation).filter(Boolean) : [],
     requestText,
     reasons: escalation ? ['high_risk_sentiment_or_topic'] : []
   };
@@ -651,17 +971,29 @@ function conversationalAiResponsePlan(context, mutationRequest) {
   const profile = resolvedConversationalAiProjectProfile(context, mutationRequest);
   const policy = resolvedConversationalAiPolicy(context, mutationRequest, profile);
   const evaluation = context?.runtime?.stepOutputs?.evaluate_conversation_turn?.data || conversationalAiEvaluation(context, mutationRequest);
-  const activeBusiness = activeBusinessDefaultsFromRecord(readActiveBusinessRecord(process.cwd()));
-  const businessName = normalizeString(profile.project?.name) || normalizeString(activeBusiness?.name) || 'this team';
-  const offerSummary = normalizeStringArray(activeBusiness?.offers).slice(0, 3).join(', ');
-  const hasKnowledgeBase = Boolean(profile.project?.knowledgeBaseRef);
+  const groundingContext = context?.runtime?.stepOutputs?.assemble_grounding_context?.data || resolvedConversationalAiGroundingContext(context, mutationRequest);
+  const businessName = normalizeString(groundingContext?.businessName) || normalizeString(profile.project?.name) || 'this team';
+  const offerSummary = normalizeStringArray(groundingContext?.businessContext?.offers).slice(0, 3).join(', ');
+  const groundedSnippet = conversationalGroundingSnippetForIntent(groundingContext, evaluation);
+  const groundedSummary = groundedSnippet?.summary || null;
+  const hasKnowledgeBase = Boolean(groundingContext?.knowledgeBase?.configured);
+  const hasGroundedSnippet = Boolean(groundedSummary);
+  const requiresKnowledgeBase = conversationalIntentRequiresKnowledgeBase(profile, evaluation);
   let message = null;
 
   if (evaluation.needsHuman) {
     message = normalizeString(profile.guardrails?.humanHandoffMessage)
       || `Absolutely, I can route this to a human from ${businessName}. What is the best detail to include so they can help quickly?`;
-  } else if (!hasKnowledgeBase && ['pricing_question', 'support_request'].includes(normalizeConversationalIntentId(evaluation.intentId))) {
+  } else if ((!hasKnowledgeBase || !hasGroundedSnippet) && requiresKnowledgeBase) {
     message = `I can help route this, but I should not answer specific ${normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question' ? 'pricing' : 'support'} details until the project knowledge base is configured. Do you want me to hand this to a human?`;
+  } else if (normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question' && groundedSummary) {
+    message = `Based on the current knowledge base, ${groundedSummary} What kind of scope are you looking at?`;
+  } else if (normalizeConversationalIntentId(evaluation.intentId) === 'support_request' && groundedSummary) {
+    message = `From the current knowledge base, ${groundedSummary} What exactly are you seeing on your side right now?`;
+  } else if (normalizeConversationalIntentId(evaluation.intentId) === 'book_or_schedule' && groundedSummary) {
+    message = `${groundedSummary} What kind of appointment or next step are you looking to schedule?`;
+  } else if (groundedSummary) {
+    message = `Based on the current project context, ${groundedSummary} What would you like to accomplish first?`;
   } else if (normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question') {
     message = `Thanks for reaching out. ${businessName} can help${offerSummary ? ` with ${offerSummary}` : ''}. Pricing depends on the scope and setup. What outcome are you trying to solve first?`;
   } else if (normalizeConversationalIntentId(evaluation.intentId) === 'book_or_schedule') {
@@ -693,7 +1025,9 @@ function conversationalAiResponsePlan(context, mutationRequest) {
     grounding: {
       businessName,
       projectProfileRef: normalizeString(mutationRequest?.project?.profileRef) || null,
-      knowledgeBaseRef: profile.project?.knowledgeBaseRef || null
+      knowledgeBaseRef: profile.project?.knowledgeBaseRef || groundingContext?.knowledgeBase?.ref || null,
+      groundingStatus: groundingContext?.groundingStatus || 'missing',
+      citations: Array.isArray(groundingContext?.snippets) ? groundingContext.snippets.map((snippet) => snippet.citation).filter(Boolean) : []
     },
     policy,
     shouldAutoReply: Boolean(policy.allowAutoReply && evaluation.needsReply && normalizeString(message)),
@@ -706,6 +1040,7 @@ function conversationalAiResponsePlan(context, mutationRequest) {
 function conversationalAiRunSummary(context, mutationRequest) {
   const evaluation = context?.runtime?.stepOutputs?.evaluate_conversation_turn?.data || null;
   const plan = context?.runtime?.stepOutputs?.plan_conversation_response?.data || null;
+  const groundingContext = context?.runtime?.stepOutputs?.assemble_grounding_context?.data || null;
   return {
     action: 'run_conversational_ai',
     projectType: evaluation?.projectType || resolvedConversationalAiProjectProfile(context, mutationRequest)?.project?.type || null,
@@ -713,7 +1048,9 @@ function conversationalAiRunSummary(context, mutationRequest) {
     shouldAutoReply: Boolean(plan?.shouldAutoReply),
     contactId: resolvedConversationContactId(context, mutationRequest),
     conversationId: resolvedConversationId(context, mutationRequest, { requireMatch: false }) || null,
-    knowledgeBaseRef: plan?.grounding?.knowledgeBaseRef || null
+    knowledgeBaseRef: plan?.grounding?.knowledgeBaseRef || groundingContext?.knowledgeBase?.ref || null,
+    groundingStatus: groundingContext?.groundingStatus || null,
+    citations: Array.isArray(plan?.grounding?.citations) ? plan.grounding.citations : []
   };
 }
 
@@ -5413,6 +5750,24 @@ function taskPackHandlers() {
             })
           },
           {
+            name: 'assemble_grounding_context',
+            kind: 'agent_turn',
+            safe: true,
+            mutation: false,
+            prompt: (runtimeContext) => ({
+              action: 'assemble_conversational_ai_grounding_context',
+              requestText: resolvedConversationalAiRequestText(runtimeContext, mutationRequest),
+              projectProfile: resolvedConversationalAiProjectProfile(runtimeContext, mutationRequest)
+            }),
+            run: (runtimeContext) => resolvedConversationalAiGroundingContext(runtimeContext, mutationRequest),
+            resumeData: (result) => result,
+            details: (runtimeContext) => ({
+              action: 'assemble_conversational_ai_grounding_context',
+              groundingStatus: resolvedConversationalAiGroundingContext(runtimeContext, mutationRequest)?.groundingStatus || 'missing',
+              knowledgeBaseRef: resolvedConversationalAiGroundingContext(runtimeContext, mutationRequest)?.knowledgeBase?.ref || null
+            })
+          },
+          {
             name: 'evaluate_conversation_turn',
             kind: 'agent_turn',
             safe: true,
@@ -5420,7 +5775,8 @@ function taskPackHandlers() {
             prompt: (runtimeContext) => ({
               action: 'evaluate_conversation_turn',
               requestText: resolvedConversationalAiRequestText(runtimeContext, mutationRequest),
-              projectProfile: resolvedConversationalAiProjectProfile(runtimeContext, mutationRequest)
+              projectProfile: resolvedConversationalAiProjectProfile(runtimeContext, mutationRequest),
+              groundingContext: runtimeContext?.runtime?.stepOutputs?.assemble_grounding_context?.data || null
             }),
             run: (runtimeContext) => conversationalAiEvaluation(runtimeContext, mutationRequest),
             resumeData: (result) => result,
@@ -5437,7 +5793,8 @@ function taskPackHandlers() {
             prompt: (runtimeContext) => ({
               action: 'plan_conversation_response',
               evaluation: runtimeContext?.runtime?.stepOutputs?.evaluate_conversation_turn?.data || null,
-              projectProfile: resolvedConversationalAiProjectProfile(runtimeContext, mutationRequest)
+              projectProfile: resolvedConversationalAiProjectProfile(runtimeContext, mutationRequest),
+              groundingContext: runtimeContext?.runtime?.stepOutputs?.assemble_grounding_context?.data || null
             }),
             run: (runtimeContext) => conversationalAiResponsePlan(runtimeContext, mutationRequest),
             resumeData: (result) => result,
