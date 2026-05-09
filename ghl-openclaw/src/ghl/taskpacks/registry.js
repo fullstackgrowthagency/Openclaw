@@ -30,6 +30,13 @@ function normalizePlainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : null;
 }
 
+function compactPlainObject(value) {
+  const normalized = normalizePlainObject(value);
+  if (!normalized) return null;
+  const entries = Object.entries(normalized).filter(([, entryValue]) => entryValue !== null && entryValue !== undefined);
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
 function normalizeNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim()) {
@@ -1464,31 +1471,260 @@ function normalizeSortOrder(value) {
   return normalized === 'asc' || normalized === 'desc' ? normalized : null;
 }
 
+function parseInlineJsonObject(value) {
+  const text = normalizeTextBlock(value);
+  if (!text || !/^[\[{]/.test(text)) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return normalizePlainObject(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function extractVoiceAiNaturalId(text, labels = [], naturalPatterns = []) {
+  const labeled = normalizeString(extractLabeledText(text, labels));
+  if (labeled) return labeled;
+  for (const pattern of naturalPatterns) {
+    const match = text?.match(pattern);
+    const value = normalizeString(match?.[1]);
+    if (value) return value;
+  }
+  return null;
+}
+
+function extractVoiceAiNaturalField(text, labels = [], naturalPatterns = []) {
+  const labeled = normalizeString(extractLabeledText(text, labels));
+  if (labeled) return labeled;
+  for (const pattern of naturalPatterns) {
+    const match = text?.match(pattern);
+    const value = normalizeString(match?.[1]);
+    if (value) return value;
+  }
+  return null;
+}
+
+function extractVoiceAiLimitFromText(text) {
+  const labeled = normalizeNumber(extractLabeledText(text, ['limit', 'count', 'max']));
+  if (Number.isInteger(labeled) && labeled > 0) return labeled;
+  const natural = text?.match(/\b(?:top|latest|last|recent)\s+(\d{1,2})\b/i)
+    || text?.match(/\b(\d{1,2})\s+(?:recent|latest)?\s*(?:voice\s*ai\s+)?call\s*logs?\b/i)
+    || text?.match(/\b(\d{1,2})\s+(?:voice\s*ai\s+)?agents\b/i);
+  const parsed = normalizeNumber(natural?.[1]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function looksLikeVoiceAiRequestText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return false;
+  return /\bvoice\s*ai\b/.test(source)
+    || /\bvoice\s+agent\b/.test(source)
+    || /\bcall\s*logs?\b/.test(source)
+    || /\bagent\s+action\b/.test(source)
+    || /\bvoice\s+action\b/.test(source);
+}
+
+function detectVoiceAiActionFromText(text, parsed = {}) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source || !looksLikeVoiceAiRequestText(source)) return null;
+  const mentionsAction = /\b(?:agent\s+action|voice\s+action|voice\s*ai\s+action|action)\b/.test(source);
+  const mentionsAgent = /\b(?:voice\s*ai\s+)?agent\b/.test(source);
+
+  if (/\b(?:delete|remove)\b/.test(source) && mentionsAction && parsed.actionId) return 'delete_voice_ai_action';
+  if (/\b(?:delete|remove)\b/.test(source) && mentionsAgent && !mentionsAction && parsed.agentId) return 'delete_voice_ai_agent';
+  if (/\b(?:update|edit|put)\b/.test(source) && mentionsAction && parsed.actionId && Object.keys(parsed.voiceAction || {}).length > 0) return 'update_voice_ai_action';
+  if (/\b(?:update|edit|patch)\b/.test(source) && mentionsAgent && !mentionsAction && parsed.agentId && Object.keys(parsed.patch || {}).length > 0) return 'update_voice_ai_agent';
+  if (/\b(?:create|add|new)\b/.test(source) && mentionsAction && Object.keys(parsed.voiceAction || {}).length > 0) return 'create_voice_ai_action';
+  if (/\b(?:create|add|new)\b/.test(source) && mentionsAgent && !mentionsAction && Object.keys(parsed.agent || {}).length > 0) return 'create_voice_ai_agent';
+  if (/\b(?:show|get|fetch|read)\b/.test(source) && /\bcall\s*log\b/.test(source) && parsed.callId) return 'get_voice_ai_call_log';
+  if ((/\b(?:list|show|get|fetch|read)\b/.test(source) || /\b(?:recent|latest)\b/.test(source)) && /\bcall\s*logs?\b/.test(source)) return 'list_voice_ai_call_logs';
+  if (/\b(?:show|get|fetch|read)\b/.test(source) && mentionsAction && parsed.actionId) return 'get_voice_ai_action';
+  if (/\b(?:show|get|fetch|read)\b/.test(source) && mentionsAgent && !mentionsAction && parsed.agentId) return 'get_voice_ai_agent';
+  if ((/\b(?:list|show|get|fetch|read)\b/.test(source) || /\b(?:recent|latest)\b/.test(source)) && /\b(?:voice\s*ai\s+)?agents\b/.test(source)) return 'list_voice_ai_agents';
+  return null;
+}
+
+function parseVoiceAiRequestText(value) {
+  const text = normalizeTextBlock(value);
+  if (!text) {
+    return {
+      sourceText: null,
+      action: null,
+      locationId: null,
+      agentId: null,
+      callId: null,
+      actionId: null,
+      contactId: null,
+      page: null,
+      limit: null,
+      timezone: null,
+      sortBy: null,
+      sortOrder: null,
+      callType: null,
+      actionTypes: [],
+      query: {},
+      agent: {},
+      patch: {},
+      voiceAction: {}
+    };
+  }
+
+  const source = text.toLowerCase();
+  const locationId = extractVoiceAiNaturalId(text, ['location id', 'location'], [
+    /\bin\s+location\s+([a-zA-Z0-9_-]+)\b/i
+  ]);
+  const agentId = extractVoiceAiNaturalId(text, ['agent id', 'voice ai agent id'], [
+    /\bfor\s+agent\s+([a-zA-Z0-9_-]+)\b/i,
+    /\bagent\s+([a-zA-Z0-9_-]{6,})\b/i
+  ]);
+  const actionId = extractVoiceAiNaturalId(text, ['action id', 'voice ai action id'], [
+    /\baction\s+([a-zA-Z0-9_-]{6,})\b/i
+  ]);
+  const callId = extractVoiceAiNaturalId(text, ['call id', 'call log id'], [
+    /\bcall\s+log\s+([a-zA-Z0-9_-]{6,})\b/i,
+    /\bcall\s+([a-zA-Z0-9_-]{6,})\b/i
+  ]);
+  const contactId = extractVoiceAiNaturalId(text, ['contact id'], []);
+  const page = normalizeNumber(extractLabeledText(text, ['page']));
+  const limit = extractVoiceAiLimitFromText(text);
+  const timezone = normalizeString(extractLabeledText(text, ['timezone', 'tz']));
+  const sortBy = normalizeString(extractLabeledText(text, ['sort by', 'sort']));
+  const sortOrder = normalizeSortOrder(extractLabeledText(text, ['sort order', 'order']));
+  const callType = normalizeString(extractLabeledText(text, ['call type']));
+  const actionTypes = normalizeStringArray(extractLabeledText(text, ['action types', 'action type ids']));
+  const query = parseInlineJsonObject(extractLabeledText(text, ['query', 'filters'])) || {};
+
+  const naturalAgentName = extractVoiceAiNaturalField(text, ['agent name', 'name'], [
+    /\b(?:create|add|new)\b[\s\S]*?\bvoice\s*ai\s+agent\b(?:\s+(?:named|called))?\s+["“]?([^"”\n]+?)["”]?(?=\s+\b(?:with|prompt|description|in|for)\b|$)/i,
+    /\bname\s+(?:to|=)\s*["“]?([^"”\n]+?)["”]?(?=\s+\b(?:with|and|prompt|description|for|in)\b|$)/i
+  ]);
+  const naturalPrompt = extractVoiceAiNaturalField(text, ['prompt', 'system prompt'], [
+    /\bprompt\s*(?:to|=|:)?\s*["“]([^"”]+)["”]/i,
+    /\bwith\s+prompt\s+["“]?([^"”\n]+)["”]?$/i
+  ]);
+  const naturalAgentDescription = extractVoiceAiNaturalField(text, ['agent description', 'description'], [
+    /\bdescription\s*(?:to|=|:)?\s*["“]([^"”]+)["”]/i
+  ]);
+  const inlineAgent = parseInlineJsonObject(extractLabeledText(text, ['agent', 'body']));
+  const agentFields = compactPlainObject({
+    name: naturalAgentName,
+    prompt: naturalPrompt,
+    description: naturalAgentDescription
+  }) || {};
+  const agent = {
+    ...(inlineAgent || {}),
+    ...agentFields
+  };
+
+  const naturalActionName = extractVoiceAiNaturalField(text, ['action name', 'name'], [
+    /\b(?:create|add|new)\b[\s\S]*?\b(?:agent\s+action|voice\s+action|voice\s*ai\s+action|action)\b(?:\s+(?:named|called))?\s+["“]?([^"”\n]+?)["”]?(?=\s+\b(?:for|with|description|type|url|method)\b|$)/i,
+    /\bname\s+(?:to|=)\s*["“]?([^"”\n]+?)["”]?(?=\s+\b(?:for|with|and|description|type|url|method)\b|$)/i
+  ]);
+  const naturalActionDescription = extractVoiceAiNaturalField(text, ['action description', 'description'], [
+    /\bdescription\s*(?:to|=|:)?\s*["“]([^"”]+)["”]/i
+  ]);
+  const naturalActionType = extractVoiceAiNaturalField(text, ['action type', 'type'], []);
+  const naturalActionUrl = extractVoiceAiNaturalField(text, ['url', 'endpoint', 'webhook url'], []);
+  const naturalActionMethod = extractVoiceAiNaturalField(text, ['method', 'http method'], []);
+  const inlineVoiceAction = parseInlineJsonObject(extractLabeledText(text, ['voice action', 'action body', 'action', 'body']));
+  const voiceActionFields = compactPlainObject({
+    agentId,
+    name: naturalActionName,
+    description: naturalActionDescription,
+    type: naturalActionType,
+    url: naturalActionUrl,
+    method: naturalActionMethod
+  }) || {};
+  const voiceAction = {
+    ...(inlineVoiceAction || {}),
+    ...voiceActionFields
+  };
+
+  const patch = /\b(?:update|edit|patch)\b/.test(source)
+    ? {
+      ...(inlineAgent || {}),
+      ...(compactPlainObject({
+        name: naturalAgentName,
+        prompt: naturalPrompt,
+        description: naturalAgentDescription
+      }) || {})
+    }
+    : {};
+
+  const parsed = {
+    sourceText: text,
+    action: null,
+    locationId,
+    agentId,
+    callId,
+    actionId,
+    contactId,
+    page: Number.isInteger(page) && page > 0 ? page : null,
+    limit,
+    timezone,
+    sortBy,
+    sortOrder,
+    callType,
+    actionTypes,
+    query,
+    agent,
+    patch,
+    voiceAction
+  };
+
+  parsed.action = detectVoiceAiActionFromText(text, parsed);
+  if (parsed.action === 'update_voice_ai_action' && Object.keys(parsed.voiceAction || {}).length === 0) {
+    parsed.voiceAction = inlineVoiceAction || {};
+  }
+  return parsed;
+}
+
+function normalizeVoiceAiAgentBody(value) {
+  const body = compactPlainObject(value) || {};
+  if (!Object.keys(body).length) return {};
+  const normalized = { ...body };
+  if (!normalized.agentName && normalized.name) normalized.agentName = normalized.name;
+  if (!normalized.agentPrompt && normalized.prompt) normalized.agentPrompt = normalized.prompt;
+  delete normalized.name;
+  delete normalized.prompt;
+  return normalized;
+}
+
 function voiceAiMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
-  const action = normalizeVoiceAiAction(request.action);
+  const plainTextRequest = normalizeTextBlock(
+    request.requestText
+    || request.brief
+    || request.description
+    || request.text
+    || request.instructions
+    || request.prompt
+    || request.message
+  );
+  const parsedRequest = parseVoiceAiRequestText(plainTextRequest);
+  const action = normalizeVoiceAiAction(request.action) || parsedRequest.action;
   const body = normalizePlainObject(request.body);
   return {
     action,
-    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
-    agentId: normalizeString(request.agentId),
-    callId: normalizeString(request.callId),
-    actionId: normalizeString(request.actionId),
-    contactId: normalizeString(request.contactId),
-    page: normalizeNumber(request.page),
-    limit: normalizeNumber(request.limit ?? request.count),
-    timezone: normalizeString(request.timezone),
-    sortBy: normalizeString(request.sortBy),
-    sortOrder: normalizeSortOrder(request.sortOrder || request.order),
-    callType: normalizeString(request.callType),
-    actionTypes: normalizeStringArray(request.actionTypes || request.actionTypeIds),
-    startDate: normalizeString(request.startDate),
-    endDate: normalizeString(request.endDate),
-    query: normalizePlainObject(request.query) || normalizePlainObject(request.filters) || {},
-    agent: normalizePlainObject(request.agent) || (action === 'create_voice_ai_agent' ? body : null) || {},
-    patch: normalizePlainObject(request.patch) || normalizePlainObject(request.agentPatch) || (action === 'update_voice_ai_agent' ? body : null) || {},
-    voiceAction: normalizePlainObject(request.voiceAction) || normalizePlainObject(request.actionBody) || normalizePlainObject(request.agentAction) || ((action === 'create_voice_ai_action' || action === 'update_voice_ai_action') ? body : null) || {},
+    locationId: request.locationId || parsedRequest.locationId || event?.locationId || event?.payload?.locationId || null,
+    agentId: normalizeString(request.agentId) || parsedRequest.agentId,
+    callId: normalizeString(request.callId) || parsedRequest.callId,
+    actionId: normalizeString(request.actionId) || parsedRequest.actionId,
+    contactId: normalizeString(request.contactId) || parsedRequest.contactId,
+    page: normalizeNumber(request.page) || parsedRequest.page,
+    limit: normalizeNumber(request.limit ?? request.count) || parsedRequest.limit,
+    timezone: normalizeString(request.timezone) || parsedRequest.timezone,
+    sortBy: normalizeString(request.sortBy) || parsedRequest.sortBy,
+    sortOrder: normalizeSortOrder(request.sortOrder || request.order) || parsedRequest.sortOrder,
+    callType: normalizeString(request.callType) || parsedRequest.callType,
+    actionTypes: normalizeStringArray(request.actionTypes || request.actionTypeIds) || parsedRequest.actionTypes,
+    startDate: normalizeString(request.startDate) || normalizeString(extractLabeledText(plainTextRequest, ['start date'])) || null,
+    endDate: normalizeString(request.endDate) || normalizeString(extractLabeledText(plainTextRequest, ['end date'])) || null,
+    query: normalizePlainObject(request.query) || normalizePlainObject(request.filters) || parsedRequest.query || {},
+    agent: normalizeVoiceAiAgentBody(normalizePlainObject(request.agent) || (action === 'create_voice_ai_agent' ? body : null) || parsedRequest.agent || {}),
+    patch: normalizeVoiceAiAgentBody(normalizePlainObject(request.patch) || normalizePlainObject(request.agentPatch) || (action === 'update_voice_ai_agent' ? body : null) || parsedRequest.patch || {}),
+    voiceAction: normalizePlainObject(request.voiceAction) || normalizePlainObject(request.actionBody) || normalizePlainObject(request.agentAction) || ((action === 'create_voice_ai_action' || action === 'update_voice_ai_action') ? body : null) || parsedRequest.voiceAction || {},
     deleteOptions: normalizePlainObject(request.deleteOptions) || normalizePlainObject(request.options) || {}
   };
 }
@@ -7415,15 +7651,20 @@ function taskPackHandlers() {
           ...(mutationRequest?.endDate ? { endDate: mutationRequest.endDate } : {}),
           ...(mutationRequest?.timezone ? { timezone: mutationRequest.timezone } : {}),
           ...(mutationRequest?.sortBy ? { sortBy: mutationRequest.sortBy } : {}),
-          ...(mutationRequest?.sortOrder ? { sortOrder: mutationRequest.sortOrder } : {}),
-          ...(mutationRequest?.page ? { page: mutationRequest.page } : {}),
-          ...(mutationRequest?.limit ? { limit: mutationRequest.limit } : {})
+          ...(mutationRequest?.sortOrder ? { sortOrder: mutationRequest.sortOrder } : {})
         };
         const agentQuery = {
           ...normalizePlainObject(mutationRequest?.query),
           ...(mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {}),
           ...(mutationRequest?.page ? { page: mutationRequest.page } : {}),
           ...(mutationRequest?.limit ? { limit: mutationRequest.limit } : {})
+        };
+        const singleVoiceAiEntityQuery = mutationRequest?.locationId ? { locationId: mutationRequest.locationId } : {};
+        const voiceAiActionQuery = {
+          ...singleVoiceAiEntityQuery,
+          ...(mutationRequest?.agentId ? { agentId: mutationRequest.agentId } : {}),
+          ...(mutationRequest?.voiceAction?.agentId ? { agentId: mutationRequest.voiceAction.agentId } : {}),
+          ...(mutationRequest?.deleteOptions?.agentId ? { agentId: mutationRequest.deleteOptions.agentId } : {})
         };
         const explicitListCallLogs = mutationRequest?.action === 'list_voice_ai_call_logs';
         const explicitGetCallLog = mutationRequest?.action === 'get_voice_ai_call_log' && Boolean(mutationRequest?.callId);
@@ -7462,7 +7703,7 @@ function taskPackHandlers() {
             adapter: 'VoiceAiAdapter',
             method: 'getCallLog',
             pathHint: '/voice-ai/dashboard/call-logs/:callId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.callId],
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.callId, singleVoiceAiEntityQuery],
             safe: true,
             mutation: false,
             requiresCredential: true,
@@ -7494,7 +7735,7 @@ function taskPackHandlers() {
             adapter: 'VoiceAiAdapter',
             method: 'getAgent',
             pathHint: '/voice-ai/agents/:agentId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agentId],
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agentId, singleVoiceAiEntityQuery],
             safe: true,
             mutation: false,
             requiresCredential: true,
@@ -7511,7 +7752,10 @@ function taskPackHandlers() {
             method: 'createAgent',
             httpMethod: 'POST',
             pathHint: '/voice-ai/agents',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agent],
+            args: () => [context.credentialRef || defaultLocationCredential(context), {
+              ...(mutationRequest.agent || {}),
+              ...(mutationRequest?.locationId && !mutationRequest?.agent?.locationId ? { locationId: mutationRequest.locationId } : {})
+            }],
             safe: false,
             mutation: true,
             requiresApproval: true,
@@ -7519,7 +7763,7 @@ function taskPackHandlers() {
             details: {
               action: 'create_voice_ai_agent',
               locationId: mutationRequest?.locationId || context.event.locationId || null,
-              name: mutationRequest?.agent?.name || null
+              name: mutationRequest?.agent?.agentName || mutationRequest?.agent?.name || null
             },
             skipIf: () => !explicitCreateAgent
           },
@@ -7530,7 +7774,7 @@ function taskPackHandlers() {
             method: 'updateAgent',
             httpMethod: 'PATCH',
             pathHint: '/voice-ai/agents/:agentId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agentId, mutationRequest.patch],
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agentId, mutationRequest.patch, singleVoiceAiEntityQuery],
             safe: false,
             mutation: true,
             requiresApproval: true,
@@ -7549,7 +7793,7 @@ function taskPackHandlers() {
             method: 'deleteAgent',
             httpMethod: 'DELETE',
             pathHint: '/voice-ai/agents/:agentId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agentId],
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.agentId, singleVoiceAiEntityQuery],
             safe: false,
             mutation: true,
             requiresApproval: true,
@@ -7567,7 +7811,7 @@ function taskPackHandlers() {
             adapter: 'VoiceAiAdapter',
             method: 'getAction',
             pathHint: '/voice-ai/actions/:actionId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.actionId],
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.actionId, voiceAiActionQuery],
             safe: true,
             mutation: false,
             requiresCredential: true,
@@ -7584,7 +7828,7 @@ function taskPackHandlers() {
             method: 'createAction',
             httpMethod: 'POST',
             pathHint: '/voice-ai/actions',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.voiceAction],
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.voiceAction, voiceAiActionQuery],
             safe: false,
             mutation: true,
             requiresApproval: true,
@@ -7601,9 +7845,9 @@ function taskPackHandlers() {
             kind: 'adapter_call',
             adapter: 'VoiceAiAdapter',
             method: 'updateAction',
-            httpMethod: 'PATCH',
+            httpMethod: 'PUT',
             pathHint: '/voice-ai/actions/:actionId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.actionId, mutationRequest.voiceAction],
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.actionId, mutationRequest.voiceAction, voiceAiActionQuery],
             safe: false,
             mutation: true,
             requiresApproval: true,
@@ -7622,7 +7866,7 @@ function taskPackHandlers() {
             method: 'deleteAction',
             httpMethod: 'DELETE',
             pathHint: '/voice-ai/actions/:actionId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.actionId],
+            args: () => [context.credentialRef || defaultLocationCredential(context), mutationRequest.actionId, voiceAiActionQuery],
             safe: false,
             mutation: true,
             requiresApproval: true,

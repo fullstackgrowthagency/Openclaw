@@ -370,7 +370,7 @@ export const VERIFIED_ENDPOINT_SEEDS = [
   ['voice_ai', 'DELETE', '/voice-ai/agents/:agentId', 'location', 'voice-ai-agents.write'],
   ['voice_ai', 'POST', '/voice-ai/actions', 'location', 'voice-ai-actions.write'],
   ['voice_ai', 'GET', '/voice-ai/actions/:actionId', 'location', 'voice-ai-actions.readonly'],
-  ['voice_ai', 'PATCH', '/voice-ai/actions/:actionId', 'location', 'voice-ai-actions.write'],
+  ['voice_ai', 'PUT', '/voice-ai/actions/:actionId', 'location', 'voice-ai-actions.write'],
   ['voice_ai', 'DELETE', '/voice-ai/actions/:actionId', 'location', 'voice-ai-actions.write'],
   ['workflows', 'GET', '/workflows/', 'location', 'workflows.readonly'],
   ['oauth', 'POST', '/oauth/locationToken', 'agency', 'oauth.*'],
