@@ -378,7 +378,7 @@ async function renderPreviewPng(htmlPath, pngPath) {
 export async function generateFacebookAdPreview({ locationId, campaignId, adsetId, adId, campaign, adset, ad, sourcePost, outputDir } = {}) {
   const model = buildPreviewModel({ locationId, campaignId, adsetId, adId, campaign, adset, ad, sourcePost });
   const html = renderHtml(model);
-  const baseDir = outputDir || path.join(process.cwd(), 'data', 'generated', 'previews');
+  const baseDir = path.resolve(outputDir || path.join(process.cwd(), 'data', 'generated', 'previews'));
   const fileBase = `${toSlug(model.campaignName || model.adName || model.headline)}-${model.adId || 'draft'}`;
   const htmlPath = path.join(baseDir, `${fileBase}.html`);
   const jsonPath = path.join(baseDir, `${fileBase}.json`);

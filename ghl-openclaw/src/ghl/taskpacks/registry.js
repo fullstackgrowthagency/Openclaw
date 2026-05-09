@@ -805,6 +805,15 @@ function concisePromotionHeadline(sourcePost) {
   const summary = normalizeString(sourcePostSummary(sourcePost))?.toLowerCase() || '';
   const theme = cleanedPromotionPhrase(sourcePostTheme(sourcePost), 28);
   const candidates = [
+    /systems finally talk to each other|operations get lighter|internal handoffs/.test(summary)
+      ? 'Get your systems in sync'
+      : null,
+    /operations are easier to trust|easier to trust/.test(summary)
+      ? 'Build operations you can trust'
+      : null,
+    /faster decisions|less friction/.test(summary)
+      ? 'Cut friction across operations'
+      : null,
     /click to client|clear growth decisions|scattered activity|better tracking|better offers/.test(summary)
       ? 'Turn clicks into clients'
       : null,
@@ -870,6 +879,18 @@ function concisePromotionDescription(sourcePost) {
   const summary = normalizeString(sourcePostSummary(sourcePost))?.toLowerCase() || '';
   const theme = cleanedPromotionPhrase(sourcePostTheme(sourcePost), 32);
   const candidates = [
+    /simplify follow-up,? reporting,? and internal handoffs/.test(summary)
+      ? 'Simplify follow-up, reporting, and internal handoffs.'
+      : null,
+    /consulting,? follow-up,? delivery,? and reporting are aligned/.test(summary)
+      ? 'Align consulting, follow-up, delivery, and reporting.'
+      : null,
+    /faster decisions|less friction/.test(summary)
+      ? 'Help leaders decide faster and teams move with less friction.'
+      : null,
+    /strengthen operations|automation systems that support cleaner growth/.test(summary)
+      ? 'Strengthen operations with automation systems built for cleaner growth.'
+      : null,
     /tracking|clear growth decisions|click to client|better offers/.test(summary)
       ? 'Improve tracking, offers, and the path from click to client.'
       : null,
