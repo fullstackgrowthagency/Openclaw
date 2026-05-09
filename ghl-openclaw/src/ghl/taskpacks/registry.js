@@ -236,8 +236,58 @@ function socialPostMutationRequestFrom(event) {
   };
 }
 
+function socialCalendarMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+
+  const business = normalizePlainObject(request.business || request.businessProfile || request.profile) || {};
+  const calendar = normalizePlainObject(request.calendar || request.plan) || {};
+
+  return {
+    action: request.action || null,
+    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
+    accountIds: normalizeStringArray(request.accountIds || calendar.accountIds),
+    status: normalizeString(request.status) || normalizeString(calendar.status) || 'draft',
+    creativeStyles: normalizeStringArray(request.creativeStyles || calendar.creativeStyles),
+    postDefaults: normalizePlainObject(request.postDefaults || calendar.postDefaults) || {},
+    business: {
+      name: normalizeString(request.businessName)
+        || normalizeString(business.name)
+        || normalizeString(business.businessName)
+        || null,
+      industry: normalizeString(request.industry)
+        || normalizeString(business.industry)
+        || normalizeString(business.category)
+        || null,
+      audience: normalizeStringArray(request.audience || business.audience || business.audiences),
+      offers: normalizeStringArray(request.offers || request.services || business.offers || business.services || business.solutions),
+      differentiators: normalizeStringArray(request.differentiators || business.differentiators || business.strengths || business.advantages),
+      goals: normalizeStringArray(request.goals || business.goals || business.outcomes),
+      ctas: normalizeStringArray(request.ctas || business.ctas || business.callsToAction),
+      hashtags: normalizeStringArray(request.hashtags || business.hashtags),
+      knowledgeBaseRef: normalizeString(request.knowledgeBaseRef)
+        || normalizeString(request.knowledgeBaseId)
+        || normalizeString(business.knowledgeBaseRef)
+        || normalizeString(business.knowledgeBaseId)
+        || null
+    },
+    calendar: {
+      postCount: normalizeNumber(calendar.postCount || request.postCount),
+      cadenceDays: normalizeNumber(calendar.cadenceDays || request.cadenceDays),
+      startDate: normalizeString(calendar.startDate) || normalizeString(request.startDate) || null,
+      timezone: normalizeString(calendar.timezone) || normalizeString(request.timezone) || null,
+      scheduledHourUtc: normalizeNumber(calendar.scheduledHourUtc || request.scheduledHourUtc),
+      scheduledMinuteUtc: normalizeNumber(calendar.scheduledMinuteUtc || request.scheduledMinuteUtc)
+    }
+  };
+}
+
 function isBulkSocialPostAction(action) {
   return ['create_social_posts_bulk', 'bulk_create_social_posts', 'create_social_post_batch'].includes(action);
+}
+
+function isGenerateSocialCalendarAction(action) {
+  return ['generate_social_calendar', 'plan_social_calendar', 'create_social_calendar_plan'].includes(action);
 }
 
 function facebookAdMutationRequestFrom(event) {
@@ -365,6 +415,26 @@ function socialPostCreateResumeData(liveResult, context) {
       scheduleDate: mutationRequest?.scheduleDate || null,
       summary: mutationRequest?.summary || null
     },
+    raw: data
+  };
+}
+
+function socialCalendarGenerateResumeData(liveResult, context) {
+  const data = liveResult?.data || null;
+  const mutationRequest = socialCalendarMutationRequestFrom(context?.event);
+  return {
+    calendar: data && typeof data === 'object'
+      ? {
+          generatedAt: data.generatedAt || null,
+          postCount: Array.isArray(data.posts) ? data.posts.length : 0,
+          businessName: data?.business?.name || mutationRequest?.business?.name || null,
+          industry: data?.business?.industry || mutationRequest?.business?.industry || null,
+          knowledgeBaseMode: data?.knowledgeBaseMode || null,
+          creativeStyles: Array.isArray(data?.calendar?.creativeStyles) ? data.calendar.creativeStyles : mutationRequest?.creativeStyles || [],
+          firstScheduleDate: Array.isArray(data?.posts) && data.posts[0] ? data.posts[0].scheduleDate || null : null,
+          lastScheduleDate: Array.isArray(data?.posts) && data.posts.length > 0 ? data.posts[data.posts.length - 1].scheduleDate || null : null
+        }
+      : null,
     raw: data
   };
 }
@@ -3376,9 +3446,11 @@ function taskPackHandlers() {
       trigger_events: ['SocialPostCreate', 'ManualRun'],
       buildExecutionPlan(context) {
         const mutationRequest = socialPostMutationRequestFrom(context.event);
+        const socialCalendarRequest = socialCalendarMutationRequestFrom(context.event);
         const locationId = resolvedSocialPostLocationId(context, mutationRequest);
         const explicitCreateSocialPost = mutationRequest?.action === 'create_social_post';
         const explicitCreateSocialPostsBulk = isBulkSocialPostAction(mutationRequest?.action);
+        const explicitGenerateSocialCalendar = isGenerateSocialCalendarAction(socialCalendarRequest?.action);
         return [
           {
             name: 'refresh_social_accounts',
@@ -3395,7 +3467,30 @@ function taskPackHandlers() {
               action: 'list_social_accounts',
               locationId
             },
-            skipIf: () => !locationId
+            skipIf: () => !locationId || explicitGenerateSocialCalendar
+          },
+          {
+            name: 'generate_social_calendar',
+            kind: 'adapter_call',
+            adapter: 'SocialPlannerAdapter',
+            method: 'generateCalendarPlan',
+            pathHint: 'local://generated/social-calendar',
+            args: () => [null, socialCalendarRequest],
+            safe: true,
+            mutation: false,
+            requiresCredential: false,
+            resumeData: socialCalendarGenerateResumeData,
+            details: {
+              action: 'generate_social_calendar',
+              locationId: socialCalendarRequest?.locationId || null,
+              businessName: socialCalendarRequest?.business?.name || null,
+              industry: socialCalendarRequest?.business?.industry || null,
+              postCount: socialCalendarRequest?.calendar?.postCount || null,
+              cadenceDays: socialCalendarRequest?.calendar?.cadenceDays || null,
+              knowledgeBaseRef: socialCalendarRequest?.business?.knowledgeBaseRef || null,
+              creativeStyles: socialCalendarRequest?.creativeStyles || []
+            },
+            skipIf: () => !explicitGenerateSocialCalendar
           },
           {
             name: 'create_social_post',

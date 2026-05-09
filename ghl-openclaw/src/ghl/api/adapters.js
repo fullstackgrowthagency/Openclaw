@@ -2,6 +2,7 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { GhlApiClient } from './client.js';
 import { generateSocialPostCreative } from '../previews/social-post-creative.js';
+import { generateSocialCalendarPlan } from '../planning/social-calendar.js';
 
 function uniqueStrings(values = []) {
   const seen = new Set();
@@ -577,6 +578,14 @@ export class SocialPlannerAdapter {
 
   listAccounts(credentialRef, locationId, query = {}) {
     return this.client.request({ credentialRef, method: 'GET', path: `/social-media-posting/${locationId}/accounts`, query });
+  }
+
+  generateCalendarPlan(_credentialRef, request = {}) {
+    return {
+      ok: true,
+      status: 200,
+      data: generateSocialCalendarPlan(request)
+    };
   }
 
   getPost(credentialRef, locationId, postId, query = {}) {
