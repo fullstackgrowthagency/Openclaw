@@ -134,6 +134,8 @@ export function buildApprovalChatPrompt(approval, nowIso = new Date().toISOStrin
   ];
 
   const fieldOrder = [
+    ['businessName', 'Business'],
+    ['summaryPreview', 'Summary'],
     ['contactName', 'Contact'],
     ['contactId', 'Contact ID'],
     ['conversationId', 'Conversation ID'],
@@ -148,9 +150,16 @@ export function buildApprovalChatPrompt(approval, nowIso = new Date().toISOStrin
     ['toNumber', 'To number'],
     ['followers', 'Followers'],
     ['tags', 'Tags'],
+    ['count', 'Count'],
+    ['variantCount', 'Variant count'],
+    ['selectedVariantIndex', 'Selected variant'],
+    ['selectedVariantStyle', 'Selected style'],
+    ['creativeStyles', 'Creative styles'],
+    ['variantOptions', 'Variant options'],
     ['name', 'Name'],
     ['website', 'Website'],
-    ['messagePreview', 'Preview']
+    ['messagePreview', 'Preview'],
+    ['selectionHint', 'Selection']
   ];
 
   for (const [key, label] of fieldOrder) {
@@ -165,6 +174,9 @@ export function buildApprovalChatPrompt(approval, nowIso = new Date().toISOStrin
   }
 
   lines.push(`Reply with approve ${enriched.id} or reject ${enriched.id}.`);
+  if (planned.selectionHint) {
+    lines.push(`Optional note example: approve ${enriched.id} --note="variant 2"`);
+  }
 
   return {
     id: enriched.id,

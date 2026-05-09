@@ -235,6 +235,11 @@ export class TaskPackExecutor {
           resolvedApproval = approval;
         }
 
+        if (resolvedApproval) {
+          runtime.approvals = runtime.approvals || {};
+          runtime.approvals[step.name] = approvalSnapshot(resolvedApproval);
+        }
+
         if (step.kind === 'intent') {
           await this.runStore.setStep(run.id, index, stepResult(step, 'planned', {
             details: typeof step.details === 'function' ? step.details(context) : (step.details || null),

@@ -1091,12 +1091,127 @@ function socialAccountResumeData(liveResult) {
   };
 }
 
+function socialPostRequestedVariantCount(mutationRequest) {
+  return normalizeVariantCount(
+    mutationRequest?.variantCount
+    || (Array.isArray(mutationRequest?.creativeStyles) && mutationRequest.creativeStyles.length > 0 ? mutationRequest.creativeStyles.length : null)
+    || 1,
+    4
+  ) || 1;
+}
+
+function shouldGenerateSocialPostVariants(mutationRequest) {
+  const hasExistingMedia = Array.isArray(mutationRequest?.post?.media) && mutationRequest.post.media.length > 0;
+  if (hasExistingMedia) return false;
+  if (socialPostRequestedVariantCount(mutationRequest) > 1) return true;
+  return Array.isArray(mutationRequest?.creativeStyles) && mutationRequest.creativeStyles.length > 1;
+}
+
+function socialPostVariantSetFromContext(context) {
+  return normalizePlainObject(context?.runtime?.stepOutputs?.generate_social_post_variants?.data?.openClaw?.creative)
+    || normalizePlainObject(context?.runtime?.stepOutputs?.generate_social_post_variants?.data?.creative)
+    || null;
+}
+
+function parseSocialPostVariantSelection(note, variants = []) {
+  const list = Array.isArray(variants) ? variants : [];
+  if (list.length === 0) return { index: 0, variant: null, via: 'none' };
+
+  const source = normalizeString(note)?.toLowerCase();
+  if (!source) return { index: 0, variant: list[0], via: 'default' };
+
+  const indexedMatch = source.match(/\b(?:variant|option|style)\s*(\d+)\b/) || source.match(/^\s*(\d+)\s*$/);
+  const indexed = normalizeNumber(indexedMatch?.[1]);
+  if (Number.isInteger(indexed) && indexed >= 1 && indexed <= list.length) {
+    return { index: indexed - 1, variant: list[indexed - 1], via: 'index' };
+  }
+
+  const styleIndex = list.findIndex((variant) => {
+    const styleId = normalizeString(variant?.model?.styleId || variant?.styleId)?.toLowerCase();
+    const styleLabel = normalizeString(variant?.model?.styleLabel || variant?.styleLabel)?.toLowerCase();
+    return (styleId && source.includes(styleId)) || (styleLabel && source.includes(styleLabel));
+  });
+  if (styleIndex >= 0) {
+    return { index: styleIndex, variant: list[styleIndex], via: 'style' };
+  }
+
+  return { index: 0, variant: list[0], via: 'default' };
+}
+
+function selectedSocialPostVariantFromContext(context) {
+  const creative = socialPostVariantSetFromContext(context);
+  const variants = Array.isArray(creative?.variants) ? creative.variants : [];
+  const approvalNote = context?.runtime?.approvals?.create_social_post?.note || null;
+  const selection = parseSocialPostVariantSelection(approvalNote, variants);
+  return {
+    ...selection,
+    note: approvalNote,
+    variants
+  };
+}
+
+function socialPostVariantGenerateResumeData(liveResult, context) {
+  const data = liveResult?.data || null;
+  const mutationRequest = socialPostMutationRequestFrom(context?.event);
+  const creative = normalizePlainObject(data?.openClaw?.creative) || {};
+  const variants = Array.isArray(creative.variants) ? creative.variants : [];
+
+  return {
+    requested: {
+      locationId: mutationRequest?.locationId || null,
+      summary: mutationRequest?.summary || null,
+      businessName: mutationRequest?.businessName || null,
+      creativeStyles: mutationRequest?.creativeStyles || [],
+      variantCount: socialPostRequestedVariantCount(mutationRequest)
+    },
+    creative: {
+      variantCount: variants.length,
+      variantStyles: variants.map((variant) => variant?.model?.styleId || variant?.styleId || null).filter(Boolean),
+      variants: variants.map((variant, index) => ({
+        index: index + 1,
+        styleId: variant?.model?.styleId || null,
+        styleLabel: variant?.model?.styleLabel || null,
+        headline: variant?.model?.headline || null,
+        pngPath: variant?.pngPath || null
+      }))
+    },
+    raw: data
+  };
+}
+
+function socialPostCreateDetails(context, mutationRequest) {
+  const variantSet = socialPostVariantSetFromContext(context);
+  const variants = Array.isArray(variantSet?.variants) ? variantSet.variants : [];
+  const selection = selectedSocialPostVariantFromContext(context);
+
+  return {
+    action: 'create_social_post',
+    locationId: mutationRequest?.locationId || null,
+    accountIds: mutationRequest?.accountIds || [],
+    status: mutationRequest?.status || null,
+    scheduleDate: mutationRequest?.scheduleDate || null,
+    businessName: mutationRequest?.businessName || null,
+    summaryPreview: mutationRequest?.summary ? mutationRequest.summary.slice(0, 160) : null,
+    autoGenerateCreative: !Array.isArray(mutationRequest?.post?.media) || mutationRequest.post.media.length === 0,
+    creativeStyles: mutationRequest?.creativeStyles || [],
+    variantCount: socialPostRequestedVariantCount(mutationRequest),
+    selectedVariantIndex: selection?.note && selection?.variant ? selection.index + 1 : null,
+    selectedVariantStyle: selection?.note ? (selection?.variant?.model?.styleId || selection?.variant?.styleId || null) : null,
+    selectedVia: selection?.note ? selection?.via || null : null,
+    variantOptions: variants.map((variant, index) => `${index + 1}. ${variant?.model?.styleLabel || variant?.styleLabel || variant?.model?.styleId || variant?.styleId || 'variant'}${(variant?.pngPath || null) ? ` (${variant.pngPath})` : ''}`),
+    selectionHint: variants.length > 1
+      ? 'Approve with a note like "variant 2" or a style name such as "editorial" to choose the creative.'
+      : null
+  };
+}
+
 function socialPostCreateResumeData(liveResult, context) {
   const data = liveResult?.data || null;
   const rawPost = data?.results?.post || data?.post || null;
   const mutationRequest = socialPostMutationRequestFrom(context?.event);
   const creative = normalizePlainObject(data?.openClaw?.creative) || {};
   const variants = Array.isArray(creative.variants) ? creative.variants : [];
+  const selection = selectedSocialPostVariantFromContext(context);
   return {
     post: (rawPost && typeof rawPost === 'object') || (data && typeof data === 'object')
       ? {
@@ -1119,7 +1234,10 @@ function socialPostCreateResumeData(liveResult, context) {
     creative: {
       uploadedMedia: Array.isArray(creative.media) ? creative.media : [],
       variantCount: variants.length,
-      variantStyles: variants.map((variant) => variant?.model?.styleId || null).filter(Boolean)
+      variantStyles: variants.map((variant) => variant?.model?.styleId || variant?.styleId || null).filter(Boolean),
+      selectedVariantIndex: selection?.variant ? selection.index + 1 : null,
+      selectedVariantStyle: selection?.variant?.model?.styleId || selection?.variant?.styleId || null,
+      selectionNote: selection?.note || null
     },
     raw: data
   };
@@ -4529,18 +4647,16 @@ function taskPackHandlers() {
             skipIf: () => !shouldRunSocialCalendarFlow
           },
           {
-            name: 'create_social_post',
+            name: 'generate_social_post_variants',
             kind: 'adapter_call',
             adapter: 'SocialPlannerAdapter',
-            method: 'createPostWithCreative',
-            httpMethod: 'POST',
-            pathHint: '/social-media-posting/:locationId/posts',
+            method: 'generateCreativeVariants',
+            pathHint: 'local://generated/social-post-creative-variants',
             args: () => [
-              context.credentialRef || defaultLocationCredential(context),
+              null,
               locationId,
               socialPostCreateBody(mutationRequest),
               {
-                generateCreative: !Array.isArray(mutationRequest?.post?.media) || mutationRequest.post.media.length === 0,
                 businessName: normalizeString(mutationRequest?.post?.businessName)
                   || normalizeString(mutationRequest?.businessName)
                   || null,
@@ -4556,25 +4672,70 @@ function taskPackHandlers() {
                   || normalizeString(mutationRequest?.post?.logo)
                   || normalizeString(mutationRequest?.logoUrl)
                   || null,
-                variantCount: mutationRequest?.variantCount || null
+                variantCount: mutationRequest?.variantCount || null,
+                creativeStyles: mutationRequest?.creativeStyles || []
               }
             ],
+            safe: true,
+            mutation: false,
+            requiresCredential: false,
+            resumeData: socialPostVariantGenerateResumeData,
+            details: {
+              action: 'generate_social_post_variants',
+              locationId,
+              businessName: mutationRequest?.businessName || null,
+              summaryPreview: mutationRequest?.summary ? mutationRequest.summary.slice(0, 160) : null,
+              creativeStyles: mutationRequest?.creativeStyles || [],
+              variantCount: socialPostRequestedVariantCount(mutationRequest)
+            },
+            skipIf: () => !explicitCreateSocialPost || !shouldGenerateSocialPostVariants(mutationRequest)
+          },
+          {
+            name: 'create_social_post',
+            kind: 'adapter_call',
+            adapter: 'SocialPlannerAdapter',
+            method: 'createPostWithCreative',
+            httpMethod: 'POST',
+            pathHint: '/social-media-posting/:locationId/posts',
+            args: (runtimeContext) => {
+              const selection = selectedSocialPostVariantFromContext(runtimeContext);
+              return [
+                context.credentialRef || defaultLocationCredential(context),
+                locationId,
+                socialPostCreateBody(mutationRequest),
+                {
+                  generateCreative: !Array.isArray(mutationRequest?.post?.media) || mutationRequest.post.media.length === 0,
+                  businessName: normalizeString(mutationRequest?.post?.businessName)
+                    || normalizeString(mutationRequest?.businessName)
+                    || null,
+                  brandVoice: normalizeString(mutationRequest?.post?.brandVoice)
+                    || normalizeString(mutationRequest?.post?.voice)
+                    || normalizeString(mutationRequest?.brandVoice)
+                    || null,
+                  websiteUrl: normalizeString(mutationRequest?.post?.websiteUrl)
+                    || normalizeString(mutationRequest?.post?.website)
+                    || normalizeString(mutationRequest?.websiteUrl)
+                    || null,
+                  logoUrl: normalizeString(mutationRequest?.post?.logoUrl)
+                    || normalizeString(mutationRequest?.post?.logo)
+                    || normalizeString(mutationRequest?.logoUrl)
+                    || null,
+                  generatedVariant: selection?.variant || null,
+                  generatedVariants: selection?.variants || [],
+                  variantStyles: Array.isArray(selection?.variants)
+                    ? selection.variants.map((variant) => variant?.model?.styleId || variant?.styleId || null).filter(Boolean)
+                    : [],
+                  variantCount: mutationRequest?.variantCount || null,
+                  creativeStyles: mutationRequest?.creativeStyles || []
+                }
+              ];
+            },
             safe: false,
             mutation: true,
             requiresApproval: true,
             requiresCredential: true,
             resumeData: socialPostCreateResumeData,
-            details: {
-              action: 'create_social_post',
-              locationId,
-              accountIds: mutationRequest?.accountIds || [],
-              status: mutationRequest?.status || null,
-              scheduleDate: mutationRequest?.scheduleDate || null,
-              summaryPreview: mutationRequest?.summary ? mutationRequest.summary.slice(0, 160) : null,
-              autoGenerateCreative: !Array.isArray(mutationRequest?.post?.media) || mutationRequest.post.media.length === 0,
-              creativeStyles: mutationRequest?.creativeStyles || [],
-              variantCount: mutationRequest?.variantCount || null
-            },
+            details: (runtimeContext) => socialPostCreateDetails(runtimeContext, mutationRequest),
             skipIf: () => !explicitCreateSocialPost
           },
           {

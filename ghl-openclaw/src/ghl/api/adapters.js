@@ -87,6 +87,60 @@ function normalizeSocialCreativeRequest(body = {}, options = {}) {
   };
 }
 
+async function generateSocialCreativeVariantsBundle({
+  locationId,
+  payload,
+  creativeStyle,
+  creativeStyles,
+  businessName,
+  brandVoice,
+  websiteUrl,
+  logoUrl,
+  variantCount,
+  outputDir
+} = {}) {
+  const requestedStyles = uniqueStrings([creativeStyle, ...creativeStyles]);
+  const effectiveVariantCount = variantCount || (requestedStyles.length > 0 ? requestedStyles.length : 1);
+  const variantStyles = uniqueStrings([
+    ...requestedStyles,
+    ...DEFAULT_SOCIAL_CREATIVE_VARIANT_STYLES
+  ]).slice(0, effectiveVariantCount);
+  const variants = [];
+
+  for (const style of variantStyles) {
+    const generated = await generateSocialPostCreative({
+      locationId,
+      post: payload,
+      businessName,
+      brandVoice,
+      websiteUrl,
+      logoUrl,
+      style,
+      outputDir
+    });
+    variants.push(generated);
+  }
+
+  const generated = variants[0] || await generateSocialPostCreative({
+    locationId,
+    post: payload,
+    businessName,
+    brandVoice,
+    websiteUrl,
+    logoUrl,
+    style: creativeStyle,
+    outputDir
+  });
+
+  return {
+    generated,
+    variants,
+    requestedStyles,
+    variantStyles,
+    requestedVariantCount: effectiveVariantCount
+  };
+}
+
 export class LocationsAdapter {
   constructor({ client = new GhlApiClient() } = {}) {
     this.client = client;
@@ -671,38 +725,38 @@ export class SocialPlannerAdapter {
     let creative = null;
 
     if (existingMedia.length === 0 && options.generateCreative !== false) {
-      const requestedStyles = uniqueStrings([creativeStyle, ...creativeStyles]);
-      const effectiveVariantCount = variantCount || (requestedStyles.length > 0 ? requestedStyles.length : 1);
-      const variantStyles = uniqueStrings([
-        ...requestedStyles,
-        ...DEFAULT_SOCIAL_CREATIVE_VARIANT_STYLES
-      ]).slice(0, effectiveVariantCount);
-      const variants = [];
+      const preselectedGenerated = options.generatedVariant && typeof options.generatedVariant === 'object'
+        ? options.generatedVariant
+        : null;
+      const generatedBundle = preselectedGenerated?.pngPath
+        ? {
+            generated: preselectedGenerated,
+            variants: Array.isArray(options.generatedVariants) && options.generatedVariants.length > 0
+              ? options.generatedVariants
+              : [preselectedGenerated],
+            requestedStyles: uniqueStrings([creativeStyle, ...creativeStyles]),
+            variantStyles: Array.isArray(options.variantStyles) && options.variantStyles.length > 0
+              ? uniqueStrings(options.variantStyles)
+              : uniqueStrings([
+                  preselectedGenerated?.model?.styleId,
+                  ...((Array.isArray(options.generatedVariants) ? options.generatedVariants : []).map((variant) => variant?.model?.styleId))
+                ]),
+            requestedVariantCount: variantCount || (Array.isArray(options.generatedVariants) ? options.generatedVariants.length : 1)
+          }
+        : await generateSocialCreativeVariantsBundle({
+            locationId,
+            payload,
+            creativeStyle,
+            creativeStyles,
+            businessName,
+            brandVoice,
+            websiteUrl,
+            logoUrl,
+            variantCount,
+            outputDir: options.outputDir
+          });
 
-      for (const style of variantStyles) {
-        const generated = await generateSocialPostCreative({
-          locationId,
-          post: payload,
-          businessName,
-          brandVoice,
-          websiteUrl,
-          logoUrl,
-          style,
-          outputDir: options.outputDir
-        });
-        variants.push(generated);
-      }
-
-      const generated = variants[0] || await generateSocialPostCreative({
-        locationId,
-        post: payload,
-        businessName,
-        brandVoice,
-        websiteUrl,
-        logoUrl,
-        style: creativeStyle,
-        outputDir: options.outputDir
-      });
+      const { generated, variants, requestedStyles, variantStyles, requestedVariantCount } = generatedBundle;
 
       const uploaded = await this.uploadLocalMediaFile(credentialRef, generated.pngPath, {
         mimeType: 'image/png',
@@ -720,7 +774,7 @@ export class SocialPlannerAdapter {
         variants,
         requestedStyles,
         variantStyles,
-        requestedVariantCount: effectiveVariantCount,
+        requestedVariantCount,
         uploaded: uploaded.data,
         media: payload.media
       };
@@ -731,6 +785,33 @@ export class SocialPlannerAdapter {
       ...created,
       data: {
         ...(created?.data && typeof created.data === 'object' ? created.data : {}),
+        openClaw: {
+          creative,
+          requestBody: payload
+        }
+      }
+    };
+  }
+
+  async generateCreativeVariants(_credentialRef, locationId, body, options = {}) {
+    const { payload, creativeStyle, creativeStyles, businessName, brandVoice, websiteUrl, logoUrl, variantCount } = normalizeSocialCreativeRequest(body, options);
+    const creative = await generateSocialCreativeVariantsBundle({
+      locationId,
+      payload,
+      creativeStyle,
+      creativeStyles,
+      businessName,
+      brandVoice,
+      websiteUrl,
+      logoUrl,
+      variantCount,
+      outputDir: options.outputDir
+    });
+
+    return {
+      ok: true,
+      status: 200,
+      data: {
         openClaw: {
           creative,
           requestBody: payload
