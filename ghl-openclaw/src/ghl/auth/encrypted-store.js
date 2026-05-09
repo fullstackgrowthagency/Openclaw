@@ -101,4 +101,12 @@ export class FileEncryptedStore {
     await writeJson(this.filePath, items);
     return await this.getMetadata(credentialRef);
   }
+
+  async delete(credentialRef) {
+    const items = await this.list();
+    const next = items.filter((item) => item.credentialRef !== credentialRef);
+    if (next.length === items.length) return false;
+    await writeJson(this.filePath, next);
+    return true;
+  }
 }

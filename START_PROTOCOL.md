@@ -24,7 +24,8 @@ Reply with a short onboarding message that:
 3. asks for the exact required setup items below
 4. asks the user to send attachments directly when possible
 5. says keys/access will be validated and stored securely, not written into plain business files
-6. keeps the request concise and checklist-style
+6. begins or refreshes the active `/start` onboarding session
+7. keeps the request concise and checklist-style
 
 ## Required setup items
 
@@ -81,12 +82,20 @@ Please send:
 ## After the user replies
 
 1. identify which required items are present
-2. list only the missing required items
-3. if enough info is present, validate and securely store the OpenAI key and GHL access
-4. store/update `business/ACTIVE_BUSINESS.json` with refs and statuses only, never raw secrets
-5. if the knowledge base is still missing, stop and ask for it plainly
-6. do not pretend onboarding is complete until all required items are present
-7. then collect optional follow-up items like KPIs and payment/product info
+2. ingest newly provided setup info into the active onboarding session
+3. list only the missing required items
+4. if enough info is present, validate and securely store the OpenAI key and GHL access automatically
+5. store/update `business/ACTIVE_BUSINESS.json` with refs and statuses only, never raw secrets
+6. if the knowledge base is still missing, stop and ask for it plainly
+7. do not pretend onboarding is complete until all required items are present
+8. then collect optional follow-up items like KPIs and payment/product info
+
+## Session behavior
+
+- Use an active onboarding session so setup can arrive across multiple chat messages.
+- During onboarding, raw secrets may be held temporarily in encrypted storage only.
+- Once connection succeeds, clear the temporary onboarding secret state.
+- If the user wants to restart onboarding, reset the active `/start` session first.
 
 ## Storage
 

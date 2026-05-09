@@ -21,6 +21,7 @@ import { ingestTestEvent } from '../ghl/webhooks/test-ingest.js';
 import { generateGoogleAdPreview } from '../ghl/previews/google-ad-preview.js';
 import { generateSocialCalendarPlan } from '../ghl/planning/social-calendar.js';
 import { StartOnboardingService } from '../ghl/onboarding/start-service.js';
+import { StartSessionService } from '../ghl/onboarding/start-session.js';
 
 const command = normalizeCommand(process.argv[2] || 'status');
 const args = process.argv.slice(3);
@@ -261,6 +262,32 @@ async function main() {
       const payloadJson = parseJsonArg(optionalArg(args, '--payload-json')) || {};
       const service = new StartOnboardingService();
       const result = await service.connect(payloadJson);
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    case 'start:begin': {
+      const payloadJson = parseJsonArg(optionalArg(args, '--payload-json')) || {};
+      const service = new StartSessionService();
+      const result = await service.begin(payloadJson);
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    case 'start:ingest': {
+      const payloadJson = parseJsonArg(optionalArg(args, '--payload-json')) || {};
+      const service = new StartSessionService();
+      const result = await service.ingest(payloadJson);
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    case 'start:status': {
+      const service = new StartSessionService();
+      const result = await service.status();
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    case 'start:reset': {
+      const service = new StartSessionService();
+      const result = await service.reset();
       console.log(JSON.stringify(result, null, 2));
       return;
     }

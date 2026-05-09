@@ -31,6 +31,7 @@ Don't ask permission. Just do it.
 - Treat these as the required `/start` fields: OpenAI API key, business name, knowledge base, logo, website, and GHL access.
 - Treat KPIs and payment/product info as optional follow-up items, not blockers for initial setup.
 - Use `business/ACTIVE_BUSINESS.template.json` as the shape for the live record.
+- Use an active `/start` onboarding session so setup can be collected across multiple chat messages.
 - When onboarding is complete, store the real active business in `business/ACTIVE_BUSINESS.json`.
 - If the user switches to a different business later, confirm replacement before overwriting the active business record.
 

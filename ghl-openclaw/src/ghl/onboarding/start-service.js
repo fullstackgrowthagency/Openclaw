@@ -75,7 +75,7 @@ function buildKnowledgeBaseRecord(input = {}) {
   return { ref, type, location, notes };
 }
 
-function normalizeStartPayload(input = {}) {
+export function normalizeStartPayload(input = {}) {
   const payload = normalizePlainObject(input);
   const ghl = normalizePlainObject(payload.ghl || payload.ghlAccess || {});
   return {
@@ -100,7 +100,7 @@ function normalizeStartPayload(input = {}) {
   };
 }
 
-function missingRequiredFields(payload) {
+export function missingRequiredFields(payload) {
   const missing = [];
   if (!payload.openaiApiKey) missing.push('openaiApiKey');
   if (!payload.businessName) missing.push('businessName');
