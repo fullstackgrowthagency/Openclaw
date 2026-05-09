@@ -826,6 +826,39 @@ function themedPromotionHeadline(sourcePost) {
   return candidates.map((value) => cleanedPromotionPhrase(value, 40)).find(Boolean) || null;
 }
 
+function concisePromotionDescription(sourcePost) {
+  const summary = normalizeString(sourcePostSummary(sourcePost))?.toLowerCase() || '';
+  const theme = cleanedPromotionPhrase(sourcePostTheme(sourcePost), 32);
+  const candidates = [
+    /tracking|clear growth decisions|click to client|better offers/.test(summary)
+      ? 'Improve tracking, offers, and the path from click to client.'
+      : null,
+    /books calls|captures leads|moves people to action/.test(summary)
+      ? 'Book more calls, capture more leads, and drive action.'
+      : null,
+    /right message,?\s*for the right audience,?\s*at the right time/.test(summary)
+      ? 'Reach the right audience with the right message at the right time.'
+      : null,
+    /feel more human|real conversations|better service/.test(summary)
+      ? 'Free your team for faster follow-up and better service.'
+      : null,
+    /fast response,?\s*clear messaging,?\s*and a simple pipeline/.test(summary)
+      ? 'Speed up follow-up with clearer messaging and a simpler pipeline.'
+      : null,
+    /what is working\??.*what is not\??.*what do we change next\??/s.test(summary)
+      ? 'See what is working, what is not, and what to change next.'
+      : null,
+    /strategy,?\s*site,?\s*content,?\s*automation,?\s*and follow-up/.test(summary)
+      ? 'Align strategy, site, content, automation, and follow-up.'
+      : null,
+    theme ? `Get clearer ${theme} with a simpler path to action.` : null
+  ];
+
+  return candidates
+    .map((value) => cleanedPromotionPhrase(value, 72))
+    .find(Boolean) || null;
+}
+
 function inferredPromotionBodyLine(sourcePost) {
   const paragraphs = promotionParagraphs(sourcePost);
   const laterParagraphLines = paragraphs.slice(1).flatMap((paragraph) => promotionSentences(paragraph));
@@ -957,6 +990,7 @@ function inferredPromotionHeadline(mutationRequest) {
 
 function inferredPromotionDescription(mutationRequest) {
   return mutationRequest?.description
+    || concisePromotionDescription(mutationRequest?.sourcePost)
     || inferredPromotionBodyLine(mutationRequest?.sourcePost)
     || clampText(firstParagraph(sourcePostSummary(mutationRequest?.sourcePost)), 90)
     || clampText(sourcePostTheme(mutationRequest?.sourcePost), 90)
