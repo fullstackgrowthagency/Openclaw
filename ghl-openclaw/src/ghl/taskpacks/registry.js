@@ -126,6 +126,10 @@ function activeBusinessDefaultsFromRecord(record) {
       || normalizeString(activeBusiness.voice)
       || normalizeString(brand.voice)
       || null,
+    openaiCredentialRef: normalizeString(activeBusiness.access?.openai?.credentialRef)
+      || normalizeString(activeBusiness.openaiCredentialRef)
+      || normalizeString(profile.openaiCredentialRef)
+      || null,
     locationId: normalizeString(activeBusiness.locationId)
       || normalizeString(ghlAccess.locationId)
       || null
@@ -138,6 +142,590 @@ function shouldUseActiveBusinessDefaults(requestedBusinessName, activeBusiness) 
   if (!normalizeString(requestedBusinessName)) return Boolean(activeBusinessName);
   if (!activeBusinessName) return false;
   return normalizeBusinessNameKey(requestedBusinessName) === normalizeBusinessNameKey(activeBusinessName);
+}
+
+function normalizeConversationalProjectType(value) {
+  const normalized = normalizeString(value)?.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return normalized || null;
+}
+
+function normalizeConversationalIntentId(value) {
+  const normalized = normalizeString(value)?.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return normalized || null;
+}
+
+function readJsonRecordIfExists(filePath) {
+  if (!filePath || !existsSync(filePath)) return null;
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readConversationalProjectProfile(profileRef, fromDir = process.cwd()) {
+  const normalizedRef = normalizeString(profileRef);
+  if (!normalizedRef) return null;
+  const workspaceRoot = resolveWorkspaceRoot(fromDir);
+  const candidatePaths = [
+    path.isAbsolute(normalizedRef) ? normalizedRef : null,
+    path.join(workspaceRoot, normalizedRef),
+    path.join(workspaceRoot, 'projects', normalizedRef),
+    path.join(workspaceRoot, 'projects', `${normalizedRef}.json`),
+    path.join(workspaceRoot, 'docs', normalizedRef),
+    path.join(workspaceRoot, 'docs', `${normalizedRef}.json`)
+  ].filter(Boolean);
+
+  for (const candidatePath of candidatePaths) {
+    const record = readJsonRecordIfExists(candidatePath);
+    if (record) return record;
+  }
+  return null;
+}
+
+function defaultConversationalProjectProfile({ mutationRequest, activeBusiness, event } = {}) {
+  const requestedProject = normalizePlainObject(mutationRequest?.project) || {};
+  const business = normalizePlainObject(mutationRequest?.business) || {};
+  const projectType = normalizeConversationalProjectType(requestedProject.type)
+    || normalizeConversationalProjectType(activeBusiness?.projectType)
+    || 'service_business';
+  const knowledgeBaseRef = normalizeString(business.knowledgeBaseRef)
+    || normalizeString(activeBusiness?.knowledgeBaseRef)
+    || null;
+  const businessName = normalizeString(business.name)
+    || normalizeString(activeBusiness?.name)
+    || 'Active project';
+
+  return {
+    project: {
+      id: normalizeString(requestedProject.id) || null,
+      name: normalizeString(requestedProject.name) || businessName,
+      type: projectType,
+      summary: normalizeString(requestedProject.summary)
+        || normalizeString(activeBusiness?.industry)
+        || null,
+      locationId: normalizeString(mutationRequest?.locationId)
+        || normalizeString(activeBusiness?.locationId)
+        || normalizeString(event?.locationId)
+        || null,
+      knowledgeBaseRef,
+      openaiCredentialRef: normalizeString(requestedProject.openaiCredentialRef)
+        || normalizeString(activeBusiness?.openaiCredentialRef)
+        || null
+    },
+    identity: {
+      assistantName: null,
+      role: 'project conversational AI',
+      tone: {
+        style: 'clear, helpful, grounded',
+        brandVoice: normalizeString(activeBusiness?.brandVoice) || null,
+        dos: [],
+        donts: []
+      }
+    },
+    goals: {
+      primary: normalizeStringArray(activeBusiness?.goals),
+      secondary: [],
+      successSignals: []
+    },
+    audiences: [
+      {
+        id: 'primary_contact',
+        label: 'Primary contact',
+        description: 'Inbound conversation participant'
+      }
+    ],
+    channels: {
+      default: {
+        autoReply: false,
+        maxQuestionsPerTurn: 1,
+        allowLinks: true,
+        allowScheduling: false
+      },
+      overrides: {}
+    },
+    domainModel: {
+      entities: [
+        {
+          name: 'contact',
+          description: 'Person interacting with the project assistant',
+          fields: ['name', 'company', 'need', 'urgency']
+        }
+      ],
+      terms: {
+        customer: ['client', 'lead', 'contact', 'prospect'],
+        appointment: ['demo', 'consult', 'visit', 'call']
+      }
+    },
+    intents: [
+      {
+        id: 'general_question',
+        description: 'General project or offer question',
+        examples: [],
+        replyMode: 'answer_then_clarify',
+        requiredSlots: [],
+        optionalSlots: ['service', 'timeframe']
+      },
+      {
+        id: 'pricing_question',
+        description: 'Pricing or quote question',
+        examples: [],
+        replyMode: 'answer_then_clarify',
+        requiredSlots: [],
+        optionalSlots: ['service', 'budget']
+      },
+      {
+        id: 'support_request',
+        description: 'Support or issue triage',
+        examples: [],
+        replyMode: 'clarify_then_route',
+        requiredSlots: ['issue_type'],
+        optionalSlots: ['urgency']
+      },
+      {
+        id: 'book_or_schedule',
+        description: 'Scheduling or booking request',
+        examples: [],
+        replyMode: 'qualify_then_route',
+        requiredSlots: ['timeframe'],
+        optionalSlots: ['service']
+      },
+      {
+        id: 'human_handoff',
+        description: 'User asks for a human',
+        examples: [],
+        replyMode: 'handoff',
+        requiredSlots: [],
+        optionalSlots: []
+      }
+    ],
+    slots: [
+      {
+        id: 'service',
+        type: 'string',
+        required: false,
+        question: 'What service or outcome are you looking for?',
+        sources: ['message', 'knowledge_base']
+      },
+      {
+        id: 'urgency',
+        type: 'enum',
+        values: ['low', 'medium', 'high'],
+        required: false,
+        question: 'How urgent is this for you?',
+        sources: ['message']
+      },
+      {
+        id: 'timeframe',
+        type: 'string',
+        required: false,
+        question: 'What timing are you aiming for?',
+        sources: ['message']
+      },
+      {
+        id: 'budget',
+        type: 'string',
+        required: false,
+        question: 'Do you already have a target budget range in mind?',
+        sources: ['message']
+      },
+      {
+        id: 'issue_type',
+        type: 'string',
+        required: false,
+        question: 'What exactly is going wrong?',
+        sources: ['message']
+      }
+    ],
+    playbooks: [],
+    actions: {
+      allowed: ['send_reply', 'append_contact_note', 'update_contact_fields', 'create_or_update_opportunity', 'offer_booking_link', 'handoff_to_human'],
+      approvalRequired: ['create_appointment', 'move_pipeline_stage', 'send_outbound_campaign'],
+      disabled: []
+    },
+    guardrails: {
+      mustUseKnowledgeBaseFor: ['pricing', 'policy', 'compliance', 'guarantees'],
+      neverClaim: [],
+      alwaysEscalateWhen: ['legal_threat', 'refund_dispute', 'high_negative_sentiment', 'low_confidence'],
+      humanHandoffMessage: null
+    },
+    responsePolicy: {
+      defaultMode: 'answer_or_clarify',
+      askAtMostOneQuestion: true,
+      preferShortReplies: true,
+      citeGroundingInternally: true,
+      allowUngroundedAnswers: false
+    },
+    crmPolicy: {
+      contactNotes: true,
+      fieldUpdates: true,
+      opportunityUpdates: false,
+      tagging: true
+    },
+    voicePolicy: {
+      enabled: false,
+      bargeInSafe: true,
+      maxTurnSeconds: 20,
+      silenceFallback: 'reprompt_once_then_handoff'
+    },
+    evaluation: {
+      track: ['intent_accuracy', 'reply_grounded', 'handoff_correctness', 'action_success_rate'],
+      examples: []
+    }
+  };
+}
+
+function normalizeConversationalProjectProfile(profile, defaults = {}) {
+  const source = normalizePlainObject(profile) || {};
+  const identity = normalizePlainObject(source.identity) || {};
+  const identityTone = normalizePlainObject(identity.tone) || {};
+  const channels = normalizePlainObject(source.channels) || {};
+  const actions = normalizePlainObject(source.actions) || {};
+  const guardrails = normalizePlainObject(source.guardrails) || {};
+  const responsePolicy = normalizePlainObject(source.responsePolicy) || {};
+  const crmPolicy = normalizePlainObject(source.crmPolicy) || {};
+  const voicePolicy = normalizePlainObject(source.voicePolicy) || {};
+  const evaluation = normalizePlainObject(source.evaluation) || {};
+  const domainModel = normalizePlainObject(source.domainModel) || {};
+  const project = normalizePlainObject(source.project) || {};
+
+  return {
+    ...defaults,
+    ...source,
+    project: {
+      ...(defaults.project || {}),
+      ...project,
+      type: normalizeConversationalProjectType(project.type) || defaults.project?.type || 'service_business'
+    },
+    identity: {
+      ...(defaults.identity || {}),
+      ...identity,
+      tone: {
+        ...(defaults.identity?.tone || {}),
+        ...identityTone,
+        dos: Array.isArray(identityTone.dos) ? identityTone.dos.filter(Boolean) : (defaults.identity?.tone?.dos || []),
+        donts: Array.isArray(identityTone.donts) ? identityTone.donts.filter(Boolean) : (defaults.identity?.tone?.donts || [])
+      }
+    },
+    channels: {
+      ...(defaults.channels || {}),
+      ...channels,
+      default: {
+        ...(defaults.channels?.default || {}),
+        ...(normalizePlainObject(channels.default) || {})
+      },
+      overrides: {
+        ...(defaults.channels?.overrides || {}),
+        ...(normalizePlainObject(channels.overrides) || {})
+      }
+    },
+    domainModel: {
+      ...(defaults.domainModel || {}),
+      ...domainModel,
+      entities: Array.isArray(domainModel.entities) ? domainModel.entities.filter(Boolean) : (defaults.domainModel?.entities || []),
+      terms: {
+        ...(defaults.domainModel?.terms || {}),
+        ...(normalizePlainObject(domainModel.terms) || {})
+      }
+    },
+    intents: Array.isArray(source.intents) && source.intents.length
+      ? source.intents
+        .map((intent) => normalizePlainObject(intent))
+        .filter(Boolean)
+        .map((intent) => ({
+          ...intent,
+          id: normalizeConversationalIntentId(intent.id || intent.name) || 'custom_intent',
+          requiredSlots: normalizeStringArray(intent.requiredSlots),
+          optionalSlots: normalizeStringArray(intent.optionalSlots),
+          examples: Array.isArray(intent.examples) ? intent.examples.filter(Boolean) : []
+        }))
+      : (defaults.intents || []),
+    slots: Array.isArray(source.slots) && source.slots.length
+      ? source.slots
+        .map((slot) => normalizePlainObject(slot))
+        .filter(Boolean)
+        .map((slot) => ({
+          ...slot,
+          id: normalizeConversationalIntentId(slot.id || slot.name) || 'slot',
+          sources: normalizeStringArray(slot.sources),
+          values: Array.isArray(slot.values) ? slot.values.filter(Boolean) : []
+        }))
+      : (defaults.slots || []),
+    playbooks: Array.isArray(source.playbooks) ? source.playbooks.filter(Boolean) : (defaults.playbooks || []),
+    actions: {
+      ...(defaults.actions || {}),
+      ...actions,
+      allowed: normalizeStringArray(actions.allowed).length ? normalizeStringArray(actions.allowed) : (defaults.actions?.allowed || []),
+      approvalRequired: normalizeStringArray(actions.approvalRequired).length ? normalizeStringArray(actions.approvalRequired) : (defaults.actions?.approvalRequired || []),
+      disabled: normalizeStringArray(actions.disabled).length ? normalizeStringArray(actions.disabled) : (defaults.actions?.disabled || [])
+    },
+    guardrails: {
+      ...(defaults.guardrails || {}),
+      ...guardrails,
+      mustUseKnowledgeBaseFor: normalizeStringArray(guardrails.mustUseKnowledgeBaseFor).length ? normalizeStringArray(guardrails.mustUseKnowledgeBaseFor) : (defaults.guardrails?.mustUseKnowledgeBaseFor || []),
+      neverClaim: normalizeStringArray(guardrails.neverClaim).length ? normalizeStringArray(guardrails.neverClaim) : (defaults.guardrails?.neverClaim || []),
+      alwaysEscalateWhen: normalizeStringArray(guardrails.alwaysEscalateWhen).length ? normalizeStringArray(guardrails.alwaysEscalateWhen) : (defaults.guardrails?.alwaysEscalateWhen || [])
+    },
+    responsePolicy: {
+      ...(defaults.responsePolicy || {}),
+      ...responsePolicy
+    },
+    crmPolicy: {
+      ...(defaults.crmPolicy || {}),
+      ...crmPolicy
+    },
+    voicePolicy: {
+      ...(defaults.voicePolicy || {}),
+      ...voicePolicy
+    },
+    evaluation: {
+      ...(defaults.evaluation || {}),
+      ...evaluation,
+      track: normalizeStringArray(evaluation.track).length ? normalizeStringArray(evaluation.track) : (defaults.evaluation?.track || []),
+      examples: Array.isArray(evaluation.examples) ? evaluation.examples.filter(Boolean) : (defaults.evaluation?.examples || [])
+    }
+  };
+}
+
+function conversationalAiMutationRequestFrom(event) {
+  const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
+  if (!request) return null;
+
+  const project = normalizePlainObject(request.project) || {};
+  const business = normalizePlainObject(request.business) || {};
+  const policy = normalizePlainObject(request.policy) || {};
+  const requestText = normalizeTextBlock(request.requestText)
+    || normalizeTextBlock(request.brief)
+    || normalizeTextBlock(request.description)
+    || normalizeTextBlock(request.instructions)
+    || normalizeTextBlock(request.prompt)
+    || normalizeTextBlock(request.message)
+    || normalizeTextBlock(request.text)
+    || null;
+  const explicitAction = normalizeString(request.action);
+
+  return {
+    action: explicitAction || (requestText || request.conversationId || request.contactId || request.contactName ? 'run_conversational_ai' : null),
+    mode: normalizeString(request.mode) || 'reply',
+    locationId: normalizeString(request.locationId) || normalizeString(event?.locationId) || normalizeString(event?.payload?.locationId) || null,
+    conversationId: normalizeString(request.conversationId) || conversationObjectIdFrom(event),
+    contactId: normalizeString(request.contactId) || null,
+    contactName: normalizeConversationContactName(request.contactName) || normalizeConversationContactName(request.name),
+    requestText,
+    project: {
+      type: normalizeConversationalProjectType(project.type || request.projectType) || null,
+      name: normalizeString(project.name || request.projectName) || null,
+      profileRef: normalizeString(project.profileRef || request.profileRef || request.projectProfileRef) || null,
+      profile: normalizePlainObject(project.profile || request.projectProfile) || null
+    },
+    business: {
+      name: normalizeString(business.name || request.businessName) || null,
+      knowledgeBaseRef: normalizeString(business.knowledgeBaseRef || business.knowledgeBase || request.knowledgeBaseRef || request.knowledgeBase) || null
+    },
+    policy: {
+      allowAutoReply: normalizeBoolean(policy.allowAutoReply),
+      allowAutoQualify: normalizeBoolean(policy.allowAutoQualify),
+      allowAutoBook: normalizeBoolean(policy.allowAutoBook),
+      allowAutoUpdateCRM: normalizeBoolean(policy.allowAutoUpdateCRM),
+      allowAutoSupportActions: normalizeBoolean(policy.allowAutoSupportActions),
+      allowAutoRouting: normalizeBoolean(policy.allowAutoRouting)
+    }
+  };
+}
+
+function resolvedConversationalAiLatestInboundMessage(context) {
+  const messages = context?.runtime?.stepOutputs?.fetch_conversation_messages?.data?.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  return [...messages].reverse().find((message) => normalizeString(message?.direction)?.toLowerCase() === 'inbound') || messages[messages.length - 1] || null;
+}
+
+function resolvedConversationalAiRequestText(context, mutationRequest) {
+  if (normalizeTextBlock(mutationRequest?.requestText)) return normalizeTextBlock(mutationRequest.requestText);
+  const latestInbound = resolvedConversationalAiLatestInboundMessage(context);
+  if (normalizeTextBlock(latestInbound?.body)) return normalizeTextBlock(latestInbound.body);
+  return normalizeTextBlock(context?.event?.payload?.message)
+    || normalizeTextBlock(context?.event?.payload?.body)
+    || normalizeTextBlock(context?.event?.payload?.text)
+    || normalizeTextBlock(context?.event?.payload?.data?.message)
+    || normalizeTextBlock(context?.event?.payload?.data?.body)
+    || normalizeTextBlock(context?.event?.payload?.data?.text)
+    || null;
+}
+
+function resolvedConversationalAiProjectProfile(context, mutationRequest) {
+  const activeBusiness = activeBusinessDefaultsFromRecord(readActiveBusinessRecord(process.cwd()));
+  const defaults = defaultConversationalProjectProfile({ mutationRequest, activeBusiness, event: context?.event });
+  const storedProfile = readConversationalProjectProfile(mutationRequest?.project?.profileRef, process.cwd());
+  const directProfile = normalizePlainObject(mutationRequest?.project?.profile) || null;
+  const mergedProfile = normalizeConversationalProjectProfile(storedProfile, defaults);
+  return normalizeConversationalProjectProfile(directProfile, mergedProfile);
+}
+
+function resolvedConversationalAiPolicy(context, mutationRequest, profile) {
+  const policy = normalizePlainObject(mutationRequest?.policy) || {};
+  const manualReplyDefault = normalizeString(context?.event?.type) === 'ManualRun' && normalizeString(mutationRequest?.mode) === 'reply'
+    ? true
+    : null;
+  return {
+    allowAutoReply: normalizeBoolean(policy.allowAutoReply)
+      ?? manualReplyDefault
+      ?? normalizeBoolean(profile?.channels?.default?.autoReply)
+      ?? false,
+    allowAutoQualify: normalizeBoolean(policy.allowAutoQualify) ?? true,
+    allowAutoBook: normalizeBoolean(policy.allowAutoBook) ?? false,
+    allowAutoUpdateCRM: normalizeBoolean(policy.allowAutoUpdateCRM) ?? false,
+    allowAutoSupportActions: normalizeBoolean(policy.allowAutoSupportActions) ?? false,
+    allowAutoRouting: normalizeBoolean(policy.allowAutoRouting) ?? true
+  };
+}
+
+function pickConversationalIntentId(profile, candidates = []) {
+  const intents = Array.isArray(profile?.intents) ? profile.intents : [];
+  for (const candidate of candidates) {
+    const normalizedCandidate = normalizeConversationalIntentId(candidate);
+    if (!normalizedCandidate) continue;
+    const exact = intents.find((intent) => normalizeConversationalIntentId(intent.id) === normalizedCandidate);
+    if (exact) return exact.id;
+    const fuzzy = intents.find((intent) => normalizeConversationalIntentId(intent.id)?.includes(normalizedCandidate));
+    if (fuzzy) return fuzzy.id;
+  }
+  return intents[0]?.id || 'general_question';
+}
+
+function extractConversationalSlots(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return {};
+
+  let urgency = null;
+  if (/\b(?:asap|urgent|immediately|right away)\b/.test(source)) urgency = 'high';
+  else if (/\b(?:soon|this week|next few days)\b/.test(source)) urgency = 'medium';
+  else if (/\b(?:whenever|not urgent|sometime)\b/.test(source)) urgency = 'low';
+
+  const serviceMatch = source.match(/\b(?:for|about|with|need help with|looking for)\s+([^?.!,\n]+)/i);
+  const timeframeMatch = source.match(/\b(?:today|tomorrow|this week|next week|this month|next month|as soon as possible)\b/i);
+  const budgetMatch = source.match(/\$\s?\d+[\d,]*(?:\s*(?:-|to)\s*\$?\d+[\d,]*)?/i);
+  const issueMatch = source.match(/\b(?:issue|problem|error|bug|broken|not working|trouble with)\b([^?.!,\n]*)/i);
+
+  return {
+    service: normalizeString(serviceMatch?.[1]) || null,
+    urgency,
+    timeframe: normalizeString(timeframeMatch?.[0]) || null,
+    budget: normalizeString(budgetMatch?.[0]) || null,
+    issue_type: normalizeString(issueMatch?.[0]) || null
+  };
+}
+
+function conversationalAiEvaluation(context, mutationRequest) {
+  const profile = resolvedConversationalAiProjectProfile(context, mutationRequest);
+  const requestText = resolvedConversationalAiRequestText(context, mutationRequest) || '';
+  const source = requestText.toLowerCase();
+  const candidateIntent = /\b(?:human|person|someone|agent|representative|call me)\b/.test(source)
+    ? pickConversationalIntentId(profile, ['human_handoff', 'handoff'])
+    : /\b(?:price|pricing|cost|quote|how much)\b/.test(source)
+      ? pickConversationalIntentId(profile, ['pricing_question', 'quote', 'pricing'])
+      : /\b(?:book|schedule|appointment|demo|consult|call)\b/.test(source)
+        ? pickConversationalIntentId(profile, ['book_or_schedule', 'schedule', 'appointment'])
+        : /\b(?:help|issue|problem|error|broken|not working|support)\b/.test(source)
+          ? pickConversationalIntentId(profile, ['support_request', 'support', 'issue'])
+          : pickConversationalIntentId(profile, ['general_question', 'general_inquiry', 'ask_service_question']);
+  const matchedIntent = (profile.intents || []).find((intent) => normalizeConversationalIntentId(intent.id) === normalizeConversationalIntentId(candidateIntent)) || null;
+  const escalation = /\b(?:lawyer|attorney|sue|legal|refund|chargeback|fraud|angry|furious|complaint)\b/.test(source);
+  const slots = extractConversationalSlots(requestText);
+
+  return {
+    projectType: profile.project?.type || 'service_business',
+    intent: candidateIntent,
+    intentId: candidateIntent,
+    confidence: escalation ? 0.62 : (matchedIntent ? 0.88 : 0.74),
+    needsHuman: escalation || normalizeConversationalIntentId(candidateIntent) === 'human_handoff',
+    needsReply: Boolean(requestText),
+    replyMode: normalizeString(matchedIntent?.replyMode) || 'answer_then_clarify',
+    slots,
+    knowledgeBaseRef: profile.project?.knowledgeBaseRef || null,
+    requestText,
+    reasons: escalation ? ['high_risk_sentiment_or_topic'] : []
+  };
+}
+
+function conversationalAiResponsePlan(context, mutationRequest) {
+  const profile = resolvedConversationalAiProjectProfile(context, mutationRequest);
+  const policy = resolvedConversationalAiPolicy(context, mutationRequest, profile);
+  const evaluation = context?.runtime?.stepOutputs?.evaluate_conversation_turn?.data || conversationalAiEvaluation(context, mutationRequest);
+  const activeBusiness = activeBusinessDefaultsFromRecord(readActiveBusinessRecord(process.cwd()));
+  const businessName = normalizeString(profile.project?.name) || normalizeString(activeBusiness?.name) || 'this team';
+  const offerSummary = normalizeStringArray(activeBusiness?.offers).slice(0, 3).join(', ');
+  const hasKnowledgeBase = Boolean(profile.project?.knowledgeBaseRef);
+  let message = null;
+
+  if (evaluation.needsHuman) {
+    message = normalizeString(profile.guardrails?.humanHandoffMessage)
+      || `Absolutely, I can route this to a human from ${businessName}. What is the best detail to include so they can help quickly?`;
+  } else if (!hasKnowledgeBase && ['pricing_question', 'support_request'].includes(normalizeConversationalIntentId(evaluation.intentId))) {
+    message = `I can help route this, but I should not answer specific ${normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question' ? 'pricing' : 'support'} details until the project knowledge base is configured. Do you want me to hand this to a human?`;
+  } else if (normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question') {
+    message = `Thanks for reaching out. ${businessName} can help${offerSummary ? ` with ${offerSummary}` : ''}. Pricing depends on the scope and setup. What outcome are you trying to solve first?`;
+  } else if (normalizeConversationalIntentId(evaluation.intentId) === 'book_or_schedule') {
+    message = `Happy to help with that. What kind of appointment or next step are you looking to schedule, and what timing works best for you?`;
+  } else if (normalizeConversationalIntentId(evaluation.intentId) === 'support_request') {
+    message = `I can help triage this. What exactly is going wrong, and when did it start?`;
+  } else {
+    message = `Yes, ${businessName} can help with that${offerSummary ? `, especially around ${offerSummary}` : ''}. What would you like to accomplish first?`;
+  }
+
+  const actions = [];
+  if (policy.allowAutoUpdateCRM) actions.push({ type: 'append_contact_note', status: 'planned' });
+  if (evaluation.needsHuman && policy.allowAutoRouting) actions.push({ type: 'handoff_to_human', status: 'planned' });
+
+  return {
+    decision: {
+      intent: evaluation.intent,
+      intentId: evaluation.intentId,
+      projectType: evaluation.projectType,
+      needsReply: evaluation.needsReply,
+      needsHuman: evaluation.needsHuman,
+      replyMode: evaluation.replyMode,
+      confidence: evaluation.confidence
+    },
+    reply: {
+      message
+    },
+    actions,
+    grounding: {
+      businessName,
+      projectProfileRef: normalizeString(mutationRequest?.project?.profileRef) || null,
+      knowledgeBaseRef: profile.project?.knowledgeBaseRef || null
+    },
+    policy,
+    shouldAutoReply: Boolean(policy.allowAutoReply && evaluation.needsReply && normalizeString(message)),
+    contactId: resolvedConversationContactId(context, mutationRequest),
+    conversationId: resolvedConversationId(context, mutationRequest, { requireMatch: false }) || null,
+    messageType: resolvedConversationMessageType(context, mutationRequest)
+  };
+}
+
+function conversationalAiRunSummary(context, mutationRequest) {
+  const evaluation = context?.runtime?.stepOutputs?.evaluate_conversation_turn?.data || null;
+  const plan = context?.runtime?.stepOutputs?.plan_conversation_response?.data || null;
+  return {
+    action: 'run_conversational_ai',
+    projectType: evaluation?.projectType || resolvedConversationalAiProjectProfile(context, mutationRequest)?.project?.type || null,
+    intent: evaluation?.intentId || null,
+    shouldAutoReply: Boolean(plan?.shouldAutoReply),
+    contactId: resolvedConversationContactId(context, mutationRequest),
+    conversationId: resolvedConversationId(context, mutationRequest, { requireMatch: false }) || null,
+    knowledgeBaseRef: plan?.grounding?.knowledgeBaseRef || null
+  };
+}
+
+function maybeResolvedConversationId(context, mutationRequest) {
+  return mutationRequest?.conversationId || resolvedConversationRecord(context, mutationRequest)?.id || null;
+}
+
+function maybeResolvedConversationContactId(context, mutationRequest) {
+  return mutationRequest?.contactId
+    || resolvedConversationRecord(context, mutationRequest)?.contactId
+    || context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts?.[0]?.id
+    || null;
 }
 
 function contactSearchResumeData(liveResult) {
@@ -4710,6 +5298,190 @@ function taskPackHandlers() {
             mutation: false,
             details: { action: 'evaluate_staleness_and_forecast', opportunityId, mutationRequest },
             skipIf: () => explicitOpportunityCreate || explicitOpportunityUpdate || explicitOpportunityStatusUpdate || explicitOpportunityFollowerAdd || explicitOpportunityFollowerRemove || explicitOpportunityDelete
+          }
+        ];
+      }
+    },
+    conversational_ai_pack: {
+      trigger_events: ['InboundMessage', 'ConversationUpdate', 'ConversationUnreadWebhook', 'ManualRun'],
+      buildExecutionPlan(context) {
+        const mutationRequest = conversationalAiMutationRequestFrom(context.event);
+        const conversationId = mutationRequest?.conversationId || conversationObjectIdFrom(context.event);
+        const needsContactLookup = Boolean(mutationRequest?.contactName) && !Boolean(mutationRequest?.contactId) && !Boolean(conversationId);
+        const needsConversationSearch = !Boolean(conversationId) && (Boolean(mutationRequest?.contactId) || Boolean(mutationRequest?.contactName));
+        return [
+          {
+            name: 'search_contacts_by_name',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'listContacts',
+            pathHint: '/contacts/',
+            args: () => [context.credentialRef || defaultLocationCredential(context), {
+              locationId: context.event.locationId || mutationRequest?.locationId || null,
+              query: mutationRequest.contactName,
+              limit: 5
+            }],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: contactSearchResumeData,
+            details: {
+              action: 'search_conversational_ai_contact_by_name',
+              contactName: mutationRequest?.contactName || null
+            },
+            skipIf: () => !needsContactLookup
+          },
+          {
+            name: 'search_conversations',
+            kind: 'adapter_call',
+            adapter: 'ConversationsAdapter',
+            method: 'searchConversations',
+            pathHint: '/conversations/search',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), {
+              locationId: runtimeContext.event.locationId || mutationRequest?.locationId || null,
+              ...(maybeResolvedConversationContactId(runtimeContext, mutationRequest) ? { contactId: maybeResolvedConversationContactId(runtimeContext, mutationRequest) } : {})
+            }],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: conversationSearchResumeData,
+            details: {
+              action: 'find_conversation_for_conversational_ai',
+              contactName: mutationRequest?.contactName || null
+            },
+            skipIf: () => !needsConversationSearch
+          },
+          {
+            name: 'fetch_conversation',
+            kind: 'adapter_call',
+            adapter: 'ConversationsAdapter',
+            method: 'getConversation',
+            pathHint: '/conversations/:conversationId',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedConversationId(runtimeContext, mutationRequest, { requireMatch: true })],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: fetchConversationResumeData,
+            details: (runtimeContext) => ({
+              action: 'fetch_conversational_ai_conversation',
+              conversationId: maybeResolvedConversationId(runtimeContext, mutationRequest),
+              locationId: mutationRequest?.locationId || null
+            }),
+            skipIf: (runtimeContext) => !maybeResolvedConversationId(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'fetch_conversation_messages',
+            kind: 'adapter_call',
+            adapter: 'ConversationsAdapter',
+            method: 'getMessages',
+            pathHint: '/conversations/:conversationId/messages',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedConversationId(runtimeContext, mutationRequest, { requireMatch: true })],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: conversationMessagesResumeData,
+            details: (runtimeContext) => ({
+              action: 'fetch_conversational_ai_messages',
+              conversationId: maybeResolvedConversationId(runtimeContext, mutationRequest)
+            }),
+            skipIf: (runtimeContext) => !maybeResolvedConversationId(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'fetch_contact',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'getContact',
+            pathHint: '/contacts/:contactId',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), maybeResolvedConversationContactId(runtimeContext, mutationRequest)],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            details: (runtimeContext) => ({
+              action: 'fetch_conversational_ai_contact',
+              contactId: maybeResolvedConversationContactId(runtimeContext, mutationRequest)
+            }),
+            skipIf: (runtimeContext) => !maybeResolvedConversationContactId(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'load_project_profile',
+            kind: 'intent',
+            safe: true,
+            mutation: false,
+            details: (runtimeContext) => ({
+              action: 'load_conversational_ai_project_profile',
+              projectProfile: resolvedConversationalAiProjectProfile(runtimeContext, mutationRequest)
+            })
+          },
+          {
+            name: 'evaluate_conversation_turn',
+            kind: 'agent_turn',
+            safe: true,
+            mutation: false,
+            prompt: (runtimeContext) => ({
+              action: 'evaluate_conversation_turn',
+              requestText: resolvedConversationalAiRequestText(runtimeContext, mutationRequest),
+              projectProfile: resolvedConversationalAiProjectProfile(runtimeContext, mutationRequest)
+            }),
+            run: (runtimeContext) => conversationalAiEvaluation(runtimeContext, mutationRequest),
+            resumeData: (result) => result,
+            details: (runtimeContext) => ({
+              action: 'evaluate_conversation_turn',
+              projectType: resolvedConversationalAiProjectProfile(runtimeContext, mutationRequest)?.project?.type || null
+            })
+          },
+          {
+            name: 'plan_conversation_response',
+            kind: 'agent_turn',
+            safe: true,
+            mutation: false,
+            prompt: (runtimeContext) => ({
+              action: 'plan_conversation_response',
+              evaluation: runtimeContext?.runtime?.stepOutputs?.evaluate_conversation_turn?.data || null,
+              projectProfile: resolvedConversationalAiProjectProfile(runtimeContext, mutationRequest)
+            }),
+            run: (runtimeContext) => conversationalAiResponsePlan(runtimeContext, mutationRequest),
+            resumeData: (result) => result,
+            details: (runtimeContext) => ({
+              action: 'plan_conversation_response',
+              intent: runtimeContext?.runtime?.stepOutputs?.evaluate_conversation_turn?.data?.intentId || null
+            })
+          },
+          {
+            name: 'send_conversation_reply',
+            kind: 'adapter_call',
+            adapter: 'ConversationsAdapter',
+            method: 'sendMessage',
+            httpMethod: 'POST',
+            pathHint: '/conversations/messages',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), {
+              contactId: maybeResolvedConversationContactId(runtimeContext, mutationRequest),
+              message: runtimeContext?.runtime?.stepOutputs?.plan_conversation_response?.data?.reply?.message,
+              type: runtimeContext?.runtime?.stepOutputs?.plan_conversation_response?.data?.messageType || resolvedConversationMessageType(runtimeContext, mutationRequest)
+            }],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            resumeData: sendConversationMessageResumeData,
+            details: (runtimeContext) => ({
+              action: 'send_conversational_ai_reply',
+              locationId: mutationRequest?.locationId || null,
+              conversationId: maybeResolvedConversationId(runtimeContext, mutationRequest),
+              contactId: maybeResolvedConversationContactId(runtimeContext, mutationRequest),
+              contactName: mutationRequest?.contactName || resolvedConversationRecord(runtimeContext, mutationRequest)?.contactName || null,
+              messageType: runtimeContext?.runtime?.stepOutputs?.plan_conversation_response?.data?.messageType || resolvedConversationMessageType(runtimeContext, mutationRequest),
+              messagePreview: runtimeContext?.runtime?.stepOutputs?.plan_conversation_response?.data?.reply?.message?.slice(0, 120) || null
+            }),
+            skipIf: (runtimeContext) => !runtimeContext?.runtime?.stepOutputs?.plan_conversation_response?.data?.shouldAutoReply
+              || !runtimeContext?.runtime?.stepOutputs?.plan_conversation_response?.data?.reply?.message
+              || !maybeResolvedConversationContactId(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'record_turn_summary',
+            kind: 'intent',
+            safe: true,
+            mutation: false,
+            details: (runtimeContext) => conversationalAiRunSummary(runtimeContext, mutationRequest)
           }
         ];
       }

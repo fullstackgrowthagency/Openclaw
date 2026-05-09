@@ -494,7 +494,7 @@ function inferAgentId(taskPackName, locationId) {
   if (taskPackName === 'sub_account_onboarding_pack' || taskPackName === 'user_permission_pack' || taskPackName === 'snapshot_template_pack') return 'ghl-agency-lead';
   if (taskPackName === 'lead_management_pack') return `ghl-contacts-agent-${locationId}`;
   if (taskPackName === 'sales_pipeline_pack') return `ghl-sales-pipeline-agent-${locationId}`;
-  if (taskPackName === 'conversation_management_pack') return `ghl-conversations-agent-${locationId}`;
+  if (taskPackName === 'conversation_management_pack' || taskPackName === 'conversational_ai_pack') return `ghl-conversations-agent-${locationId}`;
   if (taskPackName === 'calendar_appointment_pack') return `ghl-calendar-agent-${locationId}`;
   if (taskPackName === 'workflow_automation_qa_pack') return `ghl-workflow-agent-${locationId}`;
   if (taskPackName === 'payments_invoicing_pack') return `ghl-payments-agent-${locationId}`;

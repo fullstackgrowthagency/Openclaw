@@ -248,6 +248,34 @@ export class TaskPackExecutor {
           continue;
         }
 
+        if (step.kind === 'agent_turn') {
+          const prompt = typeof step.prompt === 'function' ? step.prompt(context) : (step.prompt || null);
+          const agentCredentialRef = typeof step.credentialRef === 'function' ? step.credentialRef(context) : (step.credentialRef || null);
+
+          if (typeof step.run !== 'function') {
+            await this.runStore.setStep(run.id, index, stepResult(step, 'planned', {
+              reason: 'agent_turn_handler_missing',
+              promptPreview: previewData(prompt),
+              credentialRef: agentCredentialRef,
+              approval: approvalSnapshot(resolvedApproval)
+            }, index));
+            continue;
+          }
+
+          const agentResult = await step.run(context, { credentialRef: agentCredentialRef, prompt });
+          runtime.stepOutputs[step.name] = { data: agentResult };
+          await this.runStore.setStep(run.id, index, stepResult(step, 'executed', {
+            ok: true,
+            runner: 'inline',
+            credentialRef: agentCredentialRef,
+            promptPreview: previewData(prompt),
+            resultPreview: previewData(agentResult),
+            ...(step.resumeData ? { resumeData: step.resumeData(agentResult, context) } : { resumeData: agentResult }),
+            approval: approvalSnapshot(resolvedApproval)
+          }, index));
+          continue;
+        }
+
         if (step.kind === 'adapter_call') {
           if (!step.requiresCredential || (run.mode === 'live' && run.credentialRef)) {
             const adapter = this.adapters[step.adapter];

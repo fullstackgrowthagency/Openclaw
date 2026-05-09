@@ -434,6 +434,7 @@ Later design:
 - `voice_ai_runtime_pack` handles call transport, turns, and voice-agent resources
 - it passes normalized turn state into the same evaluation and response planner used by `conversational_ai_pack`
 - it uses the same project profile, intent taxonomy, slot schema, guardrails, and action policy
+- it should emit the same structured decision and reply contract so voice and chat can reuse downstream actions
 - text and voice then share:
   - intent detection
   - slot filling
