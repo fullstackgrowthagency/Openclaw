@@ -49,5 +49,6 @@ Skills are shared. Your setup is yours. Keeping them apart means you can update 
 - Outbound HighLevel trial calls can prepend a platform-level AI/opt-out disclosure before the saved agent prompt takes over.
 - When checking bad outbound behavior, inspect call logs first and note whether `trialCall` is `true` before assuming the saved greeting is wrong.
 - For outbound agents, explicitly instruct the prompt that after any forced system disclosure it must go straight into the sales reason for the call and never use inbound phrases like "How can I help you today?"
+- Standard for future outbound Voice AI builds: do not rely on the agent test-call path for final QA. Use a real HighLevel outbound workflow with an internal QA contact/tag so resulting calls are non-trial when compliance rules allow it.
 
 Add whatever helps you do your job. This is your cheat sheet.
