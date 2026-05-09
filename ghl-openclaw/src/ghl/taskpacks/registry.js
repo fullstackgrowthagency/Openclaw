@@ -700,6 +700,71 @@ function sourcePostWebsiteUrl(sourcePost) {
     || null;
 }
 
+function promotionBaseText(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  return normalized
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/[#@][\p{L}\p{N}_-]+/gu, ' ')
+    .replace(/\b\d+\.\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || null;
+}
+
+function capitalizeSentence(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+  return `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`;
+}
+
+function promotionParagraphs(sourcePost) {
+  const summary = sourcePostSummary(sourcePost);
+  if (!summary) return [];
+  return summary
+    .split(/\n\s*\n/)
+    .map((part) => promotionBaseText(part))
+    .filter(Boolean);
+}
+
+function promotionSentences(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return [];
+  return normalized
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/[#@][\p{L}\p{N}_-]+/gu, ' ')
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => promotionBaseText(part))
+    .filter(Boolean);
+}
+
+function decompanyPromotionCopy(value) {
+  const normalized = promotionBaseText(value);
+  if (!normalized) return null;
+  const cleaned = normalized
+    .replace(/^(?:at\s+[^,.]+,\s+)?we\s+(?:help|build|create|turn|make)\s+(?:businesses|brands|teams|companies)\s+/i, '')
+    .replace(/^(?:at\s+[^,.]+,\s+)?we\s+/i, '')
+    .replace(/^that is where\s+/i, '')
+    .replace(/^it is\s+/i, '')
+    .replace(/^there is\s+/i, '')
+    .replace(/^when\s+[^,]+,\s+/i, '')
+    .replace(/^good design should\s+/i, '')
+    .replace(/^great design makes it easy\.?$/i, 'Make the next step easy')
+    .replace(/^most brands do not need to\s+/i, '')
+    .replace(/^they need to\s+/i, '')
+    .replace(/^a lot of lost revenue is not a traffic problem\.?\s*/i, '')
+    .trim();
+  return capitalizeSentence(cleaned);
+}
+
+function meaningfulPromotionLine(value, { maxLength = 90, minLength = 24 } = {}) {
+  const cleaned = decompanyPromotionCopy(value);
+  if (!cleaned) return null;
+  if (/starts to feel\b/i.test(cleaned)) return null;
+  const compact = clampText(cleaned, maxLength);
+  if (!compact || compact.length < minLength) return null;
+  return compact;
+}
+
 function cleanedPromotionPhrase(value, maxLength = 48) {
   const normalized = normalizeString(value);
   if (!normalized) return null;
@@ -734,6 +799,46 @@ function inferredPromotionThemeLabel(sourcePost) {
     .trim();
 
   return cleanedPromotionPhrase(softened || firstLine, 48);
+}
+
+function themedPromotionHeadline(sourcePost) {
+  const theme = toTitleCase(cleanedPromotionPhrase(inferredPromotionThemeLabel(sourcePost), 32));
+  if (!theme) return null;
+
+  const summary = normalizeString(sourcePostSummary(sourcePost))?.toLowerCase() || '';
+  const themeLower = theme.toLowerCase();
+  const candidates = [
+    /website/.test(themeLower) && /convert|books calls|captures leads|moves people to action/.test(summary) ? 'Websites that convert' : null,
+    /analytics|clarity/.test(themeLower) && /tracking|measurable|clear growth decisions/.test(summary) ? 'Analytics clarity that converts' : null,
+    /consistency/.test(themeLower) || /compounds/.test(summary) ? 'Consistency that compounds' : null,
+    /automation/.test(themeLower) && /feel more human/.test(summary) ? 'Automation that feels human' : null,
+    /follow/.test(themeLower) ? 'Lead follow-up that closes' : null,
+    /reporting/.test(themeLower) ? 'Reporting that answers fast' : null,
+    /full stack|growth/.test(themeLower) && /working together|predictable/.test(summary) ? 'Growth systems that connect' : null,
+    /books calls|captures leads|moves people to action/.test(summary) ? `${theme} that converts` : null,
+    /tracking|measurable|clear growth decisions/.test(summary) ? `${theme} that converts` : null,
+    /feel more human/.test(summary) ? `${theme} that feels human` : null,
+    /compounds/.test(summary) ? `${theme} that compounds` : null,
+    /predictable/.test(summary) ? `${theme} that feels predictable` : null,
+    theme
+  ];
+
+  return candidates.map((value) => cleanedPromotionPhrase(value, 40)).find(Boolean) || null;
+}
+
+function inferredPromotionBodyLine(sourcePost) {
+  const paragraphs = promotionParagraphs(sourcePost);
+  const laterParagraphLines = paragraphs.slice(1).flatMap((paragraph) => promotionSentences(paragraph));
+  const sentenceLines = promotionSentences(sourcePostSummary(sourcePost));
+  const candidates = [
+    ...laterParagraphLines.map((line) => meaningfulPromotionLine(line, { maxLength: 90, minLength: 30 })),
+    ...sentenceLines.slice(1).map((line) => meaningfulPromotionLine(line, { maxLength: 90, minLength: 30 })),
+    meaningfulPromotionLine(sentenceLines[0], { maxLength: 90, minLength: 30 }),
+    ...laterParagraphLines.map((line) => meaningfulPromotionLine(line, { maxLength: 90, minLength: 20 })),
+    meaningfulPromotionLine(sourcePostTheme(sourcePost) ? `Get clearer ${sourcePostTheme(sourcePost)} with a simpler path to action.` : null, { maxLength: 90, minLength: 20 })
+  ].filter(Boolean);
+
+  return candidates[0] || null;
 }
 
 function sourcePostMediaUrls(sourcePost) {
@@ -835,17 +940,26 @@ function clampText(value, maxLength) {
 }
 
 function inferredPromotionHeadline(mutationRequest) {
+  const sourcePost = mutationRequest?.sourcePost;
+  const headlineLines = promotionParagraphs(sourcePost).slice(1)
+    .flatMap((paragraph) => promotionSentences(paragraph))
+    .map((line) => cleanedPromotionPhrase(decompanyPromotionCopy(line), 40))
+    .filter(Boolean);
   return mutationRequest?.headline
-    || clampText(firstNonHashtagLine(sourcePostSummary(mutationRequest?.sourcePost)), 60)
-    || inferredPromotionThemeLabel(mutationRequest?.sourcePost)
-    || clampText(sourcePostTheme(mutationRequest?.sourcePost), 60)
+    || cleanedPromotionPhrase(sourcePostTitle(sourcePost), 40)
+    || themedPromotionHeadline(sourcePost)
+    || headlineLines[0]
+    || cleanedPromotionPhrase(firstNonHashtagLine(sourcePostSummary(sourcePost)), 40)
+    || inferredPromotionThemeLabel(sourcePost)
+    || clampText(sourcePostTheme(sourcePost), 40)
     || 'Learn more';
 }
 
 function inferredPromotionDescription(mutationRequest) {
   return mutationRequest?.description
-    || clampText(firstParagraph(sourcePostSummary(mutationRequest?.sourcePost)), 140)
-    || clampText(sourcePostTheme(mutationRequest?.sourcePost), 140)
+    || inferredPromotionBodyLine(mutationRequest?.sourcePost)
+    || clampText(firstParagraph(sourcePostSummary(mutationRequest?.sourcePost)), 90)
+    || clampText(sourcePostTheme(mutationRequest?.sourcePost), 90)
     || null;
 }
 
