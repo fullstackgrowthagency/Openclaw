@@ -30,7 +30,7 @@ export function buildTaskPacks() {
     pack('lead_management_pack', 'ghl-contacts-agent-{locationId}', ['contacts.write'], ['/contacts/']),
     pack('sales_pipeline_pack', 'ghl-sales-pipeline-agent-{locationId}', ['opportunities.write'], ['/opportunities']),
     pack('conversation_management_pack', 'ghl-conversations-agent-{locationId}', ['conversations.write'], ['/conversations/search', '/conversations/:conversationId', '/conversations/:conversationId/messages', '/conversations/messages']),
-    pack('conversational_ai_pack', 'ghl-conversations-agent-{locationId}', ['conversations.write', 'contacts.write'], ['/contacts/', '/contacts/:contactId', '/conversations/search', '/conversations/:conversationId', '/conversations/:conversationId/messages', '/conversations/messages']),
+    pack('conversational_ai_pack', 'ghl-conversations-agent-{locationId}', ['conversations.write', 'contacts.write', 'opportunities.write'], ['/contacts/', '/contacts/:contactId', '/contacts/:contactId/notes', '/contacts/:contactId/tags', '/conversations/search', '/conversations/:conversationId', '/conversations/:conversationId/messages', '/conversations/messages', '/opportunities/']),
     pack('calendar_appointment_pack', 'ghl-calendar-agent-{locationId}', ['calendars.write'], ['/calendars/', '/calendars/events/appointments', '/contacts/:contactId/appointments']),
     pack('workflow_automation_qa_pack', 'ghl-workflow-agent-{locationId}', ['workflows.readonly'], ['/workflows/']),
     pack('payments_invoicing_pack', 'ghl-payments-agent-{locationId}', ['invoices.write', 'products.write'], ['/invoices', '/products/'], true),

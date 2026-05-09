@@ -116,6 +116,7 @@
     "allowed": [
       "send_reply",
       "append_contact_note",
+      "add_contact_tags",
       "update_contact_fields",
       "create_or_update_opportunity",
       "offer_booking_link",
@@ -154,8 +155,17 @@
   "crmPolicy": {
     "contactNotes": true,
     "fieldUpdates": true,
+    "fieldMappings": {},
     "opportunityUpdates": false,
-    "tagging": true
+    "tagging": true,
+    "defaultTags": [],
+    "opportunityDefaults": {
+      "locationId": null,
+      "pipelineId": null,
+      "pipelineStageId": null,
+      "status": "open",
+      "onIntents": []
+    }
   },
   "voicePolicy": {
     "enabled": false,

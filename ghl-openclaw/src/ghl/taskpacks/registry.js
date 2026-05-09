@@ -628,7 +628,7 @@ function defaultConversationalProjectProfile({ mutationRequest, activeBusiness, 
     ],
     playbooks: [],
     actions: {
-      allowed: ['send_reply', 'append_contact_note', 'update_contact_fields', 'create_or_update_opportunity', 'offer_booking_link', 'handoff_to_human'],
+      allowed: ['send_reply', 'append_contact_note', 'add_contact_tags', 'update_contact_fields', 'create_or_update_opportunity', 'offer_booking_link', 'handoff_to_human'],
       approvalRequired: ['create_appointment', 'move_pipeline_stage', 'send_outbound_campaign'],
       disabled: []
     },
@@ -792,12 +792,13 @@ function conversationalAiMutationRequestFrom(event) {
     || normalizeTextBlock(request.text)
     || null;
   const explicitAction = normalizeString(request.action);
+  const eventConversationId = normalizeString(event?.type) === 'ManualRun' ? null : conversationObjectIdFrom(event);
 
   return {
     action: explicitAction || (requestText || request.conversationId || request.contactId || request.contactName ? 'run_conversational_ai' : null),
     mode: normalizeString(request.mode) || 'reply',
     locationId: normalizeString(request.locationId) || normalizeString(event?.locationId) || normalizeString(event?.payload?.locationId) || null,
-    conversationId: normalizeString(request.conversationId) || conversationObjectIdFrom(event),
+    conversationId: normalizeString(request.conversationId) || eventConversationId,
     contactId: normalizeString(request.contactId) || null,
     contactName: normalizeConversationContactName(request.contactName) || normalizeConversationContactName(request.name),
     requestText,
@@ -931,6 +932,181 @@ function conversationalGroundingSnippetForIntent(groundingContext, evaluation) {
   return snippets.find((snippet) => intentMatcher?.test(snippet.text || snippet.summary || '')) || snippets[0] || null;
 }
 
+function conversationalProfileIntent(profile, intentId) {
+  const intents = Array.isArray(profile?.intents) ? profile.intents : [];
+  const normalizedIntentId = normalizeConversationalIntentId(intentId);
+  return intents.find((intent) => normalizeConversationalIntentId(intent.id) === normalizedIntentId) || null;
+}
+
+function conversationalProfileSlot(profile, slotId) {
+  const slots = Array.isArray(profile?.slots) ? profile.slots : [];
+  const normalizedSlotId = normalizeConversationalIntentId(slotId);
+  return slots.find((slot) => normalizeConversationalIntentId(slot.id) === normalizedSlotId) || null;
+}
+
+function conversationalValueFilled(value) {
+  if (typeof value === 'string') return Boolean(normalizeString(value));
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'boolean') return true;
+  if (Array.isArray(value)) return value.some((entry) => conversationalValueFilled(entry));
+  if (value && typeof value === 'object') return Object.values(value).some((entry) => conversationalValueFilled(entry));
+  return false;
+}
+
+function resolvedConversationalPlaybook(profile, evaluation) {
+  const playbooks = Array.isArray(profile?.playbooks) ? profile.playbooks : [];
+  const intentId = normalizeConversationalIntentId(evaluation?.intentId);
+  return playbooks.find((playbook) => {
+    const match = normalizePlainObject(playbook?.match) || {};
+    const intentIds = normalizeStringArray(match.intentIds).map((value) => normalizeConversationalIntentId(value));
+    return intentIds.length > 0 && intentIds.includes(intentId);
+  }) || null;
+}
+
+function playbookRequestsStep(playbook, stepName) {
+  return Array.isArray(playbook?.steps) && playbook.steps.includes(stepName);
+}
+
+function conversationalMissingSlotIds(profile, evaluation) {
+  const intent = conversationalProfileIntent(profile, evaluation?.intentId);
+  if (!intent) return { required: [], optional: [] };
+
+  const slots = normalizePlainObject(evaluation?.slots) || {};
+  const required = normalizeStringArray(intent.requiredSlots).filter((slotId) => !conversationalValueFilled(slots[slotId]));
+  const optional = normalizeStringArray(intent.optionalSlots).filter((slotId) => !conversationalValueFilled(slots[slotId]));
+  return { required, optional };
+}
+
+function conversationalFollowUpQuestion(profile, evaluation) {
+  const playbook = resolvedConversationalPlaybook(profile, evaluation);
+  const shouldAsk = playbook ? playbookRequestsStep(playbook, 'ask_one_follow_up_if_needed') : true;
+  if (!shouldAsk) return null;
+
+  const missing = conversationalMissingSlotIds(profile, evaluation);
+  const targetSlotId = missing.required[0] || missing.optional[0] || null;
+  if (!targetSlotId) return null;
+  return normalizeString(conversationalProfileSlot(profile, targetSlotId)?.question) || null;
+}
+
+function joinConversationalReplyParts(...parts) {
+  return parts.map((part) => normalizeTextBlock(part)).filter(Boolean).join(' ');
+}
+
+function conversationalActionEnabled(profile, actionType) {
+  const normalizedActionType = normalizeString(actionType);
+  if (!normalizedActionType) return false;
+  const allowed = normalizeStringArray(profile?.actions?.allowed);
+  const disabled = new Set(normalizeStringArray(profile?.actions?.disabled));
+  if (disabled.has(normalizedActionType)) return false;
+  if (allowed.length === 0) return true;
+  return allowed.includes(normalizedActionType);
+}
+
+function conversationalTagLabel(value) {
+  const normalized = normalizeString(value)?.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return normalized || null;
+}
+
+function conversationalStringValue(value) {
+  if (typeof value === 'string') return normalizeString(value);
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (Array.isArray(value)) return normalizeStringArray(value).join(', ') || null;
+  return null;
+}
+
+function conversationalContactFieldUpdates(profile, evaluation) {
+  const fieldMappings = normalizePlainObject(profile?.crmPolicy?.fieldMappings || profile?.crmPolicy?.fieldMap) || {};
+  const slots = normalizePlainObject(evaluation?.slots) || {};
+  const updates = {};
+
+  for (const [slotId, fieldName] of Object.entries(fieldMappings)) {
+    const normalizedFieldName = normalizeString(fieldName);
+    const value = conversationalStringValue(slots[slotId]);
+    if (!normalizedFieldName || !value) continue;
+    updates[normalizedFieldName] = value;
+  }
+
+  return updates;
+}
+
+function conversationalContactTags(profile, evaluation, groundingContext) {
+  const tags = [
+    ...normalizeStringArray(profile?.crmPolicy?.defaultTags || profile?.crmPolicy?.tags),
+    'conversation_ai',
+    evaluation?.intentId ? `intent_${normalizeConversationalIntentId(evaluation.intentId)}` : null,
+    evaluation?.needsHuman ? 'needs_human_handoff' : null,
+    groundingContext?.groundingStatus ? `grounding_${groundingContext.groundingStatus}` : null
+  ]
+    .map((value) => conversationalTagLabel(value))
+    .filter(Boolean);
+
+  return [...new Set(tags)].slice(0, 10);
+}
+
+function conversationalContactNote(profile, evaluation, plan, groundingContext, mutationRequest) {
+  const lines = [
+    `Conversational AI turn`,
+    evaluation?.intentId ? `Intent: ${evaluation.intentId}` : null,
+    evaluation?.projectType ? `Project type: ${evaluation.projectType}` : null,
+    normalizeTextBlock(mutationRequest?.requestText) ? `Request: ${normalizeTextBlock(mutationRequest.requestText)}` : null,
+    plan?.reply?.message ? `Planned reply: ${plan.reply.message}` : null,
+    Object.entries(normalizePlainObject(evaluation?.slots) || {})
+      .filter(([, value]) => conversationalValueFilled(value))
+      .map(([key, value]) => `${key}=${conversationalStringValue(value)}`)
+      .join(', ') || null,
+    Array.isArray(groundingContext?.snippets) && groundingContext.snippets.length > 0
+      ? `Grounding: ${groundingContext.snippets.map((snippet) => snippet.citation).filter(Boolean).join(', ')}`
+      : null
+  ].filter(Boolean);
+
+  const slotLineIndex = lines.findIndex((line) => line && !/^Conversational AI turn$|^Intent:|^Project type:|^Request:|^Planned reply:|^Grounding:/i.test(line));
+  if (slotLineIndex >= 0) lines[slotLineIndex] = `Slots: ${lines[slotLineIndex]}`;
+
+  return {
+    title: normalizeString(profile?.identity?.assistantName)
+      ? `${profile.identity.assistantName} conversational AI note`
+      : 'OpenClaw conversational AI note',
+    body: lines.join('\n'),
+    pinned: false
+  };
+}
+
+function conversationalOpportunityRequest(profile, evaluation, groundingContext, context, mutationRequest, contactId) {
+  const defaults = normalizePlainObject(profile?.crmPolicy?.opportunityDefaults) || {};
+  if (!contactId) return null;
+  const pipelineId = normalizeString(defaults.pipelineId);
+  const pipelineStageId = normalizeString(defaults.pipelineStageId);
+  const status = normalizeString(defaults.status) || 'open';
+  const locationId = normalizeString(defaults.locationId)
+    || normalizeString(mutationRequest?.locationId)
+    || normalizeString(profile?.project?.locationId)
+    || normalizeString(context?.event?.locationId)
+    || null;
+  const allowedIntents = normalizeStringArray(defaults.onIntents).map((value) => normalizeConversationalIntentId(value));
+  const intentId = normalizeConversationalIntentId(evaluation?.intentId);
+
+  if (!pipelineId || !pipelineStageId || !locationId) return null;
+  if (allowedIntents.length > 0 && !allowedIntents.includes(intentId)) return null;
+
+  return {
+    locationId,
+    contactId,
+    pipelineId,
+    pipelineStageId,
+    status,
+    name: normalizeString(defaults.name)
+      || `${groundingContext?.businessName || 'Project'} ${intentId ? intentId.replace(/_/g, ' ') : 'conversation'}`,
+    ...(normalizeNumber(defaults.monetaryValue) === null ? {} : { monetaryValue: normalizeNumber(defaults.monetaryValue) })
+  };
+}
+
+function plannedConversationalAction(context, type) {
+  const actions = context?.runtime?.stepOutputs?.plan_conversation_response?.data?.actions;
+  if (!Array.isArray(actions)) return null;
+  return actions.find((action) => normalizeString(action?.type) === normalizeString(type)) || null;
+}
+
 function conversationalAiEvaluation(context, mutationRequest) {
   const profile = resolvedConversationalAiProjectProfile(context, mutationRequest);
   const groundingContext = context?.runtime?.stepOutputs?.assemble_grounding_context?.data || resolvedConversationalAiGroundingContext(context, mutationRequest);
@@ -972,6 +1148,7 @@ function conversationalAiResponsePlan(context, mutationRequest) {
   const policy = resolvedConversationalAiPolicy(context, mutationRequest, profile);
   const evaluation = context?.runtime?.stepOutputs?.evaluate_conversation_turn?.data || conversationalAiEvaluation(context, mutationRequest);
   const groundingContext = context?.runtime?.stepOutputs?.assemble_grounding_context?.data || resolvedConversationalAiGroundingContext(context, mutationRequest);
+  const playbook = resolvedConversationalPlaybook(profile, evaluation);
   const businessName = normalizeString(groundingContext?.businessName) || normalizeString(profile.project?.name) || 'this team';
   const offerSummary = normalizeStringArray(groundingContext?.businessContext?.offers).slice(0, 3).join(', ');
   const groundedSnippet = conversationalGroundingSnippetForIntent(groundingContext, evaluation);
@@ -979,6 +1156,14 @@ function conversationalAiResponsePlan(context, mutationRequest) {
   const hasKnowledgeBase = Boolean(groundingContext?.knowledgeBase?.configured);
   const hasGroundedSnippet = Boolean(groundedSummary);
   const requiresKnowledgeBase = conversationalIntentRequiresKnowledgeBase(profile, evaluation);
+  const followUpQuestion = policy.allowAutoQualify === false
+    ? null
+    : conversationalFollowUpQuestion(profile, evaluation)
+      || (normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question' ? 'What kind of scope are you looking at?' : null)
+      || (normalizeConversationalIntentId(evaluation.intentId) === 'book_or_schedule' ? 'What kind of appointment or next step are you looking to schedule?' : null)
+      || (normalizeConversationalIntentId(evaluation.intentId) === 'support_request' ? 'What exactly are you seeing on your side right now?' : null)
+      || 'What would you like to accomplish first?';
+  let answer = null;
   let message = null;
 
   if (evaluation.needsHuman) {
@@ -986,26 +1171,44 @@ function conversationalAiResponsePlan(context, mutationRequest) {
       || `Absolutely, I can route this to a human from ${businessName}. What is the best detail to include so they can help quickly?`;
   } else if ((!hasKnowledgeBase || !hasGroundedSnippet) && requiresKnowledgeBase) {
     message = `I can help route this, but I should not answer specific ${normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question' ? 'pricing' : 'support'} details until the project knowledge base is configured. Do you want me to hand this to a human?`;
-  } else if (normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question' && groundedSummary) {
-    message = `Based on the current knowledge base, ${groundedSummary} What kind of scope are you looking at?`;
-  } else if (normalizeConversationalIntentId(evaluation.intentId) === 'support_request' && groundedSummary) {
-    message = `From the current knowledge base, ${groundedSummary} What exactly are you seeing on your side right now?`;
-  } else if (normalizeConversationalIntentId(evaluation.intentId) === 'book_or_schedule' && groundedSummary) {
-    message = `${groundedSummary} What kind of appointment or next step are you looking to schedule?`;
   } else if (groundedSummary) {
-    message = `Based on the current project context, ${groundedSummary} What would you like to accomplish first?`;
+    answer = normalizeConversationalIntentId(evaluation.intentId) === 'support_request'
+      ? `From the current knowledge base, ${groundedSummary}`
+      : `Based on the current project context, ${groundedSummary}`;
   } else if (normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question') {
-    message = `Thanks for reaching out. ${businessName} can help${offerSummary ? ` with ${offerSummary}` : ''}. Pricing depends on the scope and setup. What outcome are you trying to solve first?`;
+    answer = `Thanks for reaching out. ${businessName} can help${offerSummary ? ` with ${offerSummary}` : ''}. Pricing depends on the scope and setup.`;
   } else if (normalizeConversationalIntentId(evaluation.intentId) === 'book_or_schedule') {
-    message = `Happy to help with that. What kind of appointment or next step are you looking to schedule, and what timing works best for you?`;
+    answer = `Happy to help with that.`;
   } else if (normalizeConversationalIntentId(evaluation.intentId) === 'support_request') {
-    message = `I can help triage this. What exactly is going wrong, and when did it start?`;
+    answer = `I can help triage this.`;
   } else {
-    message = `Yes, ${businessName} can help with that${offerSummary ? `, especially around ${offerSummary}` : ''}. What would you like to accomplish first?`;
+    answer = `Yes, ${businessName} can help with that${offerSummary ? `, especially around ${offerSummary}` : ''}.`;
+  }
+
+  if (!message) {
+    const shouldAskFollowUp = playbook ? playbookRequestsStep(playbook, 'ask_one_follow_up_if_needed') : true;
+    message = shouldAskFollowUp ? joinConversationalReplyParts(answer, followUpQuestion) : joinConversationalReplyParts(answer);
   }
 
   const actions = [];
-  if (policy.allowAutoUpdateCRM) actions.push({ type: 'append_contact_note', status: 'planned' });
+  const contactId = resolvedConversationContactId(context, mutationRequest);
+  const contactFieldUpdates = conversationalContactFieldUpdates(profile, evaluation);
+  const contactTags = conversationalContactTags(profile, evaluation, groundingContext);
+  const notePayload = conversationalContactNote(profile, evaluation, { reply: { message } }, groundingContext, mutationRequest);
+  const opportunityPayload = conversationalOpportunityRequest(profile, evaluation, groundingContext, context, mutationRequest, contactId);
+
+  if (policy.allowAutoUpdateCRM && contactId && profile?.crmPolicy?.contactNotes !== false && conversationalActionEnabled(profile, 'append_contact_note')) {
+    actions.push({ type: 'append_contact_note', status: 'planned', payload: notePayload });
+  }
+  if (policy.allowAutoUpdateCRM && contactId && profile?.crmPolicy?.tagging !== false && contactTags.length > 0 && conversationalActionEnabled(profile, 'add_contact_tags')) {
+    actions.push({ type: 'add_contact_tags', status: 'planned', payload: { tags: contactTags } });
+  }
+  if (policy.allowAutoUpdateCRM && contactId && profile?.crmPolicy?.fieldUpdates !== false && Object.keys(contactFieldUpdates).length > 0 && conversationalActionEnabled(profile, 'update_contact_fields')) {
+    actions.push({ type: 'update_contact_fields', status: 'planned', payload: contactFieldUpdates });
+  }
+  if (policy.allowAutoUpdateCRM && opportunityPayload && conversationalActionEnabled(profile, 'create_or_update_opportunity')) {
+    actions.push({ type: 'create_opportunity', status: 'planned', payload: opportunityPayload });
+  }
   if (evaluation.needsHuman && policy.allowAutoRouting) actions.push({ type: 'handoff_to_human', status: 'planned' });
 
   return {
@@ -1027,11 +1230,12 @@ function conversationalAiResponsePlan(context, mutationRequest) {
       projectProfileRef: normalizeString(mutationRequest?.project?.profileRef) || null,
       knowledgeBaseRef: profile.project?.knowledgeBaseRef || groundingContext?.knowledgeBase?.ref || null,
       groundingStatus: groundingContext?.groundingStatus || 'missing',
-      citations: Array.isArray(groundingContext?.snippets) ? groundingContext.snippets.map((snippet) => snippet.citation).filter(Boolean) : []
+      citations: Array.isArray(groundingContext?.snippets) ? groundingContext.snippets.map((snippet) => snippet.citation).filter(Boolean) : [],
+      playbookId: normalizeString(playbook?.id) || null
     },
     policy,
     shouldAutoReply: Boolean(policy.allowAutoReply && evaluation.needsReply && normalizeString(message)),
-    contactId: resolvedConversationContactId(context, mutationRequest),
+    contactId,
     conversationId: resolvedConversationId(context, mutationRequest, { requireMatch: false }) || null,
     messageType: resolvedConversationMessageType(context, mutationRequest)
   };
@@ -1163,9 +1367,10 @@ function conversationMutationRequestFrom(event) {
     || parsedRequest.contactName;
   const normalizedMessage = normalizeString(request.message)
     || parsedRequest.message;
+  const eventConversationId = normalizeString(event?.type) === 'ManualRun' ? null : conversationObjectIdFrom(event);
   return {
     action,
-    conversationId: request.conversationId || parsedRequest.conversationId || conversationObjectIdFrom(event),
+    conversationId: request.conversationId || parsedRequest.conversationId || eventConversationId,
     locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
     contactId: request.contactId || null,
     contactName: normalizedContactName,
@@ -5802,6 +6007,96 @@ function taskPackHandlers() {
               action: 'plan_conversation_response',
               intent: runtimeContext?.runtime?.stepOutputs?.evaluate_conversation_turn?.data?.intentId || null
             })
+          },
+          {
+            name: 'append_contact_note_from_ai',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'addNote',
+            httpMethod: 'POST',
+            pathHint: '/contacts/:contactId/notes',
+            args: (runtimeContext) => {
+              const action = plannedConversationalAction(runtimeContext, 'append_contact_note');
+              return [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), maybeResolvedConversationContactId(runtimeContext, mutationRequest), action?.payload || {}];
+            },
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => ({
+              action: 'append_contact_note_from_ai',
+              contactId: maybeResolvedConversationContactId(runtimeContext, mutationRequest),
+              noteTitle: plannedConversationalAction(runtimeContext, 'append_contact_note')?.payload?.title || null
+            }),
+            skipIf: (runtimeContext) => !plannedConversationalAction(runtimeContext, 'append_contact_note')
+              || !maybeResolvedConversationContactId(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'add_contact_tags_from_ai',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'addTags',
+            httpMethod: 'POST',
+            pathHint: '/contacts/:contactId/tags',
+            args: (runtimeContext) => {
+              const action = plannedConversationalAction(runtimeContext, 'add_contact_tags');
+              return [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), maybeResolvedConversationContactId(runtimeContext, mutationRequest), action?.payload || { tags: [] }];
+            },
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => ({
+              action: 'add_contact_tags_from_ai',
+              contactId: maybeResolvedConversationContactId(runtimeContext, mutationRequest),
+              tags: plannedConversationalAction(runtimeContext, 'add_contact_tags')?.payload?.tags || []
+            }),
+            skipIf: (runtimeContext) => !plannedConversationalAction(runtimeContext, 'add_contact_tags')
+              || !maybeResolvedConversationContactId(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'update_contact_fields_from_ai',
+            kind: 'adapter_call',
+            adapter: 'ContactsAdapter',
+            method: 'updateContact',
+            httpMethod: 'PUT',
+            pathHint: '/contacts/:contactId',
+            args: (runtimeContext) => {
+              const action = plannedConversationalAction(runtimeContext, 'update_contact_fields');
+              return [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), maybeResolvedConversationContactId(runtimeContext, mutationRequest), action?.payload || {}];
+            },
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => ({
+              action: 'update_contact_fields_from_ai',
+              contactId: maybeResolvedConversationContactId(runtimeContext, mutationRequest),
+              fields: Object.keys(plannedConversationalAction(runtimeContext, 'update_contact_fields')?.payload || {})
+            }),
+            skipIf: (runtimeContext) => !plannedConversationalAction(runtimeContext, 'update_contact_fields')
+              || !maybeResolvedConversationContactId(runtimeContext, mutationRequest)
+          },
+          {
+            name: 'create_opportunity_from_ai',
+            kind: 'adapter_call',
+            adapter: 'OpportunitiesAdapter',
+            method: 'createOpportunity',
+            httpMethod: 'POST',
+            pathHint: '/opportunities/',
+            args: (runtimeContext) => {
+              const action = plannedConversationalAction(runtimeContext, 'create_opportunity');
+              return [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), action?.payload || {}];
+            },
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            details: (runtimeContext) => ({
+              action: 'create_opportunity_from_ai',
+              opportunity: plannedConversationalAction(runtimeContext, 'create_opportunity')?.payload || null
+            }),
+            skipIf: (runtimeContext) => !plannedConversationalAction(runtimeContext, 'create_opportunity')
           },
           {
             name: 'send_conversation_reply',

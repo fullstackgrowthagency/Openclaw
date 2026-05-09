@@ -479,6 +479,7 @@ Add structured AI evaluation step support in the executor.
 Ship the first narrow use case and keep it profile-driven:
 
 - inbound lead question -> grounded reply + optional qualification question
+- use profile intent definitions, playbooks, and slot questions to choose that next question instead of hardcoded branching alone
 
 ### Step 5
 
@@ -488,6 +489,12 @@ Add controlled project actions:
 - opportunity creation or update
 - booking handoff suggestions
 - support-routing or workflow suggestions
+
+Phase 1 implementation can keep these controlled by:
+
+- only planning CRM actions when the profile explicitly allows them
+- requiring concrete config for opportunity creation, such as pipeline and stage ids
+- preserving approval-gated execution for actual writes
 
 ## Best first live scenario
 
