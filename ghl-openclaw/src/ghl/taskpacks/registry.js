@@ -801,6 +801,46 @@ function inferredPromotionThemeLabel(sourcePost) {
   return cleanedPromotionPhrase(softened || firstLine, 48);
 }
 
+function concisePromotionHeadline(sourcePost) {
+  const summary = normalizeString(sourcePostSummary(sourcePost))?.toLowerCase() || '';
+  const theme = cleanedPromotionPhrase(sourcePostTheme(sourcePost), 28);
+  const candidates = [
+    /click to client|clear growth decisions|scattered activity|better tracking|better offers/.test(summary)
+      ? 'Turn clicks into clients'
+      : null,
+    /books calls|captures leads|moves people to action|next step obvious/.test(summary)
+      ? 'Make the next step obvious'
+      : null,
+    /show up consistently|consistency compounds/.test(summary)
+      ? 'Consistency builds momentum'
+      : null,
+    /right message,?\s*for the right audience,?\s*at the right time/.test(summary)
+      ? 'Reach the right people'
+      : null,
+    /feel more human|repetitive work|real conversations|faster follow-up/.test(summary)
+      ? 'Give your team time back'
+      : null,
+    /follow-up problem|fast response|simple pipeline/.test(summary)
+      ? 'Fix the follow-up gap'
+      : null,
+    /what is working\??.*what is not\??.*what do we change next\??/s.test(summary)
+      ? 'Know what to change next'
+      : null,
+    /working together|predictable|strategy,?\s*site,?\s*content,?\s*automation,?\s*and follow-up/.test(summary)
+      ? 'Get your growth stack aligned'
+      : null,
+    theme && /clarity/.test(theme.toLowerCase()) ? 'Make growth clearer' : null,
+    theme && /website/.test(theme.toLowerCase()) ? 'Build a site that converts' : null,
+    theme && /automation/.test(theme.toLowerCase()) ? 'Automate the repetitive work' : null,
+    theme && /reporting/.test(theme.toLowerCase()) ? 'See what is working faster' : null,
+    theme ? `Get clearer ${theme}` : null
+  ];
+
+  return candidates
+    .map((value) => cleanedPromotionPhrase(value, 40))
+    .find(Boolean) || null;
+}
+
 function themedPromotionHeadline(sourcePost) {
   const theme = toTitleCase(cleanedPromotionPhrase(inferredPromotionThemeLabel(sourcePost), 32));
   if (!theme) return null;
@@ -980,6 +1020,7 @@ function inferredPromotionHeadline(mutationRequest) {
     .filter(Boolean);
   return mutationRequest?.headline
     || cleanedPromotionPhrase(sourcePostTitle(sourcePost), 40)
+    || concisePromotionHeadline(sourcePost)
     || themedPromotionHeadline(sourcePost)
     || headlineLines[0]
     || cleanedPromotionPhrase(firstNonHashtagLine(sourcePostSummary(sourcePost)), 40)
