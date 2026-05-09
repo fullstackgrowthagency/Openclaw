@@ -168,12 +168,19 @@ function socialPostMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
 
+  const rawPostDefaults = request.postDefaults && typeof request.postDefaults === 'object' && !Array.isArray(request.postDefaults)
+    ? { ...request.postDefaults }
+    : {};
   const rawPost = request.post && typeof request.post === 'object' && !Array.isArray(request.post)
     ? { ...request.post }
     : {};
+  const rawPosts = Array.isArray(request.posts)
+    ? request.posts.filter((post) => post && typeof post === 'object' && !Array.isArray(post)).map((post) => ({ ...post }))
+    : [];
   const accountIds = normalizeStringArray(
     request.accountIds
     || rawPost.accountIds
+    || rawPostDefaults.accountIds
     || [request.accountId, rawPost.accountId].filter(Boolean)
   );
   const status = normalizeString(request.status) || normalizeString(rawPost.status);
@@ -185,11 +192,32 @@ function socialPostMutationRequestFrom(event) {
     || normalizeString(request.text)
     || normalizeString(rawPost.summary)
     || normalizeString(rawPost.text);
+  const businessName = normalizeString(request.businessName)
+    || normalizeString(rawPost.businessName)
+    || normalizeString(rawPostDefaults.businessName);
+  const creativeStyle = normalizeString(request.creativeStyle)
+    || normalizeString(request.visualStyle)
+    || normalizeString(request.style)
+    || normalizeString(rawPost.creativeStyle)
+    || normalizeString(rawPost.visualStyle)
+    || normalizeString(rawPost.style)
+    || normalizeString(rawPostDefaults.creativeStyle)
+    || normalizeString(rawPostDefaults.visualStyle)
+    || normalizeString(rawPostDefaults.style);
+  const creativeStyles = normalizeStringArray(
+    request.creativeStyles
+    || request?.creative?.styles
+    || rawPost.creativeStyles
+    || rawPostDefaults.creativeStyles
+  );
 
   if (accountIds.length > 0 && !Array.isArray(rawPost.accountIds)) rawPost.accountIds = accountIds;
   if (status && !rawPost.status) rawPost.status = status;
   if (scheduleDate && !rawPost.scheduleDate && !rawPost.scheduledAt) rawPost.scheduleDate = scheduleDate;
   if (summary && !rawPost.summary && !rawPost.text) rawPost.summary = summary;
+  if (businessName && !rawPost.businessName) rawPost.businessName = businessName;
+  if (creativeStyle && !rawPost.creativeStyle && !rawPost.visualStyle && !rawPost.style) rawPost.creativeStyle = creativeStyle;
+  if (creativeStyles.length > 0 && !Array.isArray(rawPost.creativeStyles)) rawPost.creativeStyles = creativeStyles;
 
   return {
     action: request.action || null,
@@ -198,8 +226,18 @@ function socialPostMutationRequestFrom(event) {
     status,
     scheduleDate,
     summary,
-    post: rawPost
+    businessName,
+    creativeStyle,
+    creativeStyles,
+    continueOnError: normalizeBoolean(request.continueOnError),
+    postDefaults: rawPostDefaults,
+    post: rawPost,
+    posts: rawPosts
   };
+}
+
+function isBulkSocialPostAction(action) {
+  return ['create_social_posts_bulk', 'bulk_create_social_posts', 'create_social_post_batch'].includes(action);
 }
 
 function facebookAdMutationRequestFrom(event) {
@@ -331,6 +369,40 @@ function socialPostCreateResumeData(liveResult, context) {
   };
 }
 
+function socialPostBulkCreateResumeData(liveResult, context) {
+  const data = liveResult?.data || null;
+  const mutationRequest = socialPostMutationRequestFrom(context?.event);
+  const items = Array.isArray(data?.results?.items)
+    ? data.results.items
+    : Array.isArray(data?.items)
+      ? data.items
+      : [];
+
+  return {
+    posts: items.map((item) => {
+      const rawPost = item?.data?.results?.post || item?.data?.post || null;
+      return {
+        index: item?.index ?? null,
+        ok: item?.ok !== false,
+        id: rawPost?._id || rawPost?.id || rawPost?.postId || item?.data?.id || item?.data?.postId || null,
+        status: rawPost?.status || item?.data?.status || null,
+        scheduleDate: rawPost?.scheduleDate || rawPost?.scheduledAt || item?.data?.scheduleDate || item?.data?.scheduledAt || null,
+        summary: rawPost?.summary || rawPost?.text || item?.data?.summary || item?.data?.text || null,
+        error: item?.error || null
+      };
+    }),
+    requested: {
+      locationId: mutationRequest?.locationId || null,
+      count: Array.isArray(mutationRequest?.posts) ? mutationRequest.posts.length : 0,
+      accountIds: mutationRequest?.accountIds || [],
+      status: mutationRequest?.status || null,
+      businessName: mutationRequest?.businessName || null,
+      creativeStyles: mutationRequest?.creativeStyles || []
+    },
+    raw: data
+  };
+}
+
 function socialAccountsFromContext(context) {
   const data = context?.runtime?.stepOutputs?.refresh_social_accounts?.data;
   if (Array.isArray(data?.results?.accounts)) return data.results.accounts;
@@ -414,6 +486,64 @@ function socialPostCreateBody(mutationRequest) {
     ...(status ? { status } : {}),
     ...(scheduleDate && !post.scheduleDate && !post.scheduledAt ? { scheduleDate } : {})
   };
+}
+
+function socialPostBulkCreateBodies(mutationRequest) {
+  const posts = Array.isArray(mutationRequest?.posts) ? mutationRequest.posts : [];
+  if (posts.length === 0) {
+    throw new Error('create_social_posts_bulk requires a non-empty posts array.');
+  }
+
+  const defaults = mutationRequest?.postDefaults && typeof mutationRequest.postDefaults === 'object' && !Array.isArray(mutationRequest.postDefaults)
+    ? mutationRequest.postDefaults
+    : mutationRequest?.post && typeof mutationRequest.post === 'object' && !Array.isArray(mutationRequest.post)
+      ? mutationRequest.post
+      : {};
+
+  return posts.map((post) => {
+    const mergedPost = {
+      ...defaults,
+      ...post
+    };
+    const body = socialPostCreateBody({
+      post: mergedPost,
+      accountIds: Array.isArray(post?.accountIds) && post.accountIds.length > 0
+        ? post.accountIds
+        : Array.isArray(defaults?.accountIds) && defaults.accountIds.length > 0
+          ? defaults.accountIds
+          : mutationRequest?.accountIds,
+      status: normalizeString(post?.status) || normalizeString(defaults?.status) || mutationRequest?.status,
+      scheduleDate: normalizeString(post?.scheduleDate)
+        || normalizeString(post?.scheduledAt)
+        || normalizeString(defaults?.scheduleDate)
+        || normalizeString(defaults?.scheduledAt)
+        || mutationRequest?.scheduleDate,
+      summary: normalizeString(post?.summary) || normalizeString(post?.text) || null
+    });
+
+    const businessName = normalizeString(post?.businessName)
+      || normalizeString(defaults?.businessName)
+      || mutationRequest?.businessName;
+    const creativeStyle = normalizeString(post?.creativeStyle)
+      || normalizeString(post?.visualStyle)
+      || normalizeString(post?.style)
+      || normalizeString(defaults?.creativeStyle)
+      || normalizeString(defaults?.visualStyle)
+      || normalizeString(defaults?.style)
+      || mutationRequest?.creativeStyle;
+    const creativeStyles = normalizeStringArray(
+      post?.creativeStyles
+      || defaults?.creativeStyles
+      || mutationRequest?.creativeStyles
+    );
+
+    return {
+      ...body,
+      ...(businessName ? { businessName } : {}),
+      ...(creativeStyle ? { creativeStyle } : {}),
+      ...(creativeStyles.length > 0 ? { creativeStyles } : {})
+    };
+  });
 }
 
 function collectFacebookEntityRecords(data) {
@@ -3248,6 +3378,7 @@ function taskPackHandlers() {
         const mutationRequest = socialPostMutationRequestFrom(context.event);
         const locationId = resolvedSocialPostLocationId(context, mutationRequest);
         const explicitCreateSocialPost = mutationRequest?.action === 'create_social_post';
+        const explicitCreateSocialPostsBulk = isBulkSocialPostAction(mutationRequest?.action);
         return [
           {
             name: 'refresh_social_accounts',
@@ -3301,6 +3432,41 @@ function taskPackHandlers() {
             skipIf: () => !explicitCreateSocialPost
           },
           {
+            name: 'create_social_posts_bulk',
+            kind: 'adapter_call',
+            adapter: 'SocialPlannerAdapter',
+            method: 'createPostsWithCreative',
+            httpMethod: 'POST',
+            pathHint: '/social-media-posting/:locationId/posts (bulk orchestrated)',
+            args: () => [
+              context.credentialRef || defaultLocationCredential(context),
+              locationId,
+              socialPostBulkCreateBodies(mutationRequest),
+              {
+                generateCreative: true,
+                businessName: normalizeString(mutationRequest?.businessName) || null,
+                creativeStyles: mutationRequest?.creativeStyles || [],
+                continueOnError: mutationRequest?.continueOnError === true
+              }
+            ],
+            safe: false,
+            mutation: true,
+            requiresApproval: true,
+            requiresCredential: true,
+            resumeData: socialPostBulkCreateResumeData,
+            details: {
+              action: 'create_social_posts_bulk',
+              locationId,
+              count: Array.isArray(mutationRequest?.posts) ? mutationRequest.posts.length : 0,
+              accountIds: mutationRequest?.accountIds || [],
+              status: mutationRequest?.status || null,
+              businessName: mutationRequest?.businessName || null,
+              creativeStyles: mutationRequest?.creativeStyles || [],
+              continueOnError: mutationRequest?.continueOnError === true
+            },
+            skipIf: () => !explicitCreateSocialPostsBulk
+          },
+          {
             name: 'generate_social_post_preview',
             kind: 'adapter_call',
             adapter: 'PreviewArtifactsAdapter',
@@ -3326,7 +3492,7 @@ function taskPackHandlers() {
               accountCount: socialAccountsFromContext(runtimeContext).length,
               targetAccountIds: mutationRequest?.accountIds || []
             }),
-            skipIf: () => !explicitCreateSocialPost
+            skipIf: () => !explicitCreateSocialPost || explicitCreateSocialPostsBulk
           }
         ];
       }

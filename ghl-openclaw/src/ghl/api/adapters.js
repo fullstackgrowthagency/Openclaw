@@ -3,6 +3,49 @@ import { readFile } from 'node:fs/promises';
 import { GhlApiClient } from './client.js';
 import { generateSocialPostCreative } from '../previews/social-post-creative.js';
 
+function uniqueStrings(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function normalizeSocialCreativeRequest(body = {}, options = {}) {
+  const payload = JSON.parse(JSON.stringify(body || {}));
+  const creativeStyle = payload.creativeStyle || payload.visualStyle || payload.style || payload?.creative?.style || null;
+  const creativeStyles = uniqueStrings([
+    ...(Array.isArray(payload.creativeStyles) ? payload.creativeStyles : []),
+    ...(Array.isArray(payload?.creative?.styles) ? payload.creative.styles : []),
+    ...(Array.isArray(options.creativeStyles) ? options.creativeStyles : [])
+  ]);
+
+  delete payload.businessName;
+  delete payload.creativeStyle;
+  delete payload.creativeStyles;
+  delete payload.visualStyle;
+  delete payload.style;
+  if (payload.creative && typeof payload.creative === 'object' && !Array.isArray(payload.creative)) {
+    delete payload.creative.style;
+    delete payload.creative.styles;
+    if (Object.keys(payload.creative).length === 0) delete payload.creative;
+  }
+
+  return {
+    payload,
+    creativeStyle,
+    creativeStyles,
+    businessName: body?.businessName || options.businessName || null
+  };
+}
+
 export class LocationsAdapter {
   constructor({ client = new GhlApiClient() } = {}) {
     this.client = client;
@@ -574,27 +617,34 @@ export class SocialPlannerAdapter {
   }
 
   async createPostWithCreative(credentialRef, locationId, body, options = {}) {
-    const payload = JSON.parse(JSON.stringify(body || {}));
-    const creativeStyle = payload.creativeStyle || payload.visualStyle || payload.style || payload?.creative?.style || null;
-    delete payload.businessName;
-    delete payload.creativeStyle;
-    delete payload.visualStyle;
-    delete payload.style;
-    if (payload.creative && typeof payload.creative === 'object' && !Array.isArray(payload.creative)) {
-      delete payload.creative.style;
-      if (Object.keys(payload.creative).length === 0) delete payload.creative;
-    }
+    const { payload, creativeStyle, creativeStyles, businessName } = normalizeSocialCreativeRequest(body, options);
     const existingMedia = Array.isArray(payload.media) ? payload.media.filter(Boolean) : [];
     let creative = null;
 
     if (existingMedia.length === 0 && options.generateCreative !== false) {
-      const generated = await generateSocialPostCreative({
+      const requestedStyles = uniqueStrings([creativeStyle, ...creativeStyles]);
+      const variantStyles = requestedStyles.length > 0 ? requestedStyles : [creativeStyle];
+      const variants = [];
+
+      for (const style of variantStyles) {
+        const generated = await generateSocialPostCreative({
+          locationId,
+          post: payload,
+          businessName,
+          style,
+          outputDir: options.outputDir
+        });
+        variants.push(generated);
+      }
+
+      const generated = variants[0] || await generateSocialPostCreative({
         locationId,
         post: payload,
-        businessName: options.businessName,
+        businessName,
         style: creativeStyle,
         outputDir: options.outputDir
       });
+
       const uploaded = await this.uploadLocalMediaFile(credentialRef, generated.pngPath, {
         mimeType: 'image/png',
         filename: path.basename(generated.pngPath)
@@ -608,6 +658,8 @@ export class SocialPlannerAdapter {
       payload.media = [{ url: hostedUrl, type: 'image' }];
       creative = {
         generated,
+        variants,
+        requestedStyles,
         uploaded: uploaded.data,
         media: payload.media
       };
@@ -621,6 +673,55 @@ export class SocialPlannerAdapter {
         openClaw: {
           creative,
           requestBody: payload
+        }
+      }
+    };
+  }
+
+  async createPostsWithCreative(credentialRef, locationId, posts, options = {}) {
+    const list = Array.isArray(posts) ? posts : [];
+    if (list.length === 0) {
+      throw new Error('Bulk social post creation requires a non-empty posts array.');
+    }
+
+    const results = [];
+    for (let index = 0; index < list.length; index += 1) {
+      const post = list[index];
+      try {
+        const created = await this.createPostWithCreative(credentialRef, locationId, post, {
+          ...options,
+          businessName: post?.businessName || options.businessName || null,
+          creativeStyles: Array.isArray(post?.creativeStyles) ? post.creativeStyles : options.creativeStyles
+        });
+        results.push({
+          index,
+          ok: created?.ok !== false,
+          status: created?.status || null,
+          data: created?.data || null
+        });
+      } catch (error) {
+        results.push({
+          index,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        if (options.continueOnError !== true) throw error;
+      }
+    }
+
+    return {
+      ok: results.every((item) => item.ok !== false),
+      status: results.every((item) => item.ok !== false) ? 200 : 207,
+      data: {
+        results: {
+          items: results,
+          posts: results.map((item) => item?.data?.results?.post || item?.data?.post || item?.data || null).filter(Boolean)
+        },
+        openClaw: {
+          totalCount: list.length,
+          createdCount: results.filter((item) => item.ok !== false).length,
+          failedCount: results.filter((item) => item.ok === false).length,
+          items: results
         }
       }
     };
