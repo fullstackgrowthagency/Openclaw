@@ -208,16 +208,36 @@ function opportunityMutationRequestFrom(event) {
 function conversationMutationRequestFrom(event) {
   const request = event?.payload?.mutationRequest || event?.payload?.actionRequest || null;
   if (!request) return null;
-  const normalizedMessageType = normalizeString(request.messageType) || normalizeString(request.type);
-  const normalizedContactName = normalizeString(request.contactName) || normalizeString(request.name);
+  const plainTextRequest = normalizeTextBlock(
+    request.requestText
+    || request.brief
+    || request.description
+    || request.instructions
+    || request.prompt
+    || ((!request.action && !request.contactName && !request.name && !request.type && !request.messageType) ? request.text : null)
+  );
+  const parsedRequest = parseConversationRequestText(plainTextRequest);
+  const normalizedMessageType = normalizeConversationMessageType(request.messageType)
+    || normalizeConversationMessageType(request.type)
+    || parsedRequest.messageType;
+  const normalizedContactName = normalizeString(request.contactName)
+    || normalizeString(request.name)
+    || parsedRequest.contactName;
+  const normalizedMessage = normalizeString(request.message)
+    || parsedRequest.message;
+  const action = request.action
+    || (!request.action && looksLikeConversationSendRequestText(plainTextRequest) && normalizedContactName && normalizedMessage && normalizedMessageType
+      ? 'send_conversation_message'
+      : null);
   return {
-    action: request.action || null,
+    action,
     conversationId: request.conversationId || objectIdFrom(event),
+    locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
     contactId: request.contactId || null,
     contactName: normalizedContactName,
-    message: normalizeString(request.message),
+    message: normalizedMessage,
     messageType: normalizedMessageType,
-    channel: normalizeString(request.channel),
+    channel: normalizeString(request.channel) || parsedRequest.channel,
     fromNumber: normalizeString(request.fromNumber),
     toNumber: normalizeString(request.toNumber)
   };
@@ -563,6 +583,76 @@ function normalizeVariantCount(value, max = 4) {
   const normalized = normalizeNumber(value);
   if (!Number.isFinite(normalized) || normalized < 1) return null;
   return Math.min(max, Math.max(1, Math.round(normalized)));
+}
+
+function normalizeConversationMessageType(value) {
+  const normalized = normalizeString(value)?.toLowerCase().replace(/[_\s-]+/g, ' ');
+  if (!normalized) return null;
+  if (['sms', 'text', 'text message'].includes(normalized)) return 'SMS';
+  if (['email', 'e mail'].includes(normalized)) return 'Email';
+  if (['whatsapp', 'wa'].includes(normalized)) return 'WhatsApp';
+  if (['live chat', 'livechat', 'chat', 'web chat', 'webchat'].includes(normalized)) return 'Live_Chat';
+  return normalizeString(value);
+}
+
+function detectConversationMessageTypeFromText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return null;
+  if (/\bwhats?app\b/.test(source)) return 'WhatsApp';
+  if (/\bemail\b|\be-mail\b/.test(source)) return 'Email';
+  if (/\blive\s*chat\b|\bweb\s*chat\b/.test(source)) return 'Live_Chat';
+  if (/\btext\b|\bsms\b|\bmessage\b/.test(source)) return 'SMS';
+  return null;
+}
+
+function extractConversationContactNameFromText(text) {
+  const labeled = extractLabeledText(text, ['contact', 'contact name', 'lead', 'person', 'to']);
+  if (labeled) return labeled;
+
+  const natural = text?.match(/\b(?:send\s+)?(?:an?\s+)?(?:sms|text|message|email|whatsapp|whats?app\s+message)\s+to\s+([^\n:,-]+?)(?=(?:\s+(?:saying|that)\b|\s*[:,-]|$))/i)
+    || text?.match(/\b(?:text|message|email|whatsapp|whats?app)\s+([^\n:,-]+?)(?=(?:\s+(?:saying|that)\b|\s*[:,-]|$))/i);
+  return normalizeString(natural?.[1]);
+}
+
+function extractConversationMessageFromText(text) {
+  const labeled = extractLabeledText(text, ['message', 'body', 'reply']);
+  if (labeled) return labeled;
+
+  const quoted = text?.match(/["“]([^"”]+)["”]\s*$/);
+  if (normalizeString(quoted?.[1])) return normalizeString(quoted[1]);
+
+  const natural = text?.match(/\b(?:saying|that)\s+([\s\S]+)$/i)
+    || text?.match(/\b(?:send\s+)?(?:an?\s+)?(?:sms|text|message|email|whatsapp|whats?app\s+message)\s+to\s+[^\n:,-]+?\s*[:,-]\s*([\s\S]+)$/i)
+    || text?.match(/\b(?:text|message|email|whatsapp|whats?app)\s+[^\n:,-]+?\s*[:,-]\s*([\s\S]+)$/i);
+  return normalizeString(natural?.[1]);
+}
+
+function parseConversationRequestText(value) {
+  const text = normalizeTextBlock(value);
+  if (!text) {
+    return {
+      sourceText: null,
+      contactName: null,
+      message: null,
+      messageType: null,
+      channel: null
+    };
+  }
+
+  return {
+    sourceText: text,
+    contactName: extractConversationContactNameFromText(text),
+    message: extractConversationMessageFromText(text),
+    messageType: normalizeConversationMessageType(extractLabeledText(text, ['message type', 'type'])) || detectConversationMessageTypeFromText(text),
+    channel: normalizeString(extractLabeledText(text, ['channel']))
+  };
+}
+
+function looksLikeConversationSendRequestText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return false;
+  if (/\bsocial\s+post\b|\bsocial\s+calendar\b|\bappointment\b/.test(source)) return false;
+  return /\b(?:send\s+)?(?:an?\s+)?(?:sms|text|message|email|whatsapp|whats?app\s+message)\b/.test(source);
 }
 
 function parseDateToIso(value) {
@@ -3566,6 +3656,7 @@ function resolvedConversationContactDetails(context, mutationRequest) {
   const resolvedContactId = mutationRequest?.contactId || context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts?.[0]?.id || null;
   return {
     action: 'send_conversation_message',
+    locationId: mutationRequest?.locationId || null,
     conversationId: mutationRequest?.conversationId || null,
     contactId: resolvedContactId,
     contactName: mutationRequest?.contactName || null,
@@ -3574,6 +3665,53 @@ function resolvedConversationContactDetails(context, mutationRequest) {
     fromNumber: mutationRequest?.fromNumber || null,
     toNumber: mutationRequest?.toNumber || null,
     messagePreview: mutationRequest?.message ? mutationRequest.message.slice(0, 120) : null
+  };
+}
+
+function fetchConversationResumeData(liveResult, context) {
+  const data = liveResult?.data || null;
+  const mutationRequest = conversationMutationRequestFrom(context?.event);
+  return {
+    conversation: data && typeof data === 'object'
+      ? {
+          id: data?.id || data?._id || mutationRequest?.conversationId || null,
+          contactId: data?.contactId || data?.contact?.id || null,
+          contactName: data?.fullName || data?.contactName || data?.contact?.name || mutationRequest?.contactName || null,
+          locationId: data?.locationId || mutationRequest?.locationId || null,
+          status: data?.status || null,
+          channel: data?.channel || data?.type || null,
+          unreadCount: normalizeNumber(data?.unreadCount) || 0,
+          lastMessageBody: data?.lastMessageBody || data?.lastMessage || data?.message || null,
+          lastMessageType: data?.lastMessageType || data?.messageType || null
+        }
+      : null,
+    raw: data
+  };
+}
+
+function sendConversationMessageResumeData(liveResult, context) {
+  const data = liveResult?.data || null;
+  const mutationRequest = conversationMutationRequestFrom(context?.event);
+  return {
+    requested: {
+      locationId: mutationRequest?.locationId || null,
+      conversationId: mutationRequest?.conversationId || null,
+      contactId: mutationRequest?.contactId || context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts?.[0]?.id || null,
+      contactName: mutationRequest?.contactName || null,
+      messageType: mutationRequest?.messageType || null,
+      channel: mutationRequest?.channel || null,
+      messagePreview: mutationRequest?.message ? mutationRequest.message.slice(0, 120) : null
+    },
+    result: data && typeof data === 'object'
+      ? {
+          id: data?.id || data?._id || null,
+          conversationId: data?.conversationId || data?.conversation?.id || mutationRequest?.conversationId || null,
+          messageId: data?.messageId || data?.id || null,
+          status: data?.status || null,
+          type: data?.type || data?.messageType || mutationRequest?.messageType || null
+        }
+      : null,
+    raw: data
   };
 }
 
@@ -4211,6 +4349,12 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             requiresCredential: true,
+            resumeData: fetchConversationResumeData,
+            details: {
+              action: 'fetch_conversation',
+              conversationId,
+              locationId: mutationRequest?.locationId || null
+            },
             skipIf: () => !conversationId || explicitConversationSend
           },
           {
@@ -4253,6 +4397,7 @@ function taskPackHandlers() {
             mutation: true,
             requiresApproval: true,
             requiresCredential: true,
+            resumeData: sendConversationMessageResumeData,
             details: (runtimeContext) => resolvedConversationContactDetails(runtimeContext, mutationRequest),
             skipIf: () => !explicitConversationSend
           },
