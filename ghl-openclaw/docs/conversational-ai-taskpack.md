@@ -2,13 +2,41 @@
 
 ## Goal
 
-Add a business-agnostic conversational AI layer to `ghl-openclaw` that can:
+Add a project-agnostic conversational AI layer to `ghl-openclaw` that can:
 
 - handle inbound text conversations in plain English
-- answer grounded business questions using the active business record and knowledge base
-- qualify leads, gather missing details, and route to booking or handoff flows
+- answer grounded project questions using business context, project context, and a knowledge base
+- qualify, support, triage, route, schedule, or hand off depending on the project type
 - reuse existing GHL action packs for sends, reads, contact updates, opportunity updates, and appointments
 - become the shared decision engine for later voice AI work
+
+## Core design shift
+
+This should be built as a **project-profile-driven conversation engine**, not a single hardcoded lead-gen bot.
+
+That means the conversational AI should be customizable by profile data for:
+
+- project type
+- audience types
+- intent taxonomy
+- slot schema
+- allowed actions
+- escalation policy
+- tone and reply style
+- channel behavior
+
+Examples of supported project types:
+
+- service business lead intake
+- support or customer success
+- appointment booking and rescheduling
+- ecommerce pre-sales and order help
+- recruiting and candidate screening
+- real estate inquiry triage
+- internal ops assistant
+- education or community onboarding
+
+The reusable unit is not just a business record. It is a **project profile** plus business context.
 
 ## Recommendation
 
@@ -36,7 +64,7 @@ But conversational AI needs a different responsibility set:
 - turn classification
 - grounded answer generation
 - slot filling and follow-up questions
-- business policy checks
+- project policy checks
 - action planning across multiple domains
 - escalation and handoff rules
 - response strategy that works for both chat and voice
@@ -80,30 +108,32 @@ Later for shared voice logic:
 
 ## Phase 1 scope
 
-First implementation slice should be **inbound lead handling over text**.
+The first live slice should still be narrow, but the architecture should already be **project-agnostic**.
 
-Supported behaviors:
+Phase 1 target:
 
-1. answer simple business questions grounded in the active business knowledge base
-2. detect lead intent
-   - pricing
-   - services
-   - availability
-   - booking
-   - objection / hesitation
+- inbound text conversations
+- one configurable project profile loaded per run
+- one default shipped archetype: service-business lead handling
+
+Supported behaviors in the generalized design:
+
+1. answer grounded project questions using the active profile and knowledge base
+2. detect project-specific intent
+   - service or offer questions
+   - support issues
+   - scheduling
+   - qualification or intake
+   - objection or hesitation
    - human handoff
-3. qualify leads with a small required slot set
-   - name
-   - company
-   - need / problem
-   - urgency
-   - budget or fit signal if relevant
-4. suggest or trigger next actions
+3. extract configurable slots defined by the profile
+   - examples: need, urgency, budget, product, issue type, timeframe, property type, role, order status
+4. suggest or trigger next actions based on the profile
    - reply with answer only
    - ask one clarifying question
-   - create or update contact fields / notes
-   - create or update opportunity
-   - offer booking path
+   - create or update contact fields or notes
+   - create or update opportunity or case state
+   - offer booking or next-step routing
    - hand off to human
 
 Out of scope for phase 1:
@@ -126,7 +156,7 @@ Reuse existing pieces:
 - `OpportunitiesAdapter`
 - `CalendarsAdapter`
 
-### Layer 2: business grounding
+### Layer 2: project grounding
 
 Reuse existing business context patterns from `registry.js`:
 
@@ -135,16 +165,39 @@ Reuse existing business context patterns from `registry.js`:
 - `knowledgeBaseRef`
 - location resolution from the active business record
 
-Add a small business-grounding helper that returns:
+Add a project-grounding helper that returns:
 
 - business identity
-- offer summary
-- audience
-- differentiators
-- CTA policy
-- knowledge base ref / source
-- tone / brand voice
+- project identity
+- project type
+- audience schema
+- intent schema
+- slot schema
+- allowed actions
+- CTA or routing policy
+- knowledge base ref or source
+- tone or brand voice
 - operating constraints
+
+### Layer 2.5: project profile
+
+The conversational system should load a normalized project profile, for example from:
+
+- active business defaults plus AI-specific extensions
+- a dedicated profile record such as `docs/conversational-ai-project-profile.template.json`
+- future per-project saved profiles in workspace or credential-backed storage
+
+The project profile should define:
+
+- project type and summary
+- channel policy
+- domain entities and terminology
+- custom intents
+- custom slots and follow-up questions
+- playbooks
+- action permissions
+- guardrails and escalation rules
+- evaluation examples
 
 ### Layer 3: conversation intelligence
 
@@ -152,7 +205,9 @@ New orchestration logic should produce a structured decision object:
 
 ```json
 {
+  "projectType": "service_business",
   "intent": "ask_service_question",
+  "intentId": "ask_service_question",
   "confidence": 0.92,
   "needsHuman": false,
   "needsReply": true,
@@ -174,7 +229,7 @@ New orchestration logic should produce a structured decision object:
 
 ### Layer 4: action execution
 
-The AI pack should not directly duplicate every business mutation.
+The AI pack should not directly duplicate every project mutation.
 
 Instead it should either:
 
@@ -189,8 +244,9 @@ Preferred rule:
 Examples:
 
 - send a reply -> reuse conversation send behavior
-- update lead note/tag -> reuse lead-management primitives
+- update lead note or tag -> reuse lead-management primitives
 - create appointment -> reuse appointment pack request shape
+- route support case -> reuse future support or workflow primitives
 
 ## Proposed execution plan
 
@@ -201,26 +257,28 @@ Examples:
    - get latest messages
    - get contact
 
-2. `load_business_context`
+2. `load_project_context`
    - resolve active business defaults
+   - resolve project profile
    - require knowledge base for grounded answer mode
 
 3. `evaluate_conversation_turn`
    - classify intent
+   - map the turn into the active project taxonomy
    - detect whether a reply is needed
    - detect whether human escalation is needed
    - extract slots
 
 4. `plan_conversation_response`
    - draft reply
-   - decide whether to answer, qualify, book, or hand off
+   - decide whether to answer, qualify, support, route, book, or hand off
    - produce proposed domain actions
 
 5. `approve_high_risk_actions`
    - only when a write or risky automation is proposed
 
 6. `execute_domain_actions`
-   - optional contact/opportunity/appointment updates
+   - optional contact, opportunity, appointment, or workflow-adjacent updates
 
 7. `send_conversation_reply`
    - if policy says reply now
@@ -279,6 +337,11 @@ Fallback if executor changes are delayed:
   "contactId": "...",
   "requestText": "Customer asked whether you handle HVAC follow-up and what pricing looks like",
   "mode": "reply",
+  "project": {
+    "type": "service_business",
+    "profileRef": "optional override",
+    "profile": null
+  },
   "business": {
     "name": "optional override",
     "knowledgeBaseRef": "optional override"
@@ -287,10 +350,21 @@ Fallback if executor changes are delayed:
     "allowAutoReply": true,
     "allowAutoQualify": true,
     "allowAutoBook": false,
-    "allowAutoUpdateCRM": true
+    "allowAutoUpdateCRM": true,
+    "allowAutoSupportActions": false,
+    "allowAutoRouting": true
   }
 }
 ```
+
+The pack should also allow explicit project-profile overrides for custom deployments, for example:
+
+- custom intents
+- custom slots
+- custom playbooks
+- action allowlists
+- escalation keywords
+- channel-specific reply rules
 
 ## Output contract
 
@@ -300,6 +374,7 @@ Return a structured result that is useful in both chat and voice flows:
 {
   "decision": {
     "intent": "pricing_question",
+    "projectType": "service_business",
     "needsReply": true,
     "needsHuman": false,
     "replyMode": "answer_then_question"
@@ -315,17 +390,18 @@ Return a structured result that is useful in both chat and voice flows:
   ],
   "grounding": {
     "businessName": "...",
+    "projectProfileRef": "...",
     "knowledgeBaseRef": "..."
   }
 }
 ```
 
-## Business-agnostic guardrails
+## Project-agnostic guardrails
 
 The AI layer should always:
 
-- prefer the active business record, not hardcoded business assumptions
-- require a business knowledge base for authoritative claims
+- prefer the active project profile and business record, not hardcoded industry assumptions
+- require a knowledge base for authoritative claims
 - avoid invented pricing, guarantees, or policies
 - ask a clarifying question when information is missing
 - escalate to human when confidence is low or the request is high risk
@@ -333,10 +409,10 @@ The AI layer should always:
 Hard blocks for auto-send:
 
 - legal or compliance claims
-- refunds / billing disputes
+- refunds or billing disputes
 - custom quotes beyond documented ranges
 - contract negotiation
-- crisis / complaint handling with strong negative sentiment
+- crisis or complaint handling with strong negative sentiment
 
 ## Approval model
 
@@ -357,10 +433,11 @@ Later design:
 
 - `voice_ai_runtime_pack` handles call transport, turns, and voice-agent resources
 - it passes normalized turn state into the same evaluation and response planner used by `conversational_ai_pack`
+- it uses the same project profile, intent taxonomy, slot schema, guardrails, and action policy
 - text and voice then share:
   - intent detection
   - slot filling
-  - business grounding
+  - project grounding
   - escalation policy
   - action planning
 
@@ -370,11 +447,12 @@ That avoids building one text brain and one voice brain.
 
 ### Step 1
 
-Add the new pack definition and registry stub:
+Add the new pack definition, registry stub, and profile loading support:
 
 - `src/ghl/taskpacks/definitions.js`
 - `src/ghl/taskpacks/registry.js`
 - `src/ghl/webhooks/processor.js`
+- `docs/conversational-ai-project-profile.template.json`
 
 ### Step 2
 
@@ -383,7 +461,7 @@ Implement read-only context assembly:
 - fetch conversation
 - fetch messages
 - fetch contact
-- resolve active business and knowledge base metadata
+- resolve active business and project-profile metadata
 
 ### Step 3
 
@@ -391,28 +469,29 @@ Add structured AI evaluation step support in the executor.
 
 ### Step 4
 
-Ship the first narrow use case:
+Ship the first narrow use case and keep it profile-driven:
 
 - inbound lead question -> grounded reply + optional qualification question
 
 ### Step 5
 
-Add controlled business actions:
+Add controlled project actions:
 
-- contact note / tag updates
+- contact note or tag updates
 - opportunity creation or update
 - booking handoff suggestions
+- support-routing or workflow suggestions
 
 ## Best first live scenario
 
 The first scenario to validate live should be:
 
-**Inbound lead asks what the business does and whether it can help with a specific pain point.**
+**An inbound message hits a configured project profile, the AI picks the right intent from that profile, answers with grounded context, and asks one useful next-step question.**
 
 Success looks like:
 
 - grounded answer
-- no hallucinated offer claims
+- no hallucinated project claims
 - one useful follow-up question
 - optional CRM note
 - no approval unless a real write is attempted
@@ -425,11 +504,12 @@ Success looks like:
 - `src/ghl/webhooks/processor.js`
 - `src/ghl/api/adapters.js` (only if small helper reads are missing)
 - `src/ghl/onboarding/start-service.js` or related active-business helpers if OpenAI credential lookup needs to be shared cleanly
+- `docs/conversational-ai-project-profile.template.json`
 
 ## Recommendation for the next step
 
 After this design, the best next coding step is:
 
-**Implement the read-only scaffold for `conversational_ai_pack` plus executor support for a structured `agent_turn` step.**
+**Implement the read-only scaffold for `conversational_ai_pack`, add project-profile loading, and add executor support for a structured `agent_turn` step.**
 
-That gives us a real conversational brain entry point without prematurely wiring risky autonomous writes.
+That gives us a real customizable conversational brain entry point without prematurely wiring risky autonomous writes.

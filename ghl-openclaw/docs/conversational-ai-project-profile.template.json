@@ -1,0 +1,169 @@
+{
+  "$schema": "ghl-openclaw/conversational-ai-project-profile/v1",
+  "project": {
+    "id": "example-project",
+    "name": "Example Project",
+    "type": "service_business",
+    "summary": "Short description of what this project is and what the assistant is trying to do.",
+    "locationId": null,
+    "knowledgeBaseRef": null,
+    "openaiCredentialRef": null
+  },
+  "identity": {
+    "assistantName": null,
+    "role": "project conversational AI",
+    "tone": {
+      "style": "clear, helpful, grounded",
+      "brandVoice": null,
+      "dos": [],
+      "donts": []
+    }
+  },
+  "goals": {
+    "primary": [],
+    "secondary": [],
+    "successSignals": []
+  },
+  "audiences": [
+    {
+      "id": "prospect",
+      "label": "Prospect",
+      "description": "New inbound contact"
+    }
+  ],
+  "channels": {
+    "default": {
+      "autoReply": true,
+      "maxQuestionsPerTurn": 1,
+      "allowLinks": true,
+      "allowScheduling": false
+    },
+    "overrides": {
+      "sms": {},
+      "whatsapp": {},
+      "webchat": {},
+      "voice": {}
+    }
+  },
+  "domainModel": {
+    "entities": [
+      {
+        "name": "lead",
+        "description": "Person asking for help",
+        "fields": ["name", "company", "need", "urgency"]
+      }
+    ],
+    "terms": {
+      "customer": ["client", "patient", "guest", "buyer"],
+      "appointment": ["demo", "consult", "visit", "call"]
+    }
+  },
+  "intents": [
+    {
+      "id": "ask_general_question",
+      "description": "Project or offer question",
+      "examples": [],
+      "replyMode": "answer_then_clarify",
+      "requiredSlots": [],
+      "optionalSlots": []
+    },
+    {
+      "id": "book_or_schedule",
+      "description": "Wants to schedule or reserve",
+      "examples": [],
+      "replyMode": "qualify_then_route",
+      "requiredSlots": ["timeframe"],
+      "optionalSlots": ["service"]
+    }
+  ],
+  "slots": [
+    {
+      "id": "service",
+      "type": "string",
+      "required": false,
+      "question": "What service or outcome are you looking for?",
+      "sources": ["message", "crm", "knowledge_base"]
+    },
+    {
+      "id": "urgency",
+      "type": "enum",
+      "values": ["low", "medium", "high"],
+      "required": false,
+      "question": "How urgent is this for you?",
+      "sources": ["message"]
+    }
+  ],
+  "playbooks": [
+    {
+      "id": "general_inbound",
+      "match": {
+        "intentIds": ["ask_general_question"]
+      },
+      "steps": [
+        "ground_answer",
+        "ask_one_follow_up_if_needed",
+        "offer_next_step"
+      ]
+    }
+  ],
+  "actions": {
+    "allowed": [
+      "send_reply",
+      "append_contact_note",
+      "update_contact_fields",
+      "create_or_update_opportunity",
+      "offer_booking_link",
+      "handoff_to_human"
+    ],
+    "approvalRequired": [
+      "create_appointment",
+      "move_pipeline_stage",
+      "send_outbound_campaign"
+    ],
+    "disabled": []
+  },
+  "guardrails": {
+    "mustUseKnowledgeBaseFor": [
+      "pricing",
+      "policy",
+      "compliance",
+      "guarantees"
+    ],
+    "neverClaim": [],
+    "alwaysEscalateWhen": [
+      "legal_threat",
+      "refund_dispute",
+      "high_negative_sentiment",
+      "low_confidence"
+    ],
+    "humanHandoffMessage": null
+  },
+  "responsePolicy": {
+    "defaultMode": "answer_or_clarify",
+    "askAtMostOneQuestion": true,
+    "preferShortReplies": true,
+    "citeGroundingInternally": true,
+    "allowUngroundedAnswers": false
+  },
+  "crmPolicy": {
+    "contactNotes": true,
+    "fieldUpdates": true,
+    "opportunityUpdates": false,
+    "tagging": true
+  },
+  "voicePolicy": {
+    "enabled": false,
+    "bargeInSafe": true,
+    "maxTurnSeconds": 20,
+    "silenceFallback": "reprompt_once_then_handoff"
+  },
+  "evaluation": {
+    "track": [
+      "intent_accuracy",
+      "reply_grounded",
+      "handoff_correctness",
+      "action_success_rate"
+    ],
+    "examples": []
+  }
+}
