@@ -217,6 +217,11 @@ function conversationMutationRequestFrom(event) {
     || ((!request.action && !request.contactName && !request.name && !request.type && !request.messageType) ? request.text : null)
   );
   const parsedRequest = parseConversationRequestText(plainTextRequest);
+  const action = normalizeConversationAction(request.action)
+    || parsedRequest.action
+    || (!request.action && looksLikeConversationSendRequestText(plainTextRequest) && (normalizeString(request.contactName) || normalizeString(request.name) || parsedRequest.contactName) && (normalizeString(request.message) || parsedRequest.message) && (normalizeConversationMessageType(request.messageType) || normalizeConversationMessageType(request.type) || parsedRequest.messageType)
+      ? 'send_conversation_message'
+      : null);
   const normalizedMessageType = normalizeConversationMessageType(request.messageType)
     || normalizeConversationMessageType(request.type)
     || parsedRequest.messageType;
@@ -225,19 +230,19 @@ function conversationMutationRequestFrom(event) {
     || parsedRequest.contactName;
   const normalizedMessage = normalizeString(request.message)
     || parsedRequest.message;
-  const action = request.action
-    || (!request.action && looksLikeConversationSendRequestText(plainTextRequest) && normalizedContactName && normalizedMessage && normalizedMessageType
-      ? 'send_conversation_message'
-      : null);
   return {
     action,
-    conversationId: request.conversationId || objectIdFrom(event),
+    conversationId: request.conversationId || parsedRequest.conversationId || objectIdFrom(event),
     locationId: request.locationId || event?.locationId || event?.payload?.locationId || null,
     contactId: request.contactId || null,
     contactName: normalizedContactName,
     message: normalizedMessage,
     messageType: normalizedMessageType,
     channel: normalizeString(request.channel) || parsedRequest.channel,
+    searchQuery: normalizeString(request.searchQuery) || normalizeString(request.query) || normalizeString(request.search) || parsedRequest.searchQuery,
+    limit: normalizeNumber(request.limit ?? request.count) || parsedRequest.limit,
+    unreadOnly: normalizeBoolean(request.unreadOnly) ?? parsedRequest.unreadOnly,
+    openOnly: normalizeBoolean(request.openOnly) ?? parsedRequest.openOnly,
     fromNumber: normalizeString(request.fromNumber),
     toNumber: normalizeString(request.toNumber)
   };
@@ -595,6 +600,16 @@ function normalizeConversationMessageType(value) {
   return normalizeString(value);
 }
 
+function normalizeConversationAction(value) {
+  const normalized = normalizeString(value)?.toLowerCase().replace(/[_\s-]+/g, '_');
+  if (!normalized) return null;
+  if (['send', 'send_message', 'send_conversation', 'send_conversation_message'].includes(normalized)) return 'send_conversation_message';
+  if (['reply', 'reply_latest', 'reply_to_latest', 'reply_latest_thread', 'reply_latest_conversation'].includes(normalized)) return 'reply_latest_conversation';
+  if (['fetch', 'get_conversation', 'read_conversation', 'conversation_summary', 'fetch_conversation_summary'].includes(normalized)) return 'fetch_conversation_summary';
+  if (['list_conversations', 'search', 'search_conversations', 'find_conversations'].includes(normalized)) return 'search_conversations';
+  return normalizeString(value);
+}
+
 function detectConversationMessageTypeFromText(text) {
   const source = normalizeTextBlock(text)?.toLowerCase() || '';
   if (!source) return null;
@@ -610,7 +625,9 @@ function extractConversationContactNameFromText(text) {
   if (labeled) return labeled;
 
   const natural = text?.match(/\b(?:send\s+)?(?:an?\s+)?(?:sms|text|message|email|whatsapp|whats?app\s+message)\s+to\s+([^\n:,-]+?)(?=(?:\s+(?:saying|that)\b|\s*[:,-]|$))/i)
-    || text?.match(/\b(?:text|message|email|whatsapp|whats?app)\s+([^\n:,-]+?)(?=(?:\s+(?:saying|that)\b|\s*[:,-]|$))/i);
+    || text?.match(/\b(?:text|message|email|whatsapp|whats?app)\s+([^\n:,-]+?)(?=(?:\s+(?:saying|that)\b|\s*[:,-]|$))/i)
+    || text?.match(/\b(?:reply|respond|follow\s*up)(?:\s+(?:to|with))?(?:\s+(?:the\s+)?latest\s+(?:conversation|thread)(?:\s+for)?)?\s+([^\n:,-]+?)(?=(?:\s+(?:saying|that)\b|\s*[:,-]|$))/i)
+    || text?.match(/\b(?:show|read|fetch|get|summari[sz]e)(?:\s+(?:the\s+)?)?(?:latest\s+|recent\s+)?(?:conversation|thread|messages?)(?:\s+(?:with|for))\s+([^\n:,-]+?)(?=(?:\s*[?.!]|$))/i);
   return normalizeString(natural?.[1]);
 }
 
@@ -623,8 +640,66 @@ function extractConversationMessageFromText(text) {
 
   const natural = text?.match(/\b(?:saying|that)\s+([\s\S]+)$/i)
     || text?.match(/\b(?:send\s+)?(?:an?\s+)?(?:sms|text|message|email|whatsapp|whats?app\s+message)\s+to\s+[^\n:,-]+?\s*[:,-]\s*([\s\S]+)$/i)
-    || text?.match(/\b(?:text|message|email|whatsapp|whats?app)\s+[^\n:,-]+?\s*[:,-]\s*([\s\S]+)$/i);
+    || text?.match(/\b(?:text|message|email|whatsapp|whats?app)\s+[^\n:,-]+?\s*[:,-]\s*([\s\S]+)$/i)
+    || text?.match(/\b(?:reply|respond|follow\s*up)(?:\s+(?:to|with))?(?:\s+(?:the\s+)?latest\s+(?:conversation|thread)(?:\s+for)?)?\s+[^\n:,-]+?\s*(?:[:,-]|\b(?:saying|that)\b)\s*([\s\S]+)$/i);
   return normalizeString(natural?.[1]);
+}
+
+function detectConversationUnreadOnlyFromText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return null;
+  if (/\b(?:unread|needs?\s+reply|awaiting\s+reply)\b/.test(source)) return true;
+  return null;
+}
+
+function detectConversationOpenOnlyFromText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return null;
+  if (/\bopen\s+(?:conversations|threads|inbox)\b|\bactive\s+(?:conversations|threads)\b/.test(source)) return true;
+  return null;
+}
+
+function extractConversationLimitFromText(text) {
+  const labeled = normalizeNumber(extractLabeledText(text, ['limit', 'count', 'max']));
+  if (Number.isInteger(labeled) && labeled > 0) return labeled;
+  const natural = text?.match(/\b(?:top|latest|last|recent)\s+(\d{1,2})\b/i)
+    || text?.match(/\b(\d{1,2})\s+(?:open|unread|latest|recent)?\s*(?:conversations|threads)\b/i);
+  const parsed = normalizeNumber(natural?.[1]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function looksLikeConversationReplyRequestText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return false;
+  if (/\bsocial\s+post\b|\bsocial\s+calendar\b|\bappointment\b/.test(source)) return false;
+  return /\b(?:reply|respond|follow\s*up)\b/.test(source);
+}
+
+function looksLikeConversationSearchRequestText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return false;
+  if (/\bsocial\s+post\b|\bsocial\s+calendar\b|\bappointment\b/.test(source)) return false;
+  return /\b(?:list|search|find)\b.*\b(?:conversations|threads|inbox)\b/.test(source)
+    || /\b(?:unread|open)\s+(?:conversations|threads|inbox)\b/.test(source)
+    || /\b(?:show|get|fetch)\b.*\b(?:unread|open|recent|latest)\s+(?:conversations|threads)\b/.test(source);
+}
+
+function looksLikeConversationSummaryRequestText(text) {
+  const source = normalizeTextBlock(text)?.toLowerCase() || '';
+  if (!source) return false;
+  if (/\bsocial\s+post\b|\bsocial\s+calendar\b|\bappointment\b/.test(source)) return false;
+  if (looksLikeConversationSearchRequestText(source) || looksLikeConversationReplyRequestText(source) || looksLikeConversationSendRequestText(source)) return false;
+  return /\b(?:summari[sz]e|summary|read)\b.*\b(?:conversation|thread|messages?)\b/.test(source)
+    || /\b(?:show|get|fetch)\b.*\b(?:latest|recent)\s+(?:conversation|thread|messages?)\b/.test(source);
+}
+
+function detectConversationActionFromText(text, parsed = {}) {
+  if (!text) return null;
+  if (looksLikeConversationReplyRequestText(text) && (parsed.contactName || parsed.conversationId) && parsed.message) return 'reply_latest_conversation';
+  if (looksLikeConversationSendRequestText(text) && parsed.contactName && parsed.message && parsed.messageType) return 'send_conversation_message';
+  if (looksLikeConversationSearchRequestText(text)) return 'search_conversations';
+  if (looksLikeConversationSummaryRequestText(text) && (parsed.contactName || parsed.conversationId || /\b(?:latest|recent)\s+(?:conversation|thread|messages?)\b/i.test(text))) return 'fetch_conversation_summary';
+  return null;
 }
 
 function parseConversationRequestText(value) {
@@ -632,20 +707,35 @@ function parseConversationRequestText(value) {
   if (!text) {
     return {
       sourceText: null,
+      action: null,
+      conversationId: null,
       contactName: null,
       message: null,
       messageType: null,
-      channel: null
+      channel: null,
+      searchQuery: null,
+      limit: null,
+      unreadOnly: null,
+      openOnly: null
     };
   }
 
-  return {
+  const parsed = {
     sourceText: text,
+    action: null,
+    conversationId: normalizeString(extractLabeledText(text, ['conversation id', 'conversation', 'thread id'])),
     contactName: extractConversationContactNameFromText(text),
     message: extractConversationMessageFromText(text),
     messageType: normalizeConversationMessageType(extractLabeledText(text, ['message type', 'type'])) || detectConversationMessageTypeFromText(text),
-    channel: normalizeString(extractLabeledText(text, ['channel']))
+    channel: normalizeString(extractLabeledText(text, ['channel'])),
+    searchQuery: normalizeString(extractLabeledText(text, ['query', 'search', 'search query'])),
+    limit: extractConversationLimitFromText(text),
+    unreadOnly: detectConversationUnreadOnlyFromText(text),
+    openOnly: detectConversationOpenOnlyFromText(text)
   };
+
+  parsed.action = detectConversationActionFromText(text, parsed);
+  return parsed;
 }
 
 function looksLikeConversationSendRequestText(text) {
@@ -3649,42 +3739,321 @@ function resolvedLeadContactDetails(context, mutationRequest, action) {
 
 function resolvedConversationContactId(context, mutationRequest) {
   if (mutationRequest?.contactId) return mutationRequest.contactId;
+  const conversation = resolvedConversationRecord(context, mutationRequest);
+  if (conversation?.contactId) return conversation.contactId;
   return resolvedSingleContactId(context, 'search_contacts_by_name', mutationRequest?.contactName);
 }
 
-function resolvedConversationContactDetails(context, mutationRequest) {
-  const resolvedContactId = mutationRequest?.contactId || context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts?.[0]?.id || null;
+function normalizeConversationStatus(value) {
+  const normalized = normalizeString(value)?.toLowerCase();
+  if (!normalized) return null;
+  if (/closed|archived|resolved|done/.test(normalized)) return 'closed';
+  if (/unread/.test(normalized)) return 'unread';
+  if (/open|active/.test(normalized)) return 'open';
+  return normalizeString(value);
+}
+
+function normalizeConversationRecord(value, fallback = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const id = value.id || value._id || value.conversationId || value.conversationID || fallback.conversationId || null;
+  if (!id) return null;
   return {
-    action: 'send_conversation_message',
+    id,
+    locationId: value.locationId || fallback.locationId || null,
+    contactId: value.contactId || value.contact?.id || value.contactID || fallback.contactId || null,
+    contactName: value.fullName || value.contactName || value.contact?.name || value.contact?.fullName || fallback.contactName || null,
+    email: value.email || value.contact?.email || null,
+    phone: value.phone || value.contact?.phone || null,
+    status: normalizeConversationStatus(value.status || value.conversationStatus) || null,
+    channel: normalizeConversationMessageType(value.channel || value.type || value.lastMessageType || value.lastManualMessageType) || normalizeString(value.channel || value.type || value.lastMessageType || value.lastManualMessageType),
+    unreadCount: normalizeNumber(value.unreadCount ?? value.unreadMessages ?? value.unread) || 0,
+    lastMessageBody: value.lastMessageBody || value.lastMessage || value.message || value.snippet || null,
+    lastMessageType: normalizeConversationMessageType(value.lastMessageType || value.messageType || value.type) || normalizeString(value.lastMessageType || value.messageType || value.type),
+    lastMessageDate: value.lastMessageDate || value.lastManualMessageDate || value.dateUpdated || value.updatedAt || value.dateAdded || value.createdAt || null,
+    dateAdded: value.dateAdded || value.createdAt || null
+  };
+}
+
+function collectConversationRecords(value, output = [], fallback = {}) {
+  if (!value) return output;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectConversationRecords(item, output, fallback));
+    return output;
+  }
+  if (typeof value !== 'object') return output;
+
+  const looksLikeConversation = (typeof value.id === 'string' || typeof value._id === 'string' || typeof value.conversationId === 'string')
+    && (
+      typeof value.contactId === 'string'
+      || typeof value.fullName === 'string'
+      || typeof value.contactName === 'string'
+      || typeof value.unreadCount !== 'undefined'
+      || typeof value.lastMessageBody === 'string'
+      || typeof value.lastMessage === 'string'
+      || typeof value.status === 'string'
+      || typeof value.channel === 'string'
+      || typeof value.phone === 'string'
+      || typeof value.email === 'string'
+    );
+
+  if (looksLikeConversation) {
+    const normalized = normalizeConversationRecord(value, fallback);
+    if (normalized) output.push(normalized);
+  }
+
+  Object.values(value).forEach((item) => collectConversationRecords(item, output, fallback));
+  return output;
+}
+
+function conversationRecordsFromData(data, fallback = {}) {
+  const records = collectConversationRecords(data, [], fallback);
+  if (records.length === 0) {
+    const normalized = normalizeConversationRecord(data, fallback);
+    if (normalized) records.push(normalized);
+  }
+  const deduped = [];
+  const seen = new Set();
+  for (const record of records) {
+    if (!record?.id || seen.has(record.id)) continue;
+    seen.add(record.id);
+    deduped.push(record);
+  }
+  return deduped.sort((left, right) => {
+    const leftMs = Date.parse(left?.lastMessageDate || left?.dateAdded || '') || 0;
+    const rightMs = Date.parse(right?.lastMessageDate || right?.dateAdded || '') || 0;
+    return rightMs - leftMs;
+  });
+}
+
+function conversationMatchesFilters(conversation, mutationRequest, resolvedContactId = null) {
+  if (!conversation) return false;
+
+  if (resolvedContactId) {
+    if (conversation.contactId && conversation.contactId !== resolvedContactId) return false;
+  } else if (mutationRequest?.contactName) {
+    const requested = mutationRequest.contactName.toLowerCase();
+    const nameHaystack = [conversation.contactName, conversation.email, conversation.phone]
+      .map((value) => normalizeString(value)?.toLowerCase())
+      .filter(Boolean)
+      .join(' ');
+    if (nameHaystack && !nameHaystack.includes(requested)) return false;
+  }
+
+  if (mutationRequest?.unreadOnly === true && !(conversation.unreadCount > 0)) return false;
+  if (mutationRequest?.openOnly === true && normalizeConversationStatus(conversation.status) === 'closed') return false;
+
+  const query = normalizeString(mutationRequest?.searchQuery)?.toLowerCase();
+  if (query) {
+    const haystack = [
+      conversation.contactName,
+      conversation.email,
+      conversation.phone,
+      conversation.lastMessageBody,
+      conversation.channel,
+      conversation.status
+    ]
+      .map((value) => normalizeString(value)?.toLowerCase())
+      .filter(Boolean)
+      .join(' ');
+    if (!haystack.includes(query)) return false;
+  }
+
+  return true;
+}
+
+function resolvedConversationSearchResults(context) {
+  const conversations = context?.runtime?.stepOutputs?.search_conversations?.data?.conversations;
+  return Array.isArray(conversations) ? conversations : [];
+}
+
+function resolvedConversationRecord(context, mutationRequest, { requireMatch = false } = {}) {
+  const fetchedConversation = context?.runtime?.stepOutputs?.fetch_conversation?.data?.conversation;
+  if (fetchedConversation && (!mutationRequest?.conversationId || fetchedConversation.id === mutationRequest.conversationId)) {
+    return fetchedConversation;
+  }
+
+  const searchResults = resolvedConversationSearchResults(context);
+  if (mutationRequest?.conversationId) {
+    const exact = searchResults.find((conversation) => conversation.id === mutationRequest.conversationId);
+    if (exact) return exact;
+  }
+  if (searchResults.length > 0) return searchResults[0];
+
+  if (mutationRequest?.conversationId) {
+    return {
+      id: mutationRequest.conversationId,
+      locationId: mutationRequest.locationId || null,
+      contactId: mutationRequest.contactId || null,
+      contactName: mutationRequest.contactName || null,
+      channel: mutationRequest.channel || null,
+      lastMessageType: mutationRequest.messageType || null,
+      unreadCount: mutationRequest.unreadOnly ? 1 : 0,
+      status: mutationRequest.openOnly ? 'open' : null,
+      lastMessageBody: null,
+      lastMessageDate: null,
+      dateAdded: null
+    };
+  }
+
+  if (requireMatch) {
+    throw new Error(mutationRequest?.contactName
+      ? `No conversation matched "${mutationRequest.contactName}".`
+      : 'No conversation matched the request.');
+  }
+  return null;
+}
+
+function resolvedConversationId(context, mutationRequest, options = {}) {
+  if (mutationRequest?.conversationId) return mutationRequest.conversationId;
+  return resolvedConversationRecord(context, mutationRequest, options)?.id || null;
+}
+
+function normalizeConversationReplyTypeCandidate(value) {
+  return normalizeConversationMessageType(value) || normalizeString(value);
+}
+
+function resolvedConversationMessageType(context, mutationRequest) {
+  if (mutationRequest?.messageType) return mutationRequest.messageType;
+  const conversation = resolvedConversationRecord(context, mutationRequest);
+  const latestMessage = context?.runtime?.stepOutputs?.fetch_conversation_messages?.data?.latestMessage || null;
+  return normalizeConversationReplyTypeCandidate(conversation?.lastMessageType)
+    || normalizeConversationReplyTypeCandidate(conversation?.channel)
+    || normalizeConversationReplyTypeCandidate(latestMessage?.type)
+    || 'SMS';
+}
+
+function resolvedConversationChannel(context, mutationRequest) {
+  if (mutationRequest?.channel) return mutationRequest.channel;
+  const conversation = resolvedConversationRecord(context, mutationRequest);
+  return normalizeString(conversation?.channel) || null;
+}
+
+function resolvedConversationContactDetails(context, mutationRequest, action = 'send_conversation_message') {
+  const conversation = resolvedConversationRecord(context, mutationRequest);
+  const resolvedContactId = mutationRequest?.contactId
+    || conversation?.contactId
+    || context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts?.[0]?.id
+    || null;
+  return {
+    action,
     locationId: mutationRequest?.locationId || null,
-    conversationId: mutationRequest?.conversationId || null,
+    conversationId: mutationRequest?.conversationId || conversation?.id || null,
     contactId: resolvedContactId,
-    contactName: mutationRequest?.contactName || null,
-    messageType: mutationRequest?.messageType || null,
-    channel: mutationRequest?.channel || null,
+    contactName: mutationRequest?.contactName || conversation?.contactName || null,
+    messageType: resolvedConversationMessageType(context, mutationRequest),
+    channel: resolvedConversationChannel(context, mutationRequest),
     fromNumber: mutationRequest?.fromNumber || null,
     toNumber: mutationRequest?.toNumber || null,
     messagePreview: mutationRequest?.message ? mutationRequest.message.slice(0, 120) : null
   };
 }
 
+function conversationSearchResumeData(liveResult, context) {
+  const mutationRequest = conversationMutationRequestFrom(context?.event);
+  const data = liveResult?.data || null;
+  const resolvedContactId = mutationRequest?.contactId || context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts?.[0]?.id || null;
+  const limit = normalizeNumber(mutationRequest?.limit) || 10;
+  const conversations = conversationRecordsFromData(data, {
+    locationId: mutationRequest?.locationId || null,
+    contactId: resolvedContactId,
+    contactName: mutationRequest?.contactName || null
+  })
+    .filter((conversation) => conversationMatchesFilters(conversation, mutationRequest, resolvedContactId))
+    .slice(0, limit);
+
+  return {
+    count: conversations.length,
+    filters: {
+      contactId: resolvedContactId,
+      contactName: mutationRequest?.contactName || null,
+      unreadOnly: mutationRequest?.unreadOnly === true,
+      openOnly: mutationRequest?.openOnly === true,
+      query: mutationRequest?.searchQuery || null,
+      limit
+    },
+    conversations,
+    raw: data
+  };
+}
+
 function fetchConversationResumeData(liveResult, context) {
   const data = liveResult?.data || null;
   const mutationRequest = conversationMutationRequestFrom(context?.event);
+  const conversation = normalizeConversationRecord(data, {
+    conversationId: mutationRequest?.conversationId || null,
+    locationId: mutationRequest?.locationId || null,
+    contactId: mutationRequest?.contactId || null,
+    contactName: mutationRequest?.contactName || null
+  });
   return {
-    conversation: data && typeof data === 'object'
-      ? {
-          id: data?.id || data?._id || mutationRequest?.conversationId || null,
-          contactId: data?.contactId || data?.contact?.id || null,
-          contactName: data?.fullName || data?.contactName || data?.contact?.name || mutationRequest?.contactName || null,
-          locationId: data?.locationId || mutationRequest?.locationId || null,
-          status: data?.status || null,
-          channel: data?.channel || data?.type || null,
-          unreadCount: normalizeNumber(data?.unreadCount) || 0,
-          lastMessageBody: data?.lastMessageBody || data?.lastMessage || data?.message || null,
-          lastMessageType: data?.lastMessageType || data?.messageType || null
-        }
-      : null,
+    conversation,
+    raw: data
+  };
+}
+
+function normalizeConversationMessageRecord(value, fallback = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const id = value.id || value._id || value.messageId || fallback.messageId || null;
+  const body = value.body || value.message || value.text || value.content || value.html || null;
+  const type = normalizeConversationReplyTypeCandidate(value.messageType || value.type || fallback.type);
+  const conversationId = value.conversationId || value.conversation?.id || fallback.conversationId || null;
+  const dateAdded = value.dateAdded || value.createdAt || value.updatedAt || value.dateUpdated || value.timestamp || null;
+  if (!id && !body && !type) return null;
+  return {
+    id: id || `${conversationId || 'conversation'}:${dateAdded || body || type}`,
+    conversationId,
+    body: normalizeString(body),
+    type,
+    direction: normalizeString(value.direction || value.messageDirection || value.directionType),
+    status: normalizeString(value.status),
+    dateAdded
+  };
+}
+
+function collectConversationMessages(value, output = [], fallback = {}) {
+  if (!value) return output;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectConversationMessages(item, output, fallback));
+    return output;
+  }
+  if (typeof value !== 'object') return output;
+
+  const looksLikeMessage = (typeof value.id === 'string' || typeof value._id === 'string' || typeof value.messageId === 'string')
+    && (
+      typeof value.body === 'string'
+      || typeof value.message === 'string'
+      || typeof value.text === 'string'
+      || typeof value.content === 'string'
+      || typeof value.type === 'string'
+      || typeof value.messageType === 'string'
+      || typeof value.conversationId === 'string'
+    );
+
+  if (looksLikeMessage) {
+    const normalized = normalizeConversationMessageRecord(value, fallback);
+    if (normalized) output.push(normalized);
+  }
+
+  Object.values(value).forEach((item) => collectConversationMessages(item, output, fallback));
+  return output;
+}
+
+function conversationMessagesResumeData(liveResult, context) {
+  const mutationRequest = conversationMutationRequestFrom(context?.event);
+  const data = liveResult?.data || null;
+  const conversationId = resolvedConversationId(context, mutationRequest, { requireMatch: false }) || mutationRequest?.conversationId || null;
+  const messages = collectConversationMessages(data, [], { conversationId, type: mutationRequest?.messageType || null })
+    .sort((left, right) => {
+      const leftMs = Date.parse(left?.dateAdded || '') || 0;
+      const rightMs = Date.parse(right?.dateAdded || '') || 0;
+      return leftMs - rightMs;
+    });
+  const latestMessages = messages.slice(-10);
+  return {
+    conversationId,
+    messageCount: messages.length,
+    latestMessage: latestMessages[latestMessages.length - 1] || null,
+    messages: latestMessages,
     raw: data
   };
 }
@@ -3692,14 +4061,15 @@ function fetchConversationResumeData(liveResult, context) {
 function sendConversationMessageResumeData(liveResult, context) {
   const data = liveResult?.data || null;
   const mutationRequest = conversationMutationRequestFrom(context?.event);
+  const conversation = resolvedConversationRecord(context, mutationRequest);
   return {
     requested: {
       locationId: mutationRequest?.locationId || null,
-      conversationId: mutationRequest?.conversationId || null,
-      contactId: mutationRequest?.contactId || context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts?.[0]?.id || null,
-      contactName: mutationRequest?.contactName || null,
-      messageType: mutationRequest?.messageType || null,
-      channel: mutationRequest?.channel || null,
+      conversationId: mutationRequest?.conversationId || conversation?.id || null,
+      contactId: mutationRequest?.contactId || conversation?.contactId || context?.runtime?.stepOutputs?.search_contacts_by_name?.data?.contacts?.[0]?.id || null,
+      contactName: mutationRequest?.contactName || conversation?.contactName || null,
+      messageType: resolvedConversationMessageType(context, mutationRequest),
+      channel: resolvedConversationChannel(context, mutationRequest),
       messagePreview: mutationRequest?.message ? mutationRequest.message.slice(0, 120) : null
     },
     result: data && typeof data === 'object'
@@ -4338,25 +4708,17 @@ function taskPackHandlers() {
           && (Boolean(mutationRequest.contactId) || Boolean(mutationRequest.contactName))
           && Boolean(mutationRequest.message)
           && Boolean(mutationRequest.messageType);
+        const explicitConversationReply = mutationRequest?.action === 'reply_latest_conversation'
+          && (Boolean(mutationRequest.contactId) || Boolean(mutationRequest.contactName) || Boolean(mutationRequest.conversationId))
+          && Boolean(mutationRequest.message);
+        const explicitConversationSearch = mutationRequest?.action === 'search_conversations';
+        const explicitConversationSummary = mutationRequest?.action === 'fetch_conversation_summary';
+        const needsContactLookup = (explicitConversationSend || explicitConversationReply || explicitConversationSearch || explicitConversationSummary)
+          && Boolean(mutationRequest.contactName)
+          && !Boolean(mutationRequest.contactId);
+        const needsConversationSearch = explicitConversationSearch
+          || (!Boolean(mutationRequest.conversationId) && (explicitConversationReply || explicitConversationSummary));
         return [
-          {
-            name: 'fetch_conversation',
-            kind: 'adapter_call',
-            adapter: 'ConversationsAdapter',
-            method: 'getConversation',
-            pathHint: '/conversations/:conversationId',
-            args: () => [context.credentialRef || defaultLocationCredential(context), conversationId],
-            safe: true,
-            mutation: false,
-            requiresCredential: true,
-            resumeData: fetchConversationResumeData,
-            details: {
-              action: 'fetch_conversation',
-              conversationId,
-              locationId: mutationRequest?.locationId || null
-            },
-            skipIf: () => !conversationId || explicitConversationSend
-          },
           {
             name: 'search_contacts_by_name',
             kind: 'adapter_call',
@@ -4376,7 +4738,63 @@ function taskPackHandlers() {
               action: 'search_contacts_by_name',
               contactName: mutationRequest?.contactName || null
             },
-            skipIf: () => !explicitConversationSend || Boolean(mutationRequest.contactId) || !mutationRequest.contactName
+            skipIf: () => !needsContactLookup
+          },
+          {
+            name: 'search_conversations',
+            kind: 'adapter_call',
+            adapter: 'ConversationsAdapter',
+            method: 'listConversations',
+            pathHint: '/conversations/',
+            args: () => [context.credentialRef || defaultLocationCredential(context)],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: conversationSearchResumeData,
+            details: {
+              action: explicitConversationSearch ? 'search_conversations' : (explicitConversationReply ? 'find_latest_conversation' : 'find_conversation_for_summary'),
+              contactName: mutationRequest?.contactName || null,
+              count: mutationRequest?.limit || null,
+              status: mutationRequest?.unreadOnly ? 'unread' : (mutationRequest?.openOnly ? 'open' : null)
+            },
+            skipIf: () => !needsConversationSearch
+          },
+          {
+            name: 'fetch_conversation',
+            kind: 'adapter_call',
+            adapter: 'ConversationsAdapter',
+            method: 'getConversation',
+            pathHint: '/conversations/:conversationId',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedConversationId(runtimeContext, mutationRequest, { requireMatch: explicitConversationReply || explicitConversationSummary || Boolean(conversationId) })],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: fetchConversationResumeData,
+            details: (runtimeContext) => ({
+              action: explicitConversationSummary ? 'fetch_conversation_summary' : (explicitConversationReply ? 'fetch_latest_conversation' : 'fetch_conversation'),
+              conversationId: resolvedConversationId(runtimeContext, mutationRequest, { requireMatch: explicitConversationReply || explicitConversationSummary || Boolean(conversationId) }),
+              locationId: mutationRequest?.locationId || null,
+              contactName: mutationRequest?.contactName || null
+            }),
+            skipIf: () => explicitConversationSearch || (explicitConversationSend && !explicitConversationReply) || (!conversationId && !explicitConversationReply && !explicitConversationSummary)
+          },
+          {
+            name: 'fetch_conversation_messages',
+            kind: 'adapter_call',
+            adapter: 'ConversationsAdapter',
+            method: 'getMessages',
+            pathHint: '/conversations/:conversationId/messages',
+            args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), resolvedConversationId(runtimeContext, mutationRequest, { requireMatch: true })],
+            safe: true,
+            mutation: false,
+            requiresCredential: true,
+            resumeData: conversationMessagesResumeData,
+            details: (runtimeContext) => ({
+              action: explicitConversationReply ? 'fetch_latest_conversation_messages' : 'fetch_conversation_messages',
+              conversationId: resolvedConversationId(runtimeContext, mutationRequest, { requireMatch: true }),
+              contactName: mutationRequest?.contactName || null
+            }),
+            skipIf: () => !(explicitConversationSummary || explicitConversationReply)
           },
           {
             name: 'send_conversation_message',
@@ -4388,7 +4806,7 @@ function taskPackHandlers() {
             args: (runtimeContext) => [runtimeContext.credentialRef || defaultLocationCredential(runtimeContext), {
               contactId: resolvedConversationContactId(runtimeContext, mutationRequest),
               message: mutationRequest.message,
-              type: mutationRequest.messageType,
+              type: resolvedConversationMessageType(runtimeContext, mutationRequest),
               ...(mutationRequest.channel ? { channel: mutationRequest.channel } : {}),
               ...(mutationRequest.fromNumber ? { fromNumber: mutationRequest.fromNumber } : {}),
               ...(mutationRequest.toNumber ? { toNumber: mutationRequest.toNumber } : {})
@@ -4398,8 +4816,8 @@ function taskPackHandlers() {
             requiresApproval: true,
             requiresCredential: true,
             resumeData: sendConversationMessageResumeData,
-            details: (runtimeContext) => resolvedConversationContactDetails(runtimeContext, mutationRequest),
-            skipIf: () => !explicitConversationSend
+            details: (runtimeContext) => resolvedConversationContactDetails(runtimeContext, mutationRequest, explicitConversationReply ? 'reply_latest_conversation' : 'send_conversation_message'),
+            skipIf: () => !(explicitConversationSend || explicitConversationReply)
           },
           {
             name: 'evaluate_sla_and_assignment',
@@ -4407,7 +4825,7 @@ function taskPackHandlers() {
             safe: true,
             mutation: false,
             details: { action: 'evaluate_response_rules', conversationId, mutationRequest },
-            skipIf: () => explicitConversationSend
+            skipIf: () => explicitConversationSend || explicitConversationReply || explicitConversationSearch || explicitConversationSummary
           }
         ];
       }

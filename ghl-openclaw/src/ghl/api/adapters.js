@@ -258,8 +258,20 @@ export class ConversationsAdapter {
     this.client = client;
   }
 
+  listConversations(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/conversations/', query });
+  }
+
+  searchConversations(credentialRef, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: '/conversations/search', query });
+  }
+
   getConversation(credentialRef, conversationId) {
     return this.client.request({ credentialRef, method: 'GET', path: `/conversations/${conversationId}` });
+  }
+
+  getMessages(credentialRef, conversationId, query = {}) {
+    return this.client.request({ credentialRef, method: 'GET', path: `/conversations/${conversationId}/messages`, query });
   }
 
   createConversation(credentialRef, body) {
