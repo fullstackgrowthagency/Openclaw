@@ -385,6 +385,13 @@ function summarizeGroundingSection(text, maxLength = 220) {
   return `${normalized.slice(0, maxLength - 1).trim()}…`;
 }
 
+function conversationalReplyGroundedSummary(text) {
+  const normalized = normalizeTextBlock(text)?.replace(/\s+/g, ' ').trim() || null;
+  if (!normalized) return null;
+  const stripped = normalized.replace(/^([a-z][a-z0-9/&()' -]{0,40}|[A-Z][A-Za-z0-9/&()' -]{0,40}):\s+/, '');
+  return /[.!?]$/.test(stripped) ? stripped : `${stripped}.`;
+}
+
 function resolvedConversationalAiGroundingContext(context, mutationRequest) {
   const activeBusinessRecord = readActiveBusinessRecord(process.cwd());
   const activeBusiness = activeBusinessDefaultsFromRecord(activeBusinessRecord);
@@ -1152,7 +1159,7 @@ function conversationalAiResponsePlan(context, mutationRequest) {
   const businessName = normalizeString(groundingContext?.businessName) || normalizeString(profile.project?.name) || 'this team';
   const offerSummary = normalizeStringArray(groundingContext?.businessContext?.offers).slice(0, 3).join(', ');
   const groundedSnippet = conversationalGroundingSnippetForIntent(groundingContext, evaluation);
-  const groundedSummary = groundedSnippet?.summary || null;
+  const groundedSummary = conversationalReplyGroundedSummary(groundedSnippet?.summary || null);
   const hasKnowledgeBase = Boolean(groundingContext?.knowledgeBase?.configured);
   const hasGroundedSnippet = Boolean(groundedSummary);
   const requiresKnowledgeBase = conversationalIntentRequiresKnowledgeBase(profile, evaluation);
@@ -1172,9 +1179,7 @@ function conversationalAiResponsePlan(context, mutationRequest) {
   } else if ((!hasKnowledgeBase || !hasGroundedSnippet) && requiresKnowledgeBase) {
     message = `I can help route this, but I should not answer specific ${normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question' ? 'pricing' : 'support'} details until the project knowledge base is configured. Do you want me to hand this to a human?`;
   } else if (groundedSummary) {
-    answer = normalizeConversationalIntentId(evaluation.intentId) === 'support_request'
-      ? `From the current knowledge base, ${groundedSummary}`
-      : `Based on the current project context, ${groundedSummary}`;
+    answer = groundedSummary;
   } else if (normalizeConversationalIntentId(evaluation.intentId) === 'pricing_question') {
     answer = `Thanks for reaching out. ${businessName} can help${offerSummary ? ` with ${offerSummary}` : ''}. Pricing depends on the scope and setup.`;
   } else if (normalizeConversationalIntentId(evaluation.intentId) === 'book_or_schedule') {
