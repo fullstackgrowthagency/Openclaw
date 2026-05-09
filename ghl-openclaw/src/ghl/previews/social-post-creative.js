@@ -485,18 +485,67 @@ function deriveCreativeSupport(summary, theme, brand) {
   return candidates.find(Boolean) || theme.support;
 }
 
+function normalizeCreativeStyleId(value) {
+  const normalized = normalizeString(value)?.toLowerCase().replace(/[_\s]+/g, '-');
+  if (!normalized || normalized === 'auto') return null;
+
+  if (['realistic', 'realistic-scene', 'scene', 'photo', 'photoreal', 'photorealistic', 'studio-scene'].includes(normalized)) {
+    return 'realistic-scene';
+  }
+  if (['hybrid', 'hybrid-system', 'system', 'system-led', 'product-scene'].includes(normalized)) {
+    return 'hybrid-system';
+  }
+  if (['infographic', 'info-graphic', 'diagram', 'dashboard', 'data'].includes(normalized)) {
+    return 'infographic';
+  }
+  if (['editorial', 'magazine', 'clean-editorial'].includes(normalized)) {
+    return 'editorial';
+  }
+
+  return null;
+}
+
+function resolveCreativeStyle(post, theme) {
+  const explicit = normalizeCreativeStyleId(
+    post?.creativeStyle
+      || post?.visualStyle
+      || post?.style
+      || post?.creative?.style
+      || post?.openClaw?.creativeStyle
+  );
+  if (explicit) return explicit;
+
+  if (theme.id === 'analytics-clarity') return 'infographic';
+  if (['website-conversion', 'social-consistency'].includes(theme.id)) return 'editorial';
+  if (['consulting-systems', 'automation-ops', 'lead-follow-up'].includes(theme.id)) return 'realistic-scene';
+  return 'hybrid-system';
+}
+
+function resolveHeroWord(headline, theme, styleId) {
+  const base = normalizeString(theme?.heroWord) || 'SYSTEM';
+  if (styleId === 'realistic-scene' && normalizeString(headline)?.toLowerCase().includes(base.toLowerCase())) {
+    return titleCase(theme?.nodes?.[0] || 'System')?.toUpperCase() || 'SYSTEM';
+  }
+  if (styleId === 'infographic' && theme?.id === 'analytics-clarity') {
+    return 'DATA';
+  }
+  return base;
+}
+
 function buildCreativeModel({ locationId, post, businessName } = {}) {
   const summary = normalizeString(post?.summary) || normalizeString(post?.text) || '';
   const brand = extractBrand(summary, businessName, post?.businessName);
   const theme = inferCreativeTheme(summary);
+  const styleId = resolveCreativeStyle(post, theme);
   const headline = deriveCreativeHeadline(summary, theme);
   const support = deriveCreativeSupport(summary, theme, brand);
+  const heroWord = resolveHeroWord(headline, theme, styleId);
   const proofRows = uniqueCompact(theme.proofs.map((item) => item?.label ? JSON.stringify(item) : null))
     .map((item) => JSON.parse(item))
-    .slice(0, 2);
+    .slice(0, styleId === 'realistic-scene' ? 1 : 2);
   const metricRows = uniqueCompact(theme.metrics.map((item) => item?.value ? JSON.stringify(item) : null))
     .map((item) => JSON.parse(item))
-    .slice(0, 2);
+    .slice(0, styleId === 'realistic-scene' ? 1 : 2);
   const nodes = uniqueCompact(theme.nodes).slice(0, 4);
 
   return {
@@ -506,16 +555,18 @@ function buildCreativeModel({ locationId, post, businessName } = {}) {
     summary,
     themeId: theme.id,
     layout: theme.layout,
+    styleId,
+    styleLabel: titleCase(styleId.replace(/-/g, ' ')),
     eyebrow: theme.eyebrow,
-    heroWord: theme.heroWord,
+    heroWord,
     headline,
-    headlineDisplay: breakHeadline(headline, theme.layout === 'editorial' ? 13 : 15, 3),
+    headlineDisplay: breakHeadline(headline, styleId === 'editorial' || theme.layout === 'editorial' ? 13 : 15, 3),
     support: clampText(support, 92),
     proofs: proofRows,
     metrics: metricRows,
     nodes,
     palette: theme.palette,
-    footerTag: `${theme.id.replace(/-/g, ' ')} • generated creative`
+    footerTag: `${styleId.replace(/-/g, ' ')} • ${theme.id.replace(/-/g, ' ')}`
   };
 }
 
@@ -638,11 +689,85 @@ function renderEditorialVisual(model) {
     </div>`;
 }
 
-function renderVisual(model) {
+function renderHybridSystemVisual(model) {
   if (model.layout === 'signal') return renderSignalVisual(model);
   if (model.layout === 'pipeline') return renderPipelineVisual(model);
   if (model.layout === 'editorial') return renderEditorialVisual(model);
   return renderOrbitVisual(model);
+}
+
+function renderInfographicVisual(model) {
+  const stageRows = model.nodes.slice(0, 3).map((node, index) => `
+    <div class="info-step">
+      <div class="info-step-index">0${index + 1}</div>
+      <div class="info-step-label">${escapeHtml(node)}</div>
+    </div>`).join('');
+
+  return `
+    <div class="visual-inner infographic-layout">
+      <div class="hero-word">${escapeHtml(model.heroWord)}</div>
+      <div class="info-grid-card">
+        <div class="card-topline">Decision map</div>
+        <div class="info-metric-row">
+          ${renderMetricTiles(model)}
+        </div>
+        <div class="info-chart-wrap">
+          <svg class="info-chart" viewBox="0 0 420 220" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="infoStroke" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="${escapeHtml(model.palette.accent)}" />
+                <stop offset="100%" stop-color="${escapeHtml(model.palette.accentAlt)}" />
+              </linearGradient>
+            </defs>
+            <path d="M14 172 C82 160, 120 124, 174 132 C232 140, 260 68, 338 70 C366 70, 390 54, 406 40" fill="none" stroke="url(#infoStroke)" stroke-width="10" stroke-linecap="round" />
+            <path d="M14 196 C82 184, 120 166, 174 172 C232 178, 260 128, 338 126 C366 126, 390 112, 406 104" fill="none" stroke="rgba(255,255,255,0.14)" stroke-width="5" stroke-linecap="round" />
+            <circle cx="174" cy="132" r="9" fill="${escapeHtml(model.palette.accentStrong)}" />
+            <circle cx="338" cy="70" r="9" fill="${escapeHtml(model.palette.accentAlt)}" />
+            <circle cx="406" cy="40" r="11" fill="${escapeHtml(model.palette.accent)}" />
+          </svg>
+        </div>
+        <div class="info-step-list">${stageRows}</div>
+      </div>
+    </div>`;
+}
+
+function renderRealisticSceneVisual(model) {
+  const sceneNotes = model.nodes.slice(0, 3).map((node) => `<div class="scene-note">${escapeHtml(node)}</div>`).join('');
+  const sceneTitle = model.proofs[0]?.label || model.nodes[0] || model.headline;
+  const sceneCopy = model.proofs[0]?.detail || model.support;
+  return `
+    <div class="visual-inner scene-layout">
+      <div class="hero-word">${escapeHtml(model.heroWord)}</div>
+      <div class="scene-backdrop"></div>
+      <div class="scene-surface"></div>
+      <div class="scene-monitor">
+        <div class="scene-monitor-glow"></div>
+        <div class="scene-ui">
+          <div class="scene-ui-top"></div>
+          <div class="scene-ui-chart"></div>
+          <div class="scene-ui-bars"><span></span><span></span><span></span><span></span></div>
+        </div>
+      </div>
+      <div class="scene-phone">
+        <div class="scene-phone-screen"></div>
+      </div>
+      <div class="scene-card main-card">
+        <div class="card-topline">Live system view</div>
+        <div class="scene-card-title">${escapeHtml(clampText(sceneTitle, 24) || sceneTitle)}</div>
+        <div class="scene-card-copy">${escapeHtml(clampText(sceneCopy, 74) || sceneCopy)}</div>
+      </div>
+      <div class="scene-card metric-card">
+        ${renderMetricTiles(model, 'mini')}
+      </div>
+      <div class="scene-notes">${sceneNotes}</div>
+    </div>`;
+}
+
+function renderVisual(model) {
+  if (model.styleId === 'realistic-scene') return renderRealisticSceneVisual(model);
+  if (model.styleId === 'infographic') return renderInfographicVisual(model);
+  if (model.styleId === 'editorial') return renderEditorialVisual(model);
+  return renderHybridSystemVisual(model);
 }
 
 function renderHtml(model) {
@@ -1201,16 +1326,255 @@ function renderHtml(model) {
     }
     .screen-bars span:nth-child(1) { height: 52%; }
     .screen-bars span:nth-child(2) { height: 80%; }
-    .screen-bars span:nth-child(3) { height: 66%; background: linear-gradient(180deg, var(--accentAlt), rgba(255,255,255,0.08)); }
+    .screen-bars span:nth-child(3) { height: 66%; background: linear-gradient(180deg, var(--accent-alt), rgba(255,255,255,0.08)); }
     .screen-bars span:nth-child(4) { height: 100%; }
     .mini-stack {
       display: grid;
       gap: 12px;
     }
+    .infographic-layout,
+    .scene-layout {
+      position: relative;
+    }
+    .info-grid-card {
+      position: absolute;
+      inset: 28px;
+      border-radius: 30px;
+      padding: 24px;
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 22px 46px rgba(0,0,0,0.24);
+      backdrop-filter: blur(16px);
+      z-index: 3;
+    }
+    .info-metric-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .info-chart-wrap {
+      margin-top: 18px;
+      border-radius: 28px;
+      min-height: 270px;
+      padding: 20px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.10);
+    }
+    .info-chart {
+      width: 100%;
+      height: 230px;
+    }
+    .info-step-list {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .info-step {
+      border-radius: 20px;
+      padding: 16px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.10);
+    }
+    .info-step-index {
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.16em;
+      color: rgba(255,255,255,0.42);
+    }
+    .info-step-label {
+      margin-top: 10px;
+      font-size: 22px;
+      line-height: 1;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+    .scene-backdrop {
+      position: absolute;
+      inset: 34px 34px 190px 34px;
+      border-radius: 30px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.14), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255,255,255,0.10);
+      opacity: 0.8;
+      z-index: 1;
+    }
+    .scene-surface {
+      position: absolute;
+      left: 28px;
+      right: 28px;
+      bottom: 28px;
+      height: 208px;
+      border-radius: 32px 32px 24px 24px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04));
+      border: 1px solid rgba(255,255,255,0.10);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.10);
+      z-index: 1;
+    }
+    .scene-monitor {
+      position: absolute;
+      left: 82px;
+      top: 150px;
+      width: 330px;
+      height: 244px;
+      border-radius: 26px;
+      background: linear-gradient(180deg, rgba(12, 18, 33, 0.96), rgba(11, 16, 29, 0.88));
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 30px 70px rgba(0,0,0,0.34);
+      transform: rotate(-7deg);
+      z-index: 3;
+      overflow: hidden;
+    }
+    .scene-monitor-glow {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at 60% 30%, rgba(255,255,255,0.16), transparent 22%), linear-gradient(135deg, rgba(255,255,255,0.04), transparent 40%);
+      pointer-events: none;
+    }
+    .scene-ui {
+      position: absolute;
+      inset: 18px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02));
+      border: 1px solid rgba(255,255,255,0.08);
+      padding: 16px;
+    }
+    .scene-ui-top {
+      width: 98px;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.16);
+    }
+    .scene-ui-chart {
+      margin-top: 22px;
+      height: 90px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+      position: relative;
+      overflow: hidden;
+    }
+    .scene-ui-chart::after {
+      content: '';
+      position: absolute;
+      inset: 18px 14px 20px;
+      border-radius: 999px;
+      border: 4px solid transparent;
+      border-image: linear-gradient(90deg, var(--accent), var(--accent-alt)) 1;
+      border-top: 0;
+      border-left: 0;
+      transform: skewX(-24deg);
+      opacity: 0.9;
+    }
+    .scene-ui-bars {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      align-items: end;
+      height: 72px;
+      margin-top: 18px;
+    }
+    .scene-ui-bars span {
+      border-radius: 14px 14px 8px 8px;
+      background: linear-gradient(180deg, var(--accent), rgba(255,255,255,0.08));
+    }
+    .scene-ui-bars span:nth-child(1) { height: 44%; }
+    .scene-ui-bars span:nth-child(2) { height: 70%; }
+    .scene-ui-bars span:nth-child(3) { height: 92%; background: linear-gradient(180deg, var(--accent-alt), rgba(255,255,255,0.08)); }
+    .scene-ui-bars span:nth-child(4) { height: 58%; }
+    .scene-phone {
+      position: absolute;
+      right: 112px;
+      top: 250px;
+      width: 134px;
+      height: 248px;
+      border-radius: 26px;
+      background: linear-gradient(180deg, rgba(10, 16, 30, 0.94), rgba(11, 16, 29, 0.84));
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 24px 50px rgba(0,0,0,0.30);
+      transform: rotate(9deg);
+      z-index: 4;
+      padding: 14px;
+    }
+    .scene-phone-screen {
+      width: 100%;
+      height: 100%;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255,255,255,0.08);
+      position: relative;
+      overflow: hidden;
+    }
+    .scene-phone-screen::before,
+    .scene-phone-screen::after {
+      content: '';
+      position: absolute;
+      left: 14px;
+      right: 14px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.14);
+    }
+    .scene-phone-screen::before { top: 20px; height: 10px; }
+    .scene-phone-screen::after { top: 44px; height: 68px; background: linear-gradient(180deg, var(--accent), rgba(255,255,255,0.10)); }
+    .scene-card {
+      position: absolute;
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 24px 48px rgba(0,0,0,0.24);
+      backdrop-filter: blur(16px);
+      z-index: 5;
+    }
+    .scene-card.main-card {
+      right: 54px;
+      top: 78px;
+      width: 260px;
+      border-radius: 26px;
+      padding: 20px;
+    }
+    .scene-card.metric-card {
+      left: 250px;
+      bottom: 84px;
+      width: 190px;
+      border-radius: 24px;
+      padding: 14px;
+    }
+    .scene-card-title {
+      margin-top: 12px;
+      font-size: 30px;
+      line-height: 0.95;
+      font-weight: 900;
+      letter-spacing: -0.05em;
+    }
+    .scene-card-copy {
+      margin-top: 12px;
+      font-size: 15px;
+      line-height: 1.4;
+      color: rgba(255,255,255,0.72);
+    }
+    .scene-notes {
+      position: absolute;
+      left: 56px;
+      bottom: 54px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      z-index: 5;
+      max-width: 300px;
+    }
+    .scene-note {
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.10);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.84);
+    }
   </style>
 </head>
 <body>
-  <main class="canvas">
+  <main class="canvas style-${escapeHtml(model.styleId)}">
     <div class="ambient-line a"></div>
     <div class="ambient-line b"></div>
     <div class="ambient-line c"></div>
@@ -1223,7 +1587,7 @@ function renderHtml(model) {
             <div class="brand-sub">premium social creative</div>
           </div>
         </div>
-        <div class="top-signal">system-led design</div>
+        <div class="top-signal">${escapeHtml(model.styleLabel)} creative</div>
       </header>
       <div class="main-grid">
         <section class="copy-panel">
@@ -1257,15 +1621,17 @@ async function renderPng(htmlPath, pngPath) {
   ], { maxBuffer: 10 * 1024 * 1024 });
 }
 
-export async function generateSocialPostCreative({ locationId, post, businessName, outputDir } = {}) {
+export async function generateSocialPostCreative({ locationId, post, businessName, style, outputDir } = {}) {
   if (!post || typeof post !== 'object' || Array.isArray(post)) {
     throw new Error('Missing post payload for social creative generation.');
   }
 
-  const model = buildCreativeModel({ locationId, post, businessName });
+  const normalizedStyle = normalizeCreativeStyleId(style);
+  const postWithStyle = normalizedStyle ? { ...post, creativeStyle: normalizedStyle } : post;
+  const model = buildCreativeModel({ locationId, post: postWithStyle, businessName });
   const html = renderHtml(model);
   const baseDir = path.resolve(outputDir || path.join(process.cwd(), 'data', 'generated', 'creatives'));
-  const fileBase = `${toSlug(`${model.brand}-${model.themeId}`)}-${Date.now()}`;
+  const fileBase = `${toSlug(`${model.brand}-${model.themeId}-${model.styleId}`)}-${Date.now()}`;
   const htmlPath = path.join(baseDir, `${fileBase}.html`);
   const jsonPath = path.join(baseDir, `${fileBase}.json`);
   const pngPath = path.join(baseDir, `${fileBase}.png`);

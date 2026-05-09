@@ -575,7 +575,15 @@ export class SocialPlannerAdapter {
 
   async createPostWithCreative(credentialRef, locationId, body, options = {}) {
     const payload = JSON.parse(JSON.stringify(body || {}));
+    const creativeStyle = payload.creativeStyle || payload.visualStyle || payload.style || payload?.creative?.style || null;
     delete payload.businessName;
+    delete payload.creativeStyle;
+    delete payload.visualStyle;
+    delete payload.style;
+    if (payload.creative && typeof payload.creative === 'object' && !Array.isArray(payload.creative)) {
+      delete payload.creative.style;
+      if (Object.keys(payload.creative).length === 0) delete payload.creative;
+    }
     const existingMedia = Array.isArray(payload.media) ? payload.media.filter(Boolean) : [];
     let creative = null;
 
@@ -584,6 +592,7 @@ export class SocialPlannerAdapter {
         locationId,
         post: payload,
         businessName: options.businessName,
+        style: creativeStyle,
         outputDir: options.outputDir
       });
       const uploaded = await this.uploadLocalMediaFile(credentialRef, generated.pngPath, {
