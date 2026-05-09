@@ -422,6 +422,33 @@ function buildSummary(pillar, business, context, index) {
 export function generateSocialCalendarPlan(input = {}) {
   const business = normalizeBusinessProfile(input.business || input.businessProfile || {});
   const calendar = normalizeCalendarRequest(input);
+  const missingRequirements = [];
+  if (!business.knowledgeBaseRef) missingRequirements.push('knowledgeBaseRef');
+
+  if (missingRequirements.length > 0) {
+    return {
+      generatedAt: new Date().toISOString(),
+      ready: false,
+      business,
+      calendar: {
+        postCount: calendar.postCount,
+        cadenceDays: calendar.cadenceDays,
+        startDate: calendar.startDate,
+        timezone: calendar.timezone,
+        scheduledHourUtc: calendar.scheduledHourUtc,
+        scheduledMinuteUtc: calendar.scheduledMinuteUtc,
+        status: calendar.status,
+        accountIds: calendar.accountIds,
+        creativeStyles: calendar.creativeStyles
+      },
+      knowledgeBaseMode: 'required',
+      missingRequirements,
+      onboardingMessage: 'A business knowledge base is required before generating a social calendar or creating business assets.',
+      posts: [],
+      mutationRequest: null
+    };
+  }
+
   const context = buildContext(business);
   const posts = [];
 
@@ -464,6 +491,7 @@ export function generateSocialCalendarPlan(input = {}) {
 
   return {
     generatedAt: new Date().toISOString(),
+    ready: true,
     business,
     calendar: {
       postCount: calendar.postCount,
@@ -476,7 +504,8 @@ export function generateSocialCalendarPlan(input = {}) {
       accountIds: calendar.accountIds,
       creativeStyles: calendar.creativeStyles
     },
-    knowledgeBaseMode: business.knowledgeBaseRef ? 'deferred_to_knowledge_base' : 'generic',
+    knowledgeBaseMode: 'required',
+    missingRequirements: [],
     posts,
     mutationRequest
   };

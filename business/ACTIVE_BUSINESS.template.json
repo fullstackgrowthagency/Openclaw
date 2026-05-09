@@ -1,0 +1,44 @@
+{
+  "businessName": null,
+  "knowledgeBase": {
+    "ref": null,
+    "type": null,
+    "location": null,
+    "notes": null
+  },
+  "brand": {
+    "logo": null,
+    "website": null,
+    "voice": null,
+    "colors": [],
+    "assets": []
+  },
+  "offers": [],
+  "audience": [],
+  "timezone": null,
+  "access": {
+    "ghl": {
+      "locationId": null,
+      "credentialRef": null,
+      "apiKeys": []
+    },
+    "social": [],
+    "ads": [],
+    "other": []
+  },
+  "approvals": {
+    "autoDraftAllowed": null,
+    "requiresApprovalFor": [],
+    "notes": null
+  },
+  "constraints": {
+    "compliance": [],
+    "restrictedClaims": [],
+    "geoTargets": []
+  },
+  "meta": {
+    "active": true,
+    "singleBusinessMode": true,
+    "updatedAt": null
+  }
+}
