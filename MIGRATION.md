@@ -87,15 +87,16 @@ Optional flags:
 - `--include-sessions`
 - `--include-whatsapp`
 - `--include-git`
+- `--include-workspace-runtime`
 - `--output <path>`
 
 Example:
 
 ```bash
-/data/.openclaw/workspace/scripts/export-portable-agent-bundle.sh --include-sessions --include-whatsapp --include-git
+/data/.openclaw/workspace/scripts/export-portable-agent-bundle.sh --include-sessions --include-whatsapp --include-git --include-workspace-runtime
 ```
 
-That creates a timestamped tarball containing the workspace plus the selected OpenClaw state.
+That creates a timestamped tarball containing the workspace plus the selected OpenClaw state. `--include-workspace-runtime` also carries workspace-local secrets, generated artifacts, temp files, and `.openclaw/` under the workspace.
 
 ## Git history backup file
 

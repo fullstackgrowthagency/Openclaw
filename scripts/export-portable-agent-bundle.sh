@@ -7,20 +7,22 @@ OUT_DIR="$WORKSPACE/exports"
 INCLUDE_SESSIONS=0
 INCLUDE_WHATSAPP=0
 INCLUDE_GIT=0
+INCLUDE_WORKSPACE_RUNTIME=0
 
 usage() {
   cat <<'EOF'
 Usage:
-  export-portable-agent-bundle.sh [--include-sessions] [--include-whatsapp] [--include-git] [--output <path>]
+  export-portable-agent-bundle.sh [--include-sessions] [--include-whatsapp] [--include-git] [--include-workspace-runtime] [--output <path>]
 
 Creates a timestamped tarball with the workspace and selected OpenClaw state.
 
 Flags:
-  --include-sessions   Include /data/.openclaw/agents/main/sessions/
-  --include-whatsapp   Include /data/.openclaw/credentials/whatsapp/default/
-  --include-git        Include the workspace .git directory for full local repo history
-  --output PATH        Write tarball to PATH instead of the default exports folder
-  -h, --help           Show help
+  --include-sessions          Include /data/.openclaw/agents/main/sessions/
+  --include-whatsapp          Include /data/.openclaw/credentials/whatsapp/default/
+  --include-git               Include the workspace .git directory for full local repo history
+  --include-workspace-runtime Include workspace-local secrets, generated files, temp files, and .openclaw/
+  --output PATH               Write tarball to PATH instead of the default exports folder
+  -h, --help                  Show help
 EOF
 }
 
@@ -37,6 +39,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --include-git)
       INCLUDE_GIT=1
+      shift
+      ;;
+    --include-workspace-runtime)
+      INCLUDE_WORKSPACE_RUNTIME=1
       shift
       ;;
     --output)
@@ -70,18 +76,22 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 mkdir -p "$TMP_DIR/bundle"
 
-# Workspace copy, excluding known local-only artifacts. Git history is optional.
+# Workspace copy, excluding known local-only artifacts unless explicitly requested.
 TAR_ARGS=(
-  --exclude='.openclaw'
   --exclude='exports'
   --exclude='backups'
-  --exclude='ghl-openclaw/.env'
-  --exclude='ghl-openclaw/data/secrets'
-  --exclude='ghl-openclaw/data/generated'
-  --exclude='ghl-openclaw/data/taskpacks'
-  --exclude='ghl-openclaw/data/approvals'
-  --exclude='ghl-openclaw/tmp-*'
 )
+if [[ "$INCLUDE_WORKSPACE_RUNTIME" -ne 1 ]]; then
+  TAR_ARGS+=(
+    --exclude='.openclaw'
+    --exclude='ghl-openclaw/.env'
+    --exclude='ghl-openclaw/data/secrets'
+    --exclude='ghl-openclaw/data/generated'
+    --exclude='ghl-openclaw/data/taskpacks'
+    --exclude='ghl-openclaw/data/approvals'
+    --exclude='ghl-openclaw/tmp-*'
+  )
+fi
 if [[ "$INCLUDE_GIT" -ne 1 ]]; then
   TAR_ARGS+=(--exclude='.git')
 fi
