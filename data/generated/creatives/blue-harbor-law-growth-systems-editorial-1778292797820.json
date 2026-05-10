@@ -1,0 +1,56 @@
+{
+  "locationId": "loc-123",
+  "brand": "Blue Harbor Law",
+  "monogram": "BH",
+  "summary": "The firms that convert more consults usually make intake faster, clearer, and easier to measure from first call to signed client.",
+  "themeId": "growth-systems",
+  "layout": "orbit",
+  "styleId": "editorial",
+  "styleLabel": "Editorial",
+  "eyebrow": "FULL-STACK GROWTH",
+  "heroWord": "MOTION",
+  "headline": "Growth stack aligned",
+  "headlineDisplay": "Growth stack\naligned",
+  "support": "The firms that convert more consults usually make intake faster, clearer, and easier…",
+  "proofs": [
+    {
+      "label": "One operating layer",
+      "detail": "the stack works together"
+    },
+    {
+      "label": "Less drag",
+      "detail": "clearer movement across teams"
+    }
+  ],
+  "metrics": [
+    {
+      "value": "Stack",
+      "label": "working together"
+    },
+    {
+      "value": "Motion",
+      "label": "that holds up"
+    }
+  ],
+  "nodes": [
+    "Strategy",
+    "Site",
+    "Automate",
+    "Follow-up"
+  ],
+  "palette": {
+    "bgA": "#07111f",
+    "bgB": "#10213d",
+    "bgC": "#0f4c81",
+    "glowA": "rgba(34, 211, 238, 0.30)",
+    "glowB": "rgba(129, 140, 248, 0.24)",
+    "accent": "#7dd3fc",
+    "accentStrong": "#38bdf8",
+    "accentAlt": "#a78bfa",
+    "accentSoft": "rgba(125, 211, 252, 0.14)",
+    "panel": "rgba(8, 16, 31, 0.62)",
+    "panelStrong": "rgba(8, 16, 31, 0.82)",
+    "line": "rgba(148, 163, 184, 0.28)"
+  },
+  "footerTag": "editorial • growth systems"
+}

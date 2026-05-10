@@ -1,0 +1,5 @@
+b42538eb4166d871ed92a8af74693b3d962bc74d9493854db2e7359f7303edc8  openclaw-portable-clean-latest.tar.gz.part-00
+5f19bb27a44c614fa8b100b2ab04d1d9cc9cdf8a83e24b0834a7698e676c3611  openclaw-portable-clean-latest.tar.gz.part-01
+51a7487c85b0b387cbaea2f0f92fea06bab04c9ac3c045d443e0df6d6599fc78  openclaw-portable-full-latest.tar.gz.part-00
+8c38ac42d797b64ba960a829c93f743a8c864036337e7a895941af37c3d43cd4  openclaw-portable-full-latest.tar.gz.part-01
+35a1253fbf393f7fe26b9074b0633f8081cbadb52a5a11f09c532da2cbad590a  workspace-history.bundle

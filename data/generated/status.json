@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "project": "ghl-openclaw",
+  "cwd": "/data/.openclaw/workspace",
+  "dataDir": "/data/.openclaw/workspace/data",
+  "apiBaseUrl": "https://services.leadconnectorhq.com",
+  "docsBaseUrl": "https://marketplace.gohighlevel.com/docs",
+  "webhookHost": "127.0.0.1",
+  "webhookPort": 8787,
+  "approvalBulkThreshold": 25,
+  "hasClientId": false,
+  "hasClientSecret": false,
+  "hasAgencyPit": false,
+  "hasSecretKey": false
+}

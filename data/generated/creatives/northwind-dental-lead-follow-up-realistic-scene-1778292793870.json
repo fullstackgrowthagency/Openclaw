@@ -1,0 +1,48 @@
+{
+  "locationId": "loc-123",
+  "brand": "Northwind Dental",
+  "monogram": "ND",
+  "summary": "Patients trust practices that follow up quickly, confirm appointments clearly, and remove friction from the front desk.",
+  "themeId": "lead-follow-up",
+  "layout": "pipeline",
+  "styleId": "realistic-scene",
+  "styleLabel": "Realistic Scene",
+  "eyebrow": "LEAD FOLLOW-UP",
+  "heroWord": "CAPTURE",
+  "headline": "Fix follow-up gaps",
+  "headlineDisplay": "Fix follow-up\ngaps",
+  "support": "Patients trust practices that follow up quickly, confirm appointments clearly, and re…",
+  "proofs": [
+    {
+      "label": "Faster response",
+      "detail": "catch more intent while it is hot"
+    }
+  ],
+  "metrics": [
+    {
+      "value": "Speed",
+      "label": "first response"
+    }
+  ],
+  "nodes": [
+    "Capture",
+    "Respond",
+    "Route",
+    "Close"
+  ],
+  "palette": {
+    "bgA": "#180c14",
+    "bgB": "#3b102a",
+    "bgC": "#9a3412",
+    "glowA": "rgba(251, 113, 133, 0.26)",
+    "glowB": "rgba(245, 158, 11, 0.18)",
+    "accent": "#fecdd3",
+    "accentStrong": "#fb7185",
+    "accentAlt": "#f59e0b",
+    "accentSoft": "rgba(251, 113, 133, 0.14)",
+    "panel": "rgba(24, 12, 20, 0.62)",
+    "panelStrong": "rgba(24, 12, 20, 0.84)",
+    "line": "rgba(254, 205, 211, 0.28)"
+  },
+  "footerTag": "realistic scene • lead follow up"
+}
