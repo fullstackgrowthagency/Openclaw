@@ -1,0 +1,33 @@
+# macOS / editor noise
+.DS_Store
+*.swp
+*.swo
+
+# Local OpenClaw runtime state should not live in the workspace repo
+.openclaw/
+
+# Secret or machine-local files
+.env
+**/.env
+**/*.key
+**/*.pem
+**/secrets*
+
+# Business/session scratch files
+business/ACTIVE_BUSINESS.json
+business/ACTIVE_START_SESSION.json
+
+# GHL local runtime and generated scratch artifacts
+ghl-openclaw/data/secrets/
+ghl-openclaw/data/generated/
+ghl-openclaw/data/taskpacks/
+ghl-openclaw/data/approvals/
+ghl-openclaw/tmp-*.mjs
+ghl-openclaw/tmp-*.json
+ghl-openclaw/tmp-*/
+
+# Optional local exports
+exports/
+backups/
+*.tar.gz
+*.tgz
