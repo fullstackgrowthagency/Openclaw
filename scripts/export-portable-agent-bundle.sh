@@ -6,17 +6,19 @@ STATE_ROOT="/data/.openclaw"
 OUT_DIR="$WORKSPACE/exports"
 INCLUDE_SESSIONS=0
 INCLUDE_WHATSAPP=0
+INCLUDE_GIT=0
 
 usage() {
   cat <<'EOF'
 Usage:
-  export-portable-agent-bundle.sh [--include-sessions] [--include-whatsapp] [--output <path>]
+  export-portable-agent-bundle.sh [--include-sessions] [--include-whatsapp] [--include-git] [--output <path>]
 
 Creates a timestamped tarball with the workspace and selected OpenClaw state.
 
 Flags:
   --include-sessions   Include /data/.openclaw/agents/main/sessions/
   --include-whatsapp   Include /data/.openclaw/credentials/whatsapp/default/
+  --include-git        Include the workspace .git directory for full local repo history
   --output PATH        Write tarball to PATH instead of the default exports folder
   -h, --help           Show help
 EOF
@@ -31,6 +33,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --include-whatsapp)
       INCLUDE_WHATSAPP=1
+      shift
+      ;;
+    --include-git)
+      INCLUDE_GIT=1
       shift
       ;;
     --output)
@@ -64,24 +70,28 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 mkdir -p "$TMP_DIR/bundle"
 
-# Workspace copy, excluding git and known local-only artifacts.
-tar \
-  --exclude='.git' \
-  --exclude='.openclaw' \
-  --exclude='exports' \
-  --exclude='backups' \
-  --exclude='ghl-openclaw/.env' \
-  --exclude='ghl-openclaw/data/secrets' \
-  --exclude='ghl-openclaw/data/generated' \
-  --exclude='ghl-openclaw/data/taskpacks' \
-  --exclude='ghl-openclaw/data/approvals' \
-  --exclude='ghl-openclaw/tmp-*' \
-  -C "$WORKSPACE" -cf - . | tar -C "$TMP_DIR/bundle" -xf -
+# Workspace copy, excluding known local-only artifacts. Git history is optional.
+TAR_ARGS=(
+  --exclude='.openclaw'
+  --exclude='exports'
+  --exclude='backups'
+  --exclude='ghl-openclaw/.env'
+  --exclude='ghl-openclaw/data/secrets'
+  --exclude='ghl-openclaw/data/generated'
+  --exclude='ghl-openclaw/data/taskpacks'
+  --exclude='ghl-openclaw/data/approvals'
+  --exclude='ghl-openclaw/tmp-*'
+)
+if [[ "$INCLUDE_GIT" -ne 1 ]]; then
+  TAR_ARGS+=(--exclude='.git')
+fi
+
+tar "${TAR_ARGS[@]}" -C "$WORKSPACE" -cf - . | tar -C "$TMP_DIR/bundle" -xf -
 
 mkdir -p "$TMP_DIR/bundle/_state/openclaw"
 cp "$STATE_ROOT/openclaw.json" "$TMP_DIR/bundle/_state/openclaw/"
-mkdir -p "$TMP_DIR/bundle/_state/openclaw/agents/main/agent"
-cp "$STATE_ROOT/agents/main/agent/auth-profiles.json" "$TMP_DIR/bundle/_state/openclaw/agents/main/agent/"
+mkdir -p "$TMP_DIR/bundle/_state/openclaw/agents/main"
+cp -R "$STATE_ROOT/agents/main/agent" "$TMP_DIR/bundle/_state/openclaw/agents/main/"
 
 if [[ "$INCLUDE_SESSIONS" -eq 1 ]]; then
   mkdir -p "$TMP_DIR/bundle/_state/openclaw/agents/main"
@@ -97,7 +107,7 @@ cat > "$TMP_DIR/bundle/_state/RESTORE_NOTES.txt" <<'EOF'
 Restore notes:
 - Copy workspace files into the target workspace path.
 - Copy _state/openclaw/openclaw.json to /data/.openclaw/openclaw.json on the new VPS.
-- Copy _state/openclaw/agents/main/agent/auth-profiles.json to /data/.openclaw/agents/main/agent/auth-profiles.json.
+- Copy _state/openclaw/agents/main/agent/ to /data/.openclaw/agents/main/agent/.
 - If included, copy _state/openclaw/agents/main/sessions/ to /data/.openclaw/agents/main/sessions/.
 - If included, copy _state/openclaw/credentials/whatsapp/default/ to /data/.openclaw/credentials/whatsapp/default/.
 - Start OpenClaw on the new VPS after restore.

@@ -26,7 +26,7 @@ This preserves:
 These are outside the workspace and must be copied separately:
 
 - `/data/.openclaw/openclaw.json`
-- `/data/.openclaw/agents/main/agent/auth-profiles.json`
+- `/data/.openclaw/agents/main/agent/`
 - `/data/.openclaw/agents/main/sessions/`
 
 This preserves:
@@ -86,15 +86,26 @@ Optional flags:
 
 - `--include-sessions`
 - `--include-whatsapp`
+- `--include-git`
 - `--output <path>`
 
 Example:
 
 ```bash
-/data/.openclaw/workspace/scripts/export-portable-agent-bundle.sh --include-sessions --include-whatsapp
+/data/.openclaw/workspace/scripts/export-portable-agent-bundle.sh --include-sessions --include-whatsapp --include-git
 ```
 
 That creates a timestamped tarball containing the workspace plus the selected OpenClaw state.
+
+## Git history backup file
+
+If you want a standalone portable git-history artifact too, create:
+
+```bash
+git -C /data/.openclaw/workspace bundle create /data/.openclaw/workspace/exports/workspace-history.bundle --all
+```
+
+That can be cloned or pushed later even before a remote is configured.
 
 ## Notes
 
