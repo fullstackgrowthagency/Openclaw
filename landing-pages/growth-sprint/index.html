@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>The 30-Day Growth Sprint | Full Stack Growth Studio</title>
+<meta name="description" content="Transform your scattered growth efforts into a highly predictable, automated customer acquisition system in just four weeks." />
+<link rel="icon" type="image/png" href="assets/favicon-64.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- Living background: persists behind the whole scroll journey -->
+<canvas id="starfield" aria-hidden="true"></canvas>
+<div class="orb-field" aria-hidden="true">
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+  <div class="orb orb-c"></div>
+  <div class="orb orb-d"></div>
+  <div class="orb orb-e"></div>
+</div>
+<div class="grid-veil" aria-hidden="true"></div>
+<div class="vignette" aria-hidden="true"></div>
+
+<div class="progress-rail" aria-hidden="true"><div class="progress-fill" id="progressFill"></div></div>
+
+<header class="topbar">
+  <a href="#top" class="brand">
+    <img src="assets/logo-mark-128.png" alt="" class="brand-mark" width="34" height="34" />
+    <span class="brand-word">FULL STACK<em>Growth Studio</em></span>
+  </a>
+  <a class="floating-cta" id="floatingCta" href="https://fullstackgrowth.studio/checkout/30-day-growth-sprint" target="_blank" rel="noopener">
+    Start The Sprint Now
+    <svg viewBox="0 0 20 20" width="14" height="14"><path d="M4 10h11M10 5l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </a>
+</header>
+
+<nav class="dot-nav" id="dotNav" aria-hidden="true">
+  <button data-target="scene-hero" aria-label="Hero"></button>
+  <button data-target="scene-problem" aria-label="The Problem"></button>
+  <button data-target="scene-week1" aria-label="Week 1"></button>
+  <button data-target="scene-week2" aria-label="Week 2"></button>
+  <button data-target="scene-week3" aria-label="Week 3"></button>
+  <button data-target="scene-week4" aria-label="Week 4"></button>
+  <button data-target="scene-platform" aria-label="Platform"></button>
+  <button data-target="scene-bonus" aria-label="Bonuses"></button>
+  <button data-target="scene-offer" aria-label="Offer"></button>
+  <button data-target="scene-final" aria-label="Get started"></button>
+</nav>
+
+<main id="top">
+<div class="stage" id="stage">
+
+  <!-- SCENE 1 : HERO -->
+  <div class="scene-content" id="scene-hero" data-scene>
+    <div class="scene-inner hero-grid">
+      <div class="hero-copy scene-layer" data-layer="text">
+        <span class="badge"><span class="badge-dot"></span>Accepting New Applications</span>
+        <h1 class="display-xl">The 30-Day <span class="grad-text">Growth Sprint</span></h1>
+        <p class="lede">Transform your scattered growth efforts into a highly predictable, automated customer acquisition system &mdash; in just four weeks.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://fullstackgrowth.studio/checkout/30-day-growth-sprint" target="_blank" rel="noopener">
+            Start The Sprint Now
+            <svg viewBox="0 0 20 20" width="16" height="16"><path d="M4 10h11M10 5l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
+          <p class="cta-note">Platform access included &mdash; the <strong>$1,997</strong> Growth Sprint is <strong class="glow-word">FREE</strong> with any plan.</p>
+        </div>
+      </div>
+      <div class="hero-visual scene-layer" data-layer="visual">
+        <div class="tilt-rig" data-tilt>
+          <div class="dash-panel dash-panel--hero">
+            <div class="dash-head">
+              <span class="dash-dot dash-dot--r"></span><span class="dash-dot dash-dot--y"></span><span class="dash-dot dash-dot--g"></span>
+              <span class="dash-title">growth-sprint.dashboard</span>
+            </div>
+            <div class="dash-body">
+              <svg class="chart-line" viewBox="0 0 360 160" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient id="lineFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#00e5ff" stop-opacity="0.45"/>
+                    <stop offset="100%" stop-color="#00e5ff" stop-opacity="0"/>
+                  </linearGradient>
+                </defs>
+                <path class="chart-fill" d="M0,140 C40,130 60,110 90,105 C130,98 150,70 190,66 C230,60 250,40 290,30 C320,22 340,18 360,10 L360,160 L0,160 Z" fill="url(#lineFill)"/>
+                <path class="chart-stroke" d="M0,140 C40,130 60,110 90,105 C130,98 150,70 190,66 C230,60 250,40 290,30 C320,22 340,18 360,10" fill="none" stroke="#00e5ff" stroke-width="2.5" stroke-linecap="round"/>
+              </svg>
+              <div class="stat-chip stat-chip--a">
+                <span class="stat-label">Qualified Leads</span>
+                <span class="stat-value" data-count-to="142" data-suffix="%">0%</span>
+                <span class="stat-sub up">&#9650; vs. last month</span>
+              </div>
+              <div class="stat-chip stat-chip--b">
+                <span class="stat-label">Pipeline Value</span>
+                <span class="stat-value" data-count-to="48200" data-prefix="$" data-format="short">$0</span>
+              </div>
+              <div class="radar-ping"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="scroll-cue"><span>Scroll to see how it works</span><i></i></div>
+  </div>
+
+  <!-- SCENE 2 : PROBLEM / PILLARS -->
+  <div class="scene-content" id="scene-problem" data-scene>
+    <div class="scene-inner stack-grid">
+      <div class="scene-layer text-center" data-layer="text">
+        <span class="eyebrow">The Problem</span>
+        <h2 class="display-lg">Why Growth Can Be <span class="grad-text">Bad For Business</span></h2>
+        <p class="lede lede-center">And what systems to build that scale revenue instead of scaling chaos.</p>
+        <ul class="pill-row">
+          <li>The Treadmill Model</li>
+          <li>The Four Pillars of Growth</li>
+          <li>The Multiplier Effect</li>
+        </ul>
+      </div>
+      <div class="scene-layer" data-layer="visual">
+        <div class="tilt-rig" data-tilt>
+          <div class="morph-stage">
+            <svg class="morph-chaos" viewBox="0 0 240 240">
+              <g class="chaos-ring">
+                <circle cx="120" cy="120" r="90" fill="none" stroke="#ff5d5d" stroke-width="2" stroke-dasharray="6 10" opacity="0.55"/>
+                <circle cx="120" cy="120" r="62" fill="none" stroke="#ff9a5d" stroke-width="2" stroke-dasharray="3 8" opacity="0.5"/>
+                <g class="chaos-spokes">
+                  <line x1="120" y1="30" x2="120" y2="210" stroke="#ff5d5d" stroke-width="2" opacity="0.4"/>
+                  <line x1="30" y1="120" x2="210" y2="120" stroke="#ff5d5d" stroke-width="2" opacity="0.4"/>
+                  <line x1="55" y1="55" x2="185" y2="185" stroke="#ff5d5d" stroke-width="2" opacity="0.3"/>
+                  <line x1="185" y1="55" x2="55" y2="185" stroke="#ff5d5d" stroke-width="2" opacity="0.3"/>
+                </g>
+              </g>
+            </svg>
+            <svg class="morph-flywheel" viewBox="0 0 240 240">
+              <path class="spiral-path" d="M120,120 m0,-6 a6,6 0 1,1 -0.1,0 M120,120 m0,-18 a18,18 0 1,1 -0.3,0 M120,120 m0,-34 a34,34 0 1,1 -0.5,0 M120,120 m0,-54 a54,54 0 1,1 -0.8,0 M120,120 m0,-78 a78,78 0 1,1 -1.2,0" fill="none" stroke="#00e5ff" stroke-width="2.5" stroke-linecap="round"/>
+              <circle class="spiral-node" cx="120" cy="42" r="5" fill="#00e5ff"/>
+            </svg>
+            <div class="morph-caption">
+              <span class="morph-caption-a">Chaotic effort. No compounding.</span>
+              <span class="morph-caption-b">One system. Compounding growth.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCENE 3 : WEEK 1 DIAGNOSE -->
+  <div class="scene-content" id="scene-week1" data-scene>
+    <div class="scene-inner split-grid">
+      <div class="scene-layer" data-layer="text">
+        <span class="eyebrow">Week 1 &middot; Diagnose</span>
+        <h2 class="display-lg">Identify Your <span class="grad-text">Bottleneck</span></h2>
+        <p class="lede">We find what's limiting growth right now &mdash; hidden revenue leaks, dead-end funnels, and opportunities falling through the cracks &mdash; then uncover the automation that fixes them without adding more complexity.</p>
+        <ul class="check-list">
+          <li>Identify your bottleneck</li>
+          <li>Uncover automation opportunities</li>
+        </ul>
+      </div>
+      <div class="scene-layer" data-layer="visual">
+        <div class="tilt-rig" data-tilt>
+          <div class="dash-panel dash-panel--radar">
+            <div class="radar-scope">
+              <div class="radar-sweep"></div>
+              <div class="radar-rings"></div>
+              <span class="leak-pin leak-pin--1"></span>
+              <span class="leak-pin leak-pin--2"></span>
+              <span class="leak-pin leak-pin--3"></span>
+            </div>
+            <div class="readout">
+              <span class="readout-label">Bottleneck found</span>
+              <span class="readout-value">Lead follow-up delay &mdash; <b>4.2 hrs</b> avg</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCENE 4 : WEEK 2 DESIGN -->
+  <div class="scene-content" id="scene-week2" data-scene>
+    <div class="scene-inner split-grid reverse">
+      <div class="scene-layer" data-layer="visual">
+        <div class="tilt-rig" data-tilt>
+          <div class="dash-panel dash-panel--funnel">
+            <svg class="funnel-svg" viewBox="0 0 260 220">
+              <polygon points="20,10 240,10 170,110 90,110" fill="rgba(0,229,255,0.08)" stroke="#00e5ff" stroke-width="1.5"/>
+              <polygon points="90,110 170,110 150,190 110,190" fill="rgba(0,229,255,0.16)" stroke="#00e5ff" stroke-width="1.5"/>
+              <g class="funnel-particles"></g>
+            </svg>
+            <div class="funnel-readout">
+              <span class="funnel-before">2.1%</span>
+              <svg viewBox="0 0 20 20" width="16" height="16"><path d="M4 10h11M10 5l5 5-5 5" fill="none" stroke="#00e5ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="funnel-after" data-count-to="8.4" data-suffix="%" data-decimals="1">0%</span>
+            </div>
+            <span class="funnel-caption">Conversion Rate</span>
+          </div>
+        </div>
+      </div>
+      <div class="scene-layer" data-layer="text">
+        <span class="eyebrow">Week 2 &middot; Design</span>
+        <h2 class="display-lg">Rebuild What's <span class="grad-text">Broken</span></h2>
+        <p class="lede">We review every touchpoint, simplify what's overcomplicated, and rebuild your funnels and landing pages around conversion &mdash; because more leads aren't always the answer.</p>
+        <ul class="check-list">
+          <li>Complete marketing review</li>
+          <li>Improve conversions</li>
+          <li>Audit websites, funnels &amp; landing pages</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCENE 5 : WEEK 3 BUILD -->
+  <div class="scene-content" id="scene-week3" data-scene>
+    <div class="scene-inner split-grid">
+      <div class="scene-layer" data-layer="text">
+        <span class="eyebrow">Week 3 &middot; Build</span>
+        <h2 class="display-lg">Map It. Automate It. <span class="grad-text">Connect It.</span></h2>
+        <p class="lede">We document every touchpoint from first click to closed deal, then build automated pipelines that nurture and move leads through your sales process &mdash; without manual work.</p>
+        <ul class="check-list">
+          <li>Build a growth roadmap</li>
+          <li>Map your customer journey</li>
+          <li>Build automated sales pipelines</li>
+        </ul>
+      </div>
+      <div class="scene-layer" data-layer="visual">
+        <div class="tilt-rig" data-tilt>
+          <div class="dash-panel dash-panel--pipeline">
+            <svg class="pipeline-svg" viewBox="0 0 340 200">
+              <path class="pipe" d="M20,40 C80,40 60,100 120,100 S180,160 240,160 S300,100 320,100" fill="none" stroke="rgba(0,229,255,0.25)" stroke-width="2"/>
+              <path class="pipe-flow" d="M20,40 C80,40 60,100 120,100 S180,160 240,160 S300,100 320,100" fill="none" stroke="#00e5ff" stroke-width="2" stroke-dasharray="4 10"/>
+              <g class="pipe-node" transform="translate(20,40)"><circle r="7" fill="#0a0f1c" stroke="#00e5ff" stroke-width="2"/><text x="0" y="-16" text-anchor="middle">Ad</text></g>
+              <g class="pipe-node" transform="translate(120,100)"><circle r="7" fill="#0a0f1c" stroke="#00e5ff" stroke-width="2"/><text x="0" y="22" text-anchor="middle">Lead</text></g>
+              <g class="pipe-node" transform="translate(240,160)"><circle r="7" fill="#0a0f1c" stroke="#00e5ff" stroke-width="2"/><text x="0" y="-16" text-anchor="middle">Nurture</text></g>
+              <g class="pipe-node" transform="translate(320,100)"><circle r="8" fill="#00e5ff" stroke="#00e5ff" stroke-width="2"/><text x="-4" y="22" text-anchor="middle">Deal</text></g>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCENE 6 : WEEK 4 LAUNCH -->
+  <div class="scene-content" id="scene-week4" data-scene>
+    <div class="scene-inner stack-grid">
+      <div class="scene-layer text-center" data-layer="text">
+        <span class="eyebrow">Week 4 &middot; Launch &amp; Scale</span>
+        <h2 class="display-lg">Plug The Leaks. <span class="grad-text">Watch It Scale.</span></h2>
+        <p class="lede lede-center">We plug the gaps where revenue was leaking and wire up real-time dashboards so you always know exactly what's working &mdash; and what to fix next.</p>
+      </div>
+      <div class="scene-layer" data-layer="visual">
+        <div class="tilt-rig" data-tilt>
+          <div class="dash-panel dash-panel--analytics">
+            <div class="dash-head">
+              <span class="dash-dot dash-dot--r"></span><span class="dash-dot dash-dot--y"></span><span class="dash-dot dash-dot--g"></span>
+              <span class="dash-title">live-results.dashboard</span>
+            </div>
+            <div class="analytics-grid">
+              <div class="metric-tile">
+                <span class="metric-label">New Leads</span>
+                <span class="metric-value" data-count-to="386">0</span>
+              </div>
+              <div class="metric-tile">
+                <span class="metric-label">Booked Calls</span>
+                <span class="metric-value" data-count-to="94">0</span>
+              </div>
+              <div class="metric-tile">
+                <span class="metric-label">Revenue</span>
+                <span class="metric-value" data-count-to="118400" data-prefix="$" data-format="short">$0</span>
+              </div>
+              <svg class="bar-chart" viewBox="0 0 240 90" preserveAspectRatio="none">
+                <rect class="bar" x="6" width="20" y="70" height="20"/>
+                <rect class="bar" x="36" width="20" y="55" height="35"/>
+                <rect class="bar" x="66" width="20" y="48" height="42"/>
+                <rect class="bar" x="96" width="20" y="34" height="56"/>
+                <rect class="bar" x="126" width="20" y="26" height="64"/>
+                <rect class="bar" x="156" width="20" y="15" height="75"/>
+                <rect class="bar" x="186" width="20" y="6" height="84"/>
+                <rect class="bar bar--peak" x="216" width="20" y="0" height="90"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCENE 7 : PLATFORM RING -->
+  <div class="scene-content" id="scene-platform" data-scene>
+    <div class="scene-inner stack-grid">
+      <div class="scene-layer text-center" data-layer="text">
+        <span class="eyebrow">The Platform</span>
+        <h2 class="display-lg">One Platform. <span class="grad-text">Everything Connected.</span></h2>
+        <p class="lede lede-center">Every tool your growth engine needs, running in a single system.</p>
+      </div>
+      <div class="scene-layer" data-layer="visual">
+        <div class="tilt-rig" data-tilt>
+          <div class="ring-stage">
+            <div class="ring-core">
+              <img src="assets/logo-mark-128.png" alt="Full Stack Growth Studio" width="46" height="46" />
+            </div>
+            <div class="orbit-ring" id="orbitRing">
+              <span>CRM Tools</span><span>Funnels</span><span>Websites</span><span>Lead Capture</span>
+              <span>Email &amp; SMS</span><span>Appointments</span><span>Social Media</span><span>Ad Management</span>
+              <span>AI Agents</span><span>Automations</span><span>Reporting</span><span>Communication</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCENE 8 : BONUS FAN -->
+  <div class="scene-content" id="scene-bonus" data-scene>
+    <div class="scene-inner stack-grid">
+      <div class="scene-layer text-center" data-layer="text">
+        <span class="eyebrow">Included Bonuses</span>
+        <h2 class="display-lg">Plus, Four Systems <span class="grad-text">Built For You</span></h2>
+      </div>
+      <div class="scene-layer" data-layer="visual">
+        <div class="tilt-rig" data-tilt>
+          <div class="fan-stage" id="fanStage">
+            <div class="fan-card" data-idx="0">
+              <span class="fan-icon">&#9679;</span>
+              <h3>AI Conversational Agent Build Outs</h3>
+              <p>Custom AI agents that engage prospects 24/7, qualify leads, and build trust before your team ever speaks to them.</p>
+            </div>
+            <div class="fan-card" data-idx="1">
+              <span class="fan-icon">&#9632;</span>
+              <h3>90-Day Content Calendar</h3>
+              <p>A fully planned content strategy across every channel &mdash; consistent, on-brand, and never missed.</p>
+            </div>
+            <div class="fan-card" data-idx="2">
+              <span class="fan-icon">&#9670;</span>
+              <h3>Speed-to-Lead SMS &amp; Email</h3>
+              <p>Automated, behavior-triggered campaigns that respond in seconds and close deals faster.</p>
+            </div>
+            <div class="fan-card" data-idx="3">
+              <span class="fan-icon">&#9733;</span>
+              <h3>Review Generation System</h3>
+              <p>Automatically requests and showcases reviews, turning happy customers into your best marketing asset.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCENE 9 : OFFER -->
+  <div class="scene-content" id="scene-offer" data-scene>
+    <div class="scene-inner stack-grid">
+      <div class="scene-layer text-center" data-layer="text">
+        <span class="eyebrow">The Offer</span>
+        <h2 class="display-lg">Everything Above. <span class="grad-text">Zero Extra Cost.</span></h2>
+      </div>
+      <div class="scene-layer" data-layer="visual">
+        <div class="tilt-rig" data-tilt>
+          <div class="price-flip" id="priceFlip">
+            <div class="price-face price-face--front">
+              <span class="price-strike">$1,997</span>
+              <span class="price-note">30-Day Growth Sprint</span>
+            </div>
+            <div class="price-face price-face--back">
+              <span class="price-free">FREE</span>
+              <span class="price-note">Included when you join Full Stack Growth Studio</span>
+            </div>
+          </div>
+          <ul class="deliverables">
+            <li>Custom funnel &amp; landing page development</li>
+            <li>CRM &amp; automation architecture setup</li>
+            <li>1-on-1 implementation &amp; training sessions</li>
+            <li>Real-time results tracking dashboard</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCENE 10 : FINAL CTA -->
+  <div class="scene-content scene-content--final" id="scene-final" data-scene>
+    <div class="scene-inner stack-grid">
+      <div class="core-glow" aria-hidden="true"></div>
+      <div class="scene-layer text-center" data-layer="text">
+        <h2 class="display-xl">Let's Start Your <span class="grad-text">Growth Sprint.</span></h2>
+        <p class="lede lede-center">Applications open now. Limited onboarding slots each month.</p>
+        <a class="btn btn-primary btn-lg" href="https://fullstackgrowth.studio/checkout/30-day-growth-sprint" target="_blank" rel="noopener">
+          Start The Sprint Now
+          <svg viewBox="0 0 20 20" width="18" height="18"><path d="M4 10h11M10 5l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+      </div>
+    </div>
+  </div>
+
+</div>
+</main>
+
+<footer class="site-footer">
+  <img src="assets/logo-mark-128.png" alt="" width="26" height="26" />
+  <span>&copy; <span id="year"></span> Full Stack Growth Studio</span>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>
