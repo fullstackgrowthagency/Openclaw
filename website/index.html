@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Full Stack Growth Studio — The Complete Growth Operating System</title>
+<meta name="description" content="Full Stack Growth Studio unifies ads, funnels, CRM, automation, and AI agents into one system built to turn attention into revenue — predictably, every month." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet" />
+
+<link rel="stylesheet" href="css/style.css" />
+
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23081015'/%3E%3Cpath d='M8 22 L14 12 L18 18 L24 8' stroke='%2322d3ee' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+</head>
+<body>
+
+<div class="aurora" id="aurora">
+  <div class="aurora__blob aurora__blob--1"></div>
+  <div class="aurora__blob aurora__blob--2"></div>
+  <div class="aurora__blob aurora__blob--3"></div>
+</div>
+<div class="grain"></div>
+<div class="progress-bar" id="progressBar"></div>
+
+<!-- ============ NAV ============ -->
+<header class="nav" id="nav">
+  <div class="nav__inner">
+    <a href="#top" class="nav__logo">
+      <span class="nav__logo-mark">
+        <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" class="mark-bg"/><path d="M8 22 L14 12 L18 18 L24 8" stroke="url(#navgrad)" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="navgrad" x1="8" y1="22" x2="24" y2="8"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#a855f7"/></linearGradient></defs></svg>
+      </span>
+      <span class="nav__logo-text">Full Stack <em>Growth Studio</em></span>
+    </a>
+
+    <nav class="nav__links">
+      <a href="#solution">Platform</a>
+      <a href="#services">Services</a>
+      <a href="#process">Process</a>
+      <a href="#pricing">Engagements</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+
+    <a href="#cta" class="btn btn--nav">
+      <span>Book a Strategy Call</span>
+    </a>
+
+    <button class="nav__burger" id="burger" aria-label="Toggle menu">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+  <div class="nav__mobile" id="navMobile">
+    <a href="#solution">Platform</a>
+    <a href="#services">Services</a>
+    <a href="#process">Process</a>
+    <a href="#pricing">Engagements</a>
+    <a href="#faq">FAQ</a>
+    <a href="#cta" class="btn btn--primary">Book a Strategy Call</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============ HERO ============ -->
+  <section class="hero" id="hero">
+    <div class="hero__bg">
+      <div class="orb orb--cyan" data-speed="0.35"></div>
+      <div class="orb orb--purple" data-speed="0.55"></div>
+      <div class="hero__grid"></div>
+      <svg class="hero__lines" viewBox="0 0 1000 800" preserveAspectRatio="none">
+        <path class="flow-line" d="M 0 200 C 150 250, 350 150, 550 250 S 750 150, 1000 250" />
+        <path class="flow-line flow-line--2" d="M 0 400 C 200 300, 300 500, 500 350 S 800 200, 1000 450" />
+        <path class="flow-line flow-line--3" d="M 0 600 C 300 650, 400 450, 600 500 S 800 300, 1000 350" />
+      </svg>
+    </div>
+
+    <div class="hero__content">
+      <div class="reveal-up eyebrow">
+        <span class="dot-pulse"></span> THE COMPLETE GROWTH OPERATING SYSTEM
+      </div>
+      <h1 class="hero__title">
+        <span class="reveal-line"><span>Growth shouldn&rsquo;t feel</span></span>
+        <span class="reveal-line"><span>like <em class="strike">chaos</em>.</span></span>
+        <span class="reveal-line"><span class="grad-text">It should feel inevitable.</span></span>
+      </h1>
+      <p class="hero__sub reveal-up" data-delay="0.1">
+        We unify your ads, funnels, CRM, automation, and AI agents into a single connected
+        system — engineered to turn cold attention into booked revenue, on repeat.
+      </p>
+      <div class="hero__cta reveal-up" data-delay="0.2">
+        <a href="#cta" class="btn btn--primary btn--lg magnetic">
+          <span>Book a Strategy Call</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+        <a href="#solution" class="btn btn--ghost btn--lg magnetic">
+          <span>See How It Works</span>
+        </a>
+      </div>
+
+      <div class="hero__marquee reveal-up" data-delay="0.3">
+        <div class="marquee">
+          <div class="marquee__track">
+            <span>Acquisition</span><span>·</span><span>Conversion</span><span>·</span>
+            <span>Automation</span><span>·</span><span>AI Agents</span><span>·</span>
+            <span>Retention</span><span>·</span><span>Analytics</span><span>·</span>
+            <span>Acquisition</span><span>·</span><span>Conversion</span><span>·</span>
+            <span>Automation</span><span>·</span><span>AI Agents</span><span>·</span>
+            <span>Retention</span><span>·</span><span>Analytics</span><span>·</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="scroll-cue">
+      <span>Scroll</span>
+      <div class="scroll-cue__line"><i></i></div>
+    </div>
+  </section>
+
+  <!-- ============ ZOOM WORD (pinned) ============ -->
+  <section class="zoom-word" id="zoomWord">
+    <div class="zoom-word__pin">
+      <h2 class="zoom-word__bg" aria-hidden="true">CONNECTED</h2>
+      <p class="zoom-word__fg">One system. Every channel.<br />Fully connected.</p>
+    </div>
+  </section>
+
+  <!-- ============ LOGOS / BUILT FOR ============ -->
+  <section class="built-for">
+    <p class="built-for__label reveal-up">Built for teams who sell to real people</p>
+    <div class="built-for__row reveal-up" data-delay="0.05">
+      <span>E-COMMERCE</span><span>HOME SERVICES</span><span>SAAS</span><span>COACHING &amp; INFO</span>
+      <span>REAL ESTATE</span><span>LEGAL &amp; FINANCE</span><span>MEDICAL &amp; DENTAL</span>
+    </div>
+  </section>
+
+  <!-- ============ PROBLEM ============ -->
+  <section class="problem" id="problem">
+    <div class="section-head">
+      <div class="eyebrow reveal-up"><span class="dot-pulse"></span> THE PROBLEM</div>
+      <h2 class="reveal-up" data-delay="0.05">Your growth stack is <span class="grad-text">fighting itself.</span></h2>
+      <p class="reveal-up" data-delay="0.1">Ten disconnected tools. Three people copy-pasting between them. Leads going cold
+        while everyone argues about whose job follow-up is. Sound familiar?</p>
+    </div>
+
+    <div class="problem__grid">
+      <div class="problem__card card-3d">
+        <div class="problem__icon">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h16M4 18h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="19" cy="18" r="2.5" stroke="currentColor" stroke-width="1.8"/></svg>
+        </div>
+        <h3>Data scattered everywhere</h3>
+        <p>Customer information spread across spreadsheets, inboxes, and five different logins — nobody has the full picture.</p>
+      </div>
+      <div class="problem__card card-3d">
+        <div class="problem__icon">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 8v4l3 3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/></svg>
+        </div>
+        <h3>Leads slip through the cracks</h3>
+        <p>Follow-up is manual and inconsistent. By the time you respond, the prospect already booked with someone else.</p>
+      </div>
+      <div class="problem__card card-3d">
+        <div class="problem__icon">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </div>
+        <h3>Manual work everywhere</h3>
+        <p>Every repetitive task is a bottleneck. Your best people spend their week on busywork instead of closing deals.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SOLUTION (PINNED) ============ -->
+  <section class="solution" id="solution">
+    <div class="section-head section-head--center">
+      <div class="eyebrow reveal-up"><span class="dot-pulse"></span> THE SYSTEM</div>
+      <h2 class="reveal-up" data-delay="0.05">One platform. <span class="grad-text">Every stage of growth.</span></h2>
+    </div>
+
+    <div class="pillars" id="pillars">
+      <div class="pillars__visual">
+        <div class="pillars__stage" id="pillarStage">
+          <!-- panels injected/animated via CSS + JS state -->
+          <div class="pillar-panel" data-pillar="0">
+            <div class="panel-glow panel-glow--1"></div>
+            <svg viewBox="0 0 240 200" class="panel-illustration">
+              <circle cx="120" cy="100" r="70" class="panel-ring" />
+              <path d="M60 130 L100 90 L130 110 L180 60" class="panel-line" />
+              <circle cx="180" cy="60" r="6" class="panel-dot" />
+              <circle cx="100" cy="90" r="6" class="panel-dot" />
+              <circle cx="130" cy="110" r="6" class="panel-dot" />
+            </svg>
+          </div>
+          <div class="pillar-panel" data-pillar="1">
+            <div class="panel-glow panel-glow--2"></div>
+            <svg viewBox="0 0 240 200" class="panel-illustration">
+              <rect x="60" y="50" width="120" height="100" rx="10" class="panel-ring" />
+              <path d="M75 130 L75 90 L100 90 L100 70 L140 70 L140 105 L165 105 L165 130" class="panel-line" />
+            </svg>
+          </div>
+          <div class="pillar-panel" data-pillar="2">
+            <div class="panel-glow panel-glow--3"></div>
+            <svg viewBox="0 0 240 200" class="panel-illustration">
+              <circle cx="80" cy="70" r="18" class="panel-ring" />
+              <circle cx="160" cy="70" r="18" class="panel-ring" />
+              <circle cx="120" cy="140" r="18" class="panel-ring" />
+              <path d="M95 80 L145 80 M100 90 L112 128 M148 88 L128 128" class="panel-line" />
+            </svg>
+          </div>
+          <div class="pillar-panel" data-pillar="3">
+            <div class="panel-glow panel-glow--4"></div>
+            <svg viewBox="0 0 240 200" class="panel-illustration">
+              <path d="M120 40 C90 40 70 65 70 95 C70 118 82 132 95 142 L95 160 L145 160 L145 142 C158 132 170 118 170 95 C170 65 150 40 120 40Z" class="panel-ring" />
+              <path d="M105 100 L118 112 L138 85" class="panel-line" />
+            </svg>
+          </div>
+          <div class="pillar-panel" data-pillar="4">
+            <div class="panel-glow panel-glow--5"></div>
+            <svg viewBox="0 0 240 200" class="panel-illustration">
+              <path d="M50 150 L50 110 L85 110 L85 150 Z M100 150 L100 80 L135 80 L135 150Z M150 150 L150 60 L185 60 L185 150Z" class="panel-bars" />
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="pillars__list">
+        <div class="pillar-item" data-index="0">
+          <span class="pillar-item__num">01</span>
+          <h3>Acquisition Infrastructure</h3>
+          <p>Scroll-stopping ads and high-intent funnels that capture attention across search and social before your competitors do.</p>
+        </div>
+        <div class="pillar-item" data-index="1">
+          <span class="pillar-item__num">02</span>
+          <h3>Conversion Architecture</h3>
+          <p>Fast, conversion-engineered websites and landing pages that turn traffic into booked calls — not just page views.</p>
+        </div>
+        <div class="pillar-item" data-index="2">
+          <span class="pillar-item__num">03</span>
+          <h3>CRM &amp; Automation</h3>
+          <p>Every lead tracked, tagged, and nurtured automatically. No more manual follow-up, no more dropped opportunities.</p>
+        </div>
+        <div class="pillar-item" data-index="3">
+          <span class="pillar-item__num">04</span>
+          <h3>AI Agents</h3>
+          <p>Conversational agents that qualify, answer, and book appointments 24/7 — while your team sleeps.</p>
+        </div>
+        <div class="pillar-item" data-index="4">
+          <span class="pillar-item__num">05</span>
+          <h3>Analytics &amp; Intelligence</h3>
+          <p>Real-time dashboards that show exactly which campaigns and channels are actually driving revenue.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SERVICES (horizontal scroll-jacked) ============ -->
+  <section class="services" id="services">
+    <div class="section-head">
+      <div class="eyebrow reveal-up"><span class="dot-pulse"></span> WHAT WE BUILD</div>
+      <h2 class="reveal-up" data-delay="0.05">Every discipline. <span class="grad-text">Fully connected.</span></h2>
+      <p class="reveal-up" data-delay="0.1">Replace a dozen disconnected freelancers and subscriptions with one team, one system, one source of truth.</p>
+    </div>
+
+    <div class="services__pin" id="servicesPin">
+      <div class="services__track" id="servicesTrack">
+        <article class="service-card">
+          <span class="service-card__num">01</span>
+          <div class="service-card__icon">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M3 11l18-7-7 18-2-8-8-3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+          </div>
+          <h3>Ads &amp; Lead Generation</h3>
+          <p>Google, Meta, and TikTok campaigns engineered for maximum ROAS — launched, managed, and optimized weekly.</p>
+          <a href="#cta" class="service-card__link">Learn more <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </article>
+
+        <article class="service-card">
+          <span class="service-card__num">02</span>
+          <div class="service-card__icon">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M4 6a2 2 0 012-2h8l6 6v8a2 2 0 01-2 2H6a2 2 0 01-2-2V6z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M14 4v6h6" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+          </div>
+          <h3>Websites &amp; Funnels</h3>
+          <p>Fast, beautiful, conversion-focused builds — corporate sites, landing pages, and multi-step funnels alike.</p>
+          <a href="#cta" class="service-card__link">Learn more <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </article>
+
+        <article class="service-card">
+          <span class="service-card__num">03</span>
+          <div class="service-card__icon">
+            <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="14" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M8 4v-1M16 4v-1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </div>
+          <h3>CRM &amp; Pipeline Management</h3>
+          <p>A single source of truth for every lead, client, and deal — with automated stage movement and smart tagging.</p>
+          <a href="#cta" class="service-card__link">Learn more <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </article>
+
+        <article class="service-card">
+          <span class="service-card__num">04</span>
+          <div class="service-card__icon">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M13 2 3 14h8l-1 8 10-12h-8l1-8z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+          </div>
+          <h3>Automation &amp; Workflows</h3>
+          <p>Drag-and-drop logic that connects every app in your stack, so no lead — and no task — ever falls through.</p>
+          <a href="#cta" class="service-card__link">Learn more <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </article>
+
+        <article class="service-card">
+          <span class="service-card__num">05</span>
+          <div class="service-card__icon">
+            <svg viewBox="0 0 24 24" fill="none"><rect x="5" y="7" width="14" height="12" rx="3" stroke="currentColor" stroke-width="1.8"/><path d="M9 7V5a3 3 0 016 0v2M9 13h.01M15 13h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </div>
+          <h3>AI Agents &amp; Conversational AI</h3>
+          <p>Chat and voice agents trained on your business that qualify leads and book appointments around the clock.</p>
+          <a href="#cta" class="service-card__link">Learn more <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </article>
+
+        <article class="service-card">
+          <span class="service-card__num">06</span>
+          <div class="service-card__icon">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <h3>Analytics &amp; Reporting</h3>
+          <p>Custom dashboards that track every campaign, channel, and dollar — so decisions are made on data, not gut feel.</p>
+          <a href="#cta" class="service-card__link">Learn more <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </article>
+      </div>
+
+      <div class="services__progress"><div class="services__progress-fill" id="servicesProgressFill"></div></div>
+    </div>
+  </section>
+
+  <!-- ============ PROCESS ============ -->
+  <section class="process" id="process">
+    <div class="section-head">
+      <div class="eyebrow reveal-up"><span class="dot-pulse"></span> HOW IT WORKS</div>
+      <h2 class="reveal-up" data-delay="0.05">The 30-Day <span class="grad-text">Growth Sprint.</span></h2>
+      <p class="reveal-up" data-delay="0.1">From first call to live system — no six-month agency onboarding, no guesswork.</p>
+    </div>
+
+    <div class="timeline" id="timeline">
+      <div class="timeline__line"><div class="timeline__line-fill" id="timelineFill"></div></div>
+
+      <div class="timeline__item reveal-up" data-delay="0">
+        <div class="timeline__marker">01</div>
+        <div class="timeline__body">
+          <h3>Audit</h3>
+          <p>We map your entire customer journey and pinpoint exactly where revenue is leaking — data, follow-up, or conversion.</p>
+        </div>
+      </div>
+      <div class="timeline__item timeline__item--right reveal-up" data-delay="0.08">
+        <div class="timeline__marker">02</div>
+        <div class="timeline__body">
+          <h3>Architect</h3>
+          <p>We design the funnels, automations, and CRM structure that match your exact sales process — built to scale, not patch.</p>
+        </div>
+      </div>
+      <div class="timeline__item reveal-up" data-delay="0.16">
+        <div class="timeline__marker">03</div>
+        <div class="timeline__body">
+          <h3>Launch</h3>
+          <p>Campaigns go live, agents go online, automations start running. Your entire stack connects inside 30 days.</p>
+        </div>
+      </div>
+      <div class="timeline__item timeline__item--right reveal-up" data-delay="0.24">
+        <div class="timeline__marker">04</div>
+        <div class="timeline__body">
+          <h3>Scale</h3>
+          <p>We monitor, test, and optimize continuously — feeding winning variations back into the system every single week.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ STATS ============ -->
+  <section class="stats" id="stats">
+    <div class="stats__bg"></div>
+    <div class="stats__grid">
+      <div class="stat reveal-up" data-delay="0">
+        <span class="stat__num" data-count="24">0</span><span class="stat__suffix">/7</span>
+        <p>AI-powered lead coverage — every channel, every hour</p>
+      </div>
+      <div class="stat reveal-up" data-delay="0.08">
+        <span class="stat__num" data-count="1">0</span><span class="stat__suffix"> Dashboard</span>
+        <p>Replacing a dozen disconnected tools and logins</p>
+      </div>
+      <div class="stat reveal-up" data-delay="0.16">
+        <span class="stat__num" data-count="30">0</span><span class="stat__suffix"> Days</span>
+        <p>From strategy call to a fully live growth system</p>
+      </div>
+      <div class="stat reveal-up" data-delay="0.24">
+        <span class="stat__num" data-count="100">0</span><span class="stat__suffix">%</span>
+        <p>Of your customer journey, tracked in one place</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PRICING / ENGAGEMENTS ============ -->
+  <section class="pricing" id="pricing">
+    <div class="section-head section-head--center">
+      <div class="eyebrow reveal-up"><span class="dot-pulse"></span> ENGAGEMENTS</div>
+      <h2 class="reveal-up" data-delay="0.05">Choose your <span class="grad-text">growth path.</span></h2>
+      <p class="reveal-up" data-delay="0.1">Whether you want to run the platform yourself or hand us the keys entirely.</p>
+    </div>
+
+    <div class="pricing__grid">
+      <div class="price-card reveal-up" data-delay="0">
+        <h3>Core Platform</h3>
+        <p class="price-card__tagline">Essential tools to build your own growth engine.</p>
+        <ul class="price-card__features">
+          <li>CRM, pipelines &amp; calendars</li>
+          <li>Funnel &amp; website builder</li>
+          <li>Email &amp; SMS automation</li>
+          <li>Guided platform onboarding</li>
+        </ul>
+        <a href="#cta" class="btn btn--ghost btn--block">Talk to Us</a>
+      </div>
+
+      <div class="price-card price-card--featured reveal-up" data-delay="0.08">
+        <div class="price-card__badge">Most Popular</div>
+        <h3>Growth Department</h3>
+        <p class="price-card__tagline">We build and run your system alongside your team.</p>
+        <ul class="price-card__features">
+          <li>Everything in Core, managed for you</li>
+          <li>Ad campaign strategy &amp; execution</li>
+          <li>AI agent build-outs</li>
+          <li>Bi-weekly strategy sessions</li>
+          <li>Dedicated success manager</li>
+        </ul>
+        <a href="#cta" class="btn btn--primary btn--block">Book a Strategy Call</a>
+      </div>
+
+      <div class="price-card reveal-up" data-delay="0.16">
+        <h3>Growth Partner</h3>
+        <p class="price-card__tagline">Full done-for-you partnership across every channel.</p>
+        <ul class="price-card__features">
+          <li>Everything in Growth Department</li>
+          <li>Custom automation &amp; API builds</li>
+          <li>Cross-channel budget optimization</li>
+          <li>Dedicated account &amp; engineering team</li>
+        </ul>
+        <a href="#cta" class="btn btn--ghost btn--block">Talk to Us</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FAQ ============ -->
+  <section class="faq" id="faq">
+    <div class="section-head">
+      <div class="eyebrow reveal-up"><span class="dot-pulse"></span> QUESTIONS</div>
+      <h2 class="reveal-up" data-delay="0.05">Good to <span class="grad-text">know.</span></h2>
+    </div>
+
+    <div class="faq__list">
+      <div class="faq__item reveal-up" data-delay="0">
+        <button class="faq__question">
+          <span>How fast can we actually get started?</span>
+          <span class="faq__icon">+</span>
+        </button>
+        <div class="faq__answer"><p>Most engagements kick off within a week of your strategy call, with your first systems live inside the 30-day sprint.</p></div>
+      </div>
+      <div class="faq__item reveal-up" data-delay="0.05">
+        <button class="faq__question">
+          <span>Do I need to replace my existing tools?</span>
+          <span class="faq__icon">+</span>
+        </button>
+        <div class="faq__answer"><p>Not necessarily. We connect to your existing tech stack via API wherever possible, and consolidate only where it removes friction.</p></div>
+      </div>
+      <div class="faq__item reveal-up" data-delay="0.1">
+        <button class="faq__question">
+          <span>What industries do you work with?</span>
+          <span class="faq__icon">+</span>
+        </button>
+        <div class="faq__answer"><p>E-commerce, home services, SaaS, coaching &amp; info products, real estate, legal, and medical/dental practices are our core focus areas.</p></div>
+      </div>
+      <div class="faq__item reveal-up" data-delay="0.15">
+        <button class="faq__question">
+          <span>Can I start small and scale up later?</span>
+          <span class="faq__icon">+</span>
+        </button>
+        <div class="faq__answer"><p>Yes. Most clients start on the Core platform or Growth Department tier and move to a full Growth Partner engagement as results compound.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FINAL CTA ============ -->
+  <section class="cta-final" id="cta">
+    <div class="cta-final__glow"></div>
+    <div class="cta-final__content">
+      <div class="eyebrow reveal-up"><span class="dot-pulse"></span> LET&rsquo;S BUILD</div>
+      <h2 class="reveal-up" data-delay="0.05">Ready to build a growth<br class="br-desktop" /> engine that <span class="grad-text">runs itself?</span></h2>
+      <p class="reveal-up" data-delay="0.1">Book a free strategy call. We&rsquo;ll map your funnel, find the leaks, and show you exactly what a connected system looks like for your business.</p>
+      <form class="cta-final__form reveal-up" data-delay="0.15" id="ctaForm">
+        <input type="text" placeholder="Full name" required />
+        <input type="email" placeholder="Work email" required />
+        <input type="text" placeholder="Company / website" />
+        <button type="submit" class="btn btn--primary btn--lg magnetic">
+          <span>Book My Strategy Call</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </form>
+      <p class="cta-final__note reveal-up" data-delay="0.2">No pressure, no pitch deck marathon — just a straight conversation about your growth stack.</p>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============ FOOTER ============ -->
+<footer class="footer">
+  <div class="footer__top">
+    <a href="#top" class="nav__logo">
+      <span class="nav__logo-mark">
+        <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="8" class="mark-bg"/><path d="M8 22 L14 12 L18 18 L24 8" stroke="url(#footgrad)" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="footgrad" x1="8" y1="22" x2="24" y2="8"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#a855f7"/></linearGradient></defs></svg>
+      </span>
+      <span class="nav__logo-text">Full Stack <em>Growth Studio</em></span>
+    </a>
+    <p>Your Complete Growth Operating System — ads, funnels, CRM, automation, and AI, unified.</p>
+  </div>
+
+  <div class="footer__grid">
+    <div>
+      <h4>Platform</h4>
+      <a href="#solution">Acquisition</a>
+      <a href="#solution">Conversion</a>
+      <a href="#solution">Automation</a>
+      <a href="#solution">AI Agents</a>
+      <a href="#solution">Analytics</a>
+    </div>
+    <div>
+      <h4>Company</h4>
+      <a href="#process">Process</a>
+      <a href="#pricing">Engagements</a>
+      <a href="#faq">FAQ</a>
+      <a href="#cta">Contact</a>
+    </div>
+    <div>
+      <h4>Get in touch</h4>
+      <a href="mailto:hello@fullstackgrowth.studio">hello@fullstackgrowth.studio</a>
+      <a href="#cta">Book a Strategy Call</a>
+    </div>
+  </div>
+
+  <div class="footer__bottom">
+    <span>&copy; 2026 Full Stack Growth Studio. All rights reserved.</span>
+    <div class="footer__social">
+      <a href="#" aria-label="LinkedIn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M6.94 6.5a1.94 1.94 0 11-3.88 0 1.94 1.94 0 013.88 0zM3.5 8.75h3v11.75h-3zM9.5 8.75h2.87v1.6h.04c.4-.75 1.38-1.6 2.84-1.6 3.04 0 3.6 2 3.6 4.6v6.9h-3v-6.12c0-1.46-.03-3.33-2.03-3.33-2.04 0-2.35 1.6-2.35 3.23v6.22h-3z" fill="currentColor"/></svg></a>
+      <a href="#" aria-label="Instagram"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="5" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8"/><circle cx="17.5" cy="6.5" r="1.2" fill="currentColor"/></svg></a>
+      <a href="#" aria-label="X"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4 4l16 16M20 4L4 20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></a>
+    </div>
+  </div>
+</footer>
+
+<div class="cursor-glow" id="cursorGlow"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+<script src="https://unpkg.com/lenis@1.1.14/dist/lenis.min.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
