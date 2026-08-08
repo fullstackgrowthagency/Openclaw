@@ -144,20 +144,67 @@ Two different data paths, deliberately:
 
 `scripts/run_dashboard.py` is what makes the historical panels have
 anything to show: it wires `TradingLoop`'s `on_trade_closed`/`on_order_update`
-callbacks (added for exactly this purpose) to `record_trade()`/`record_order()`,
-runs the loop in a background thread, and serves the FastAPI app in the
-foreground. Before this, nothing in the live loop persisted anywhere --
-`on_trade_closed` just printed. `record_order()` upserts by `client_order_id`
-rather than inserting a new row per call, since one order is reported
-multiple times as its status changes (`SUBMITTED` -> `FILLED`, see the
-Webull integration section above) and `OrderRecord.client_order_id` has a
-uniqueness constraint.
+callbacks to `record_trade()`/`record_order()`, runs the loop in a
+background thread, and serves the FastAPI app in the foreground. Before
+this, nothing in the live loop persisted anywhere -- `on_trade_closed` just
+printed. `record_order()` upserts by `client_order_id` rather than
+inserting a new row per call, since one order is reported multiple times as
+its status changes (`SUBMITTED` -> `FILLED`, see the Webull integration
+section above) and `OrderRecord.client_order_id` has a uniqueness
+constraint.
 
 The frontend (`dashboard/static/`) is plain HTML/CSS/JS with no build step
 and no external dependencies (no CDN scripts) -- it polls the REST
 endpoints every 5s. Keep it that way unless there's a real reason to add a
 frontend toolchain; a monitoring dashboard for a single operator doesn't
 need one.
+
+## Full persistence: state transitions, MIS scores, momentum events
+
+Beyond trades/orders, `TradingLoop` exposes three more hooks so
+`scripts/run_dashboard.py` can persist everything the data-collection goals
+in the project outline need, without `TradingLoop` itself importing the DB
+layer:
+
+- **`on_state_transition(symbol, from_state, to_state, timestamp)`** --
+  fired for every state-machine transition, from wherever it happened
+  (`CandidateWatcher`, `TriggerEngine`, or `TradingLoop` itself). Rather
+  than threading a callback through every module that can call
+  `state_machine.transition()`, `_flush_state_transitions()` diffs
+  `Candidate.state_history` (an append-only list every `transition()` call
+  already appends to) against a per-symbol "already reported" count kept in
+  `TradingLoop`, and reports whatever's new. This runs inside a `finally`
+  block wrapping `_process_candidate` specifically so it still fires no
+  matter which early `return` branch was taken that tick.
+- **`on_score_computed(symbol, score)`** -- fired with `candidate.latest_score`
+  immediately after `CandidateWatcher.update()` produces one. Writes one row
+  per tick per watched candidate on purpose (see the README's note on this)
+  -- comparing MIS formulas offline needs a dense history, not samples only
+  at trigger time.
+- **`momentum_event_tracker`** -- unlike the other two, this is a
+  collaborator object (`MomentumEventTracker`, `collection/event_recorder.py`),
+  not a simple callback, because tracking a momentum event has ongoing state
+  across many ticks (filling forward-looking 30s-15m outcome windows).
+  `TradingLoop` registers a new `MomentumEvent` whenever `TriggerEngine`
+  fires a signal (`_register_momentum_event`), flips `was_traded` to `True`
+  in `_submit_entry` once the order actually gets submitted (not just
+  attempted -- a risk-engine rejection leaves it `False`), and calls
+  `momentum_event_tracker.on_snapshot()` unconditionally every tick a
+  snapshot is available so outcome windows keep filling regardless of the
+  candidate's state. `db/repository.py`'s `DBBackedEventRecorder` extends
+  the base in-memory `EventRecorder` to also write through to the database
+  on every `save()`/`update()`, keyed by the DB row id (momentum events have
+  no natural unique key the way orders have `client_order_id`).
+
+**Bug found and fixed while wiring this up:** `MomentumEventTracker._finalize()`
+(which sets the final `CONTINUED`/`FAILED`/`CHOPPY` label once all outcome
+windows are filled) used to run *after* the last `recorder.update()` call
+for that event, so the finalized label was computed but never actually
+included in what got persisted -- silent before because the original
+`EventRecorder.update()` was a no-op with nothing behind it to expose the
+bug. Fixed by finalizing before that last `update()` call; see
+`tests/test_event_recorder.py::test_final_update_call_includes_the_finalized_outcome_label`,
+which fails without the fix.
 
 ## Free-float data (FMP)
 

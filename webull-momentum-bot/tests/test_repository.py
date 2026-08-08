@@ -2,12 +2,22 @@ from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
-from webull_bot.db.models import Base, OrderRecord, TradeRecord
-from webull_bot.db.repository import get_performance_summary, get_recent_trades, record_order, record_trade
-from webull_bot.enums import ExitReason, OrderSide, OrderStatus, OrderType
-from webull_bot.models import Order, Trade
+from webull_bot.db.models import Base, MomentumEventRecord, MomentumScoreRecord, OrderRecord, ScannerEvent, TradeRecord
+from webull_bot.db.repository import (
+    DBBackedEventRecorder,
+    get_performance_summary,
+    get_recent_trades,
+    record_momentum_event,
+    record_momentum_score,
+    record_order,
+    record_scanner_event,
+    record_trade,
+)
+from webull_bot.enums import CandidateState, ExitReason, MomentumOutcome, OrderSide, OrderStatus, OrderType
+from webull_bot.models import MomentumEvent, MomentumMetrics, MomentumScore, MomentumScoreComponents, Order, Trade
 
 
 @pytest.fixture
@@ -16,6 +26,17 @@ def session():
     Base.metadata.create_all(engine)
     with Session(engine) as s:
         yield s
+
+
+@pytest.fixture
+def session_factory():
+    """A real, callable session factory (unlike the `session` fixture above)
+    for tests that need multiple independent sessions against the same
+    in-memory DB -- plain sqlite:///:memory: gives each new connection its
+    own empty database, so StaticPool is required to share one."""
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)
 
 
 def _trade(**overrides) -> Trade:
@@ -90,3 +111,106 @@ def test_get_performance_summary_computes_win_rate_and_pnl(session):
     assert summary["total_trades"] == 2
     assert summary["win_rate"] == 0.5
     assert summary["total_pnl"] == 50.0
+
+
+# -- scanner events, momentum scores, momentum events -----------------------
+
+def test_record_scanner_event_persists(session):
+    record_scanner_event(
+        session, symbol="TEST", from_state=CandidateState.WATCHING, to_state=CandidateState.HEATING_UP,
+        timestamp=datetime(2026, 1, 1, 9, 31), reason="MIS crossed threshold",
+    )
+    session.commit()
+    rows = session.query(ScannerEvent).all()
+    assert len(rows) == 1
+    assert rows[0].from_state == "watching"
+    assert rows[0].to_state == "heating_up"
+    assert rows[0].event_type == "state_transition"
+
+
+def _score(**overrides) -> MomentumScore:
+    base = dict(
+        symbol="TEST", timestamp=datetime(2026, 1, 1, 9, 31), score=72.5, weights_version="v1-test",
+        components=MomentumScoreComponents(80, 70, 60, 50, 40, 30, 20, 10),
+    )
+    base.update(overrides)
+    return MomentumScore(**base)
+
+
+def test_record_momentum_score_persists_components_as_json(session):
+    record_momentum_score(session, _score())
+    session.commit()
+    rows = session.query(MomentumScoreRecord).all()
+    assert len(rows) == 1
+    assert rows[0].score == 72.5
+    assert rows[0].components["float_score"] == 80
+
+
+def _metrics() -> MomentumMetrics:
+    return MomentumMetrics(
+        symbol="TEST", timestamp=datetime(2026, 1, 1, 9, 31), float_turnover=0.1,
+        float_velocity_1m=0.01, float_velocity_3m=0.02, float_velocity_5m=0.03,
+        relative_volume=3.0, volume_accel_1m_3m=1.5, price_velocity_1m=1.0, price_velocity_3m=2.0,
+        price_velocity_5m=3.0, price_velocity_15m=4.0, price_acceleration=1.0, vwap=10.0,
+        distance_from_vwap_pct=1.0, distance_from_hod_pct=1.0, distance_from_premarket_high_pct=None,
+        distance_from_resistance_pct=None, spread_abs=0.01, spread_pct=0.1, dollar_volume=1_000_000,
+    )
+
+
+def _momentum_event(**overrides) -> MomentumEvent:
+    base = dict(
+        symbol="TEST", detected_at=datetime(2026, 1, 1, 9, 31), trigger_reason="momentum_breakout:enter_long",
+        was_traded=True, score_at_event=72.5, metrics_at_event=_metrics(), price_at_event=5.20,
+    )
+    base.update(overrides)
+    return MomentumEvent(**base)
+
+
+def test_record_momentum_event_serializes_metrics_with_isoformat_timestamp(session):
+    record_momentum_event(session, _momentum_event())
+    session.commit()
+    row = session.query(MomentumEventRecord).one()
+    assert row.symbol == "TEST"
+    assert row.was_traded is True
+    assert row.metrics_at_event["symbol"] == "TEST"
+    assert row.metrics_at_event["timestamp"] == "2026-01-01T09:31:00"  # datetime -> isoformat string
+    assert row.outcome_label == "unknown"
+
+
+def test_record_momentum_event_upserts_by_existing_id_not_duplicating_rows(session):
+    row1 = record_momentum_event(session, _momentum_event())
+    session.commit()
+    assert session.query(MomentumEventRecord).count() == 1
+
+    event = _momentum_event(outcome_label=MomentumOutcome.CONTINUED, outcome_15m={"pct_change": 5.0})
+    record_momentum_event(session, event, existing_id=row1.id)
+    session.commit()
+
+    assert session.query(MomentumEventRecord).count() == 1
+    row = session.query(MomentumEventRecord).one()
+    assert row.outcome_label == "continued"
+    assert row.outcome_15m == {"pct_change": 5.0}
+
+
+def test_db_backed_event_recorder_writes_through_and_updates_same_row(session_factory):
+    recorder = DBBackedEventRecorder(session_factory)
+    event = _momentum_event(was_traded=False)
+
+    event_id = recorder.save(event)
+    with session_factory() as s:
+        assert s.query(MomentumEventRecord).count() == 1
+        assert s.query(MomentumEventRecord).one().was_traded is False
+
+    # Mutate in place (mirrors how MomentumEventTracker updates a tracked event) and flush again.
+    event.was_traded = True
+    event.outcome_label = MomentumOutcome.CONTINUED
+    recorder.update(event_id)
+
+    with session_factory() as s:
+        rows = s.query(MomentumEventRecord).all()
+        assert len(rows) == 1  # still one row, not a duplicate
+        assert rows[0].was_traded is True
+        assert rows[0].outcome_label == "continued"
+
+    # The in-memory base-class behavior (used by MomentumEventTracker.get()) must still work.
+    assert recorder.get(event_id) is event

@@ -58,13 +58,20 @@ What's implemented and tested:
   directly off the running `TradingLoop`/`RiskEngine` in-process -- no DB
   round-trip, so they reflect the current process exactly. Historical
   panels (trade history, win rate/P&L performance) read from the database.
-  This is also what wired up actual DB persistence for the first time:
-  `db/repository.py` + `TradingLoop`'s `on_trade_closed`/`on_order_update`
-  hooks now write trades and order status changes to Postgres/Supabase (or
-  SQLite for local dev) as they happen -- previously nothing in the live
-  loop persisted anywhere.
-- Data-collection scaffolding for recording momentum events (traded and
-  not-traded) with forward-looking outcome windows
+- **Full DB persistence** (`db/repository.py`, wired through `TradingLoop`'s
+  `on_trade_closed` / `on_order_update` / `on_state_transition` /
+  `on_score_computed` hooks and an optional `momentum_event_tracker`
+  collaborator): trades, order status changes, candidate state transitions
+  (`scanner_events`), every computed Momentum Ignition Score
+  (`momentum_scores`), and momentum events -- traded AND non-traded, with
+  forward-looking 30s-15m outcome windows -- via `DBBackedEventRecorder`
+  (`momentum_events`). Previously nothing in the live loop persisted
+  anywhere; `scripts/run_dashboard.py` wires all of it. Fixed a real bug
+  found while wiring this up: `MomentumEventTracker._finalize()` (which
+  sets the final CONTINUED/FAILED/CHOPPY label) used to run *after* the
+  last `recorder.update()` call for an event, so that label was computed
+  but never actually included in what got persisted -- invisible before
+  since `update()` was a no-op with no real recorder behind it.
 - SQLAlchemy schema for Postgres/Supabase covering the tables in the
   project outline
 
@@ -86,13 +93,14 @@ What's still a skeleton or unverified (explicitly, not silently):
 - Real resistance/support level detection (currently just running HOD)
 - Level 2 / order-flow features
 - Alembic migrations (use `scripts/init_db.py` for now)
-- DB persistence only covers trades and orders so far -- candidate state
-  transitions, momentum scores/events, and market observations are not yet
-  written to their respective tables (`scanner_events`, `momentum_scores`,
-  `momentum_events`, `market_observations` all exist in the schema but stay
-  empty). The dashboard's live panels don't need them (they read the
-  in-process state directly), but longer-term data collection/backtesting
-  against real history will.
+- `market_observations` (raw-ish sampled quote features, distinct from the
+  derived `momentum_scores`/`momentum_events` tables that already persist)
+  is still unused -- the schema exists but nothing writes to it yet.
+- No throttling on `momentum_scores` writes -- one row is written per tick
+  per actively-watched candidate, which is intentional (dense history for
+  offline MIS-formula comparison) but can grow the table quickly with many
+  candidates and a short poll interval. Add sampling if that becomes a
+  problem for your database.
 
 ## Safety model
 

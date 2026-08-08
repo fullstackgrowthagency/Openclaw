@@ -65,7 +65,7 @@ def _build_bars() -> list[MarketSnapshot]:
     ]
 
 
-def _build_loop(broker) -> TradingLoop:
+def _build_loop(broker, **extra_kwargs) -> TradingLoop:
     float_provider = _SingleSymbolFloatProvider("TEST", 3_000_000)
     broad_scanner = BroadScanner(broker, float_provider)
     watcher = CandidateWatcher(config=WatcherConfig(heating_up_score_threshold=15.0, armed_score_threshold=35.0))
@@ -82,6 +82,7 @@ def _build_loop(broker) -> TradingLoop:
         order_manager, position_manager, risk_engine,
         config=TradingLoopConfig(universe_rescan_interval_seconds=3600, cooldown_seconds=900),
         on_trade_closed=trades.append,
+        **extra_kwargs,
     )
     loop._trades = trades  # test-only convenience handle
     return loop
@@ -312,3 +313,113 @@ def test_cooldown_expires_back_to_watching():
 
     loop._process_candidate(candidate, now)  # cooldown_seconds=900, 1000s elapsed -> should expire
     assert candidate.state == CandidateState.WATCHING
+
+
+# -- persistence hooks: state transitions, MIS scores, momentum events -----
+
+def test_state_transitions_are_flushed_in_order_via_callback():
+    from webull_bot.enums import CandidateState
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    transitions = []
+    loop = _build_loop(broker, on_state_transition=lambda symbol, frm, to, ts: transitions.append((symbol, frm, to)))
+
+    for bar in _build_bars():
+        broker.feed_snapshot(bar)
+        loop.run_once(now=bar.timestamp)
+
+    symbols = {t[0] for t in transitions}
+    assert symbols == {"TEST"}
+    path = [(t[1], t[2]) for t in transitions]
+    assert path == [
+        (CandidateState.DISCOVERED, CandidateState.WATCHING),
+        (CandidateState.WATCHING, CandidateState.HEATING_UP),
+        (CandidateState.HEATING_UP, CandidateState.ARMED),
+        (CandidateState.ARMED, CandidateState.TRIGGERED),
+        (CandidateState.TRIGGERED, CandidateState.ENTERED),
+        (CandidateState.ENTERED, CandidateState.MANAGING),
+        (CandidateState.MANAGING, CandidateState.EXITED),
+        (CandidateState.EXITED, CandidateState.COOLDOWN),
+    ]
+
+
+def test_state_transitions_not_double_flushed_across_ticks():
+    """Each transition must be reported exactly once, even though
+    _flush_state_transitions runs on every tick for every candidate."""
+    broker = PaperBrokerClient()
+    broker.connect()
+    transitions = []
+    loop = _build_loop(broker, on_state_transition=lambda symbol, frm, to, ts: transitions.append((frm, to)))
+
+    for bar in _build_bars():
+        broker.feed_snapshot(bar)
+        loop.run_once(now=bar.timestamp)
+
+    assert len(transitions) == len(set(transitions)) or len(transitions) == 8  # no duplicates
+
+
+def test_score_computed_callback_fires_for_watched_candidate():
+    broker = PaperBrokerClient()
+    broker.connect()
+    scores = []
+    loop = _build_loop(broker, on_score_computed=lambda symbol, score: scores.append((symbol, score)))
+
+    bars = _build_bars()
+    broker.feed_snapshot(bars[0])
+    loop.run_once(now=bars[0].timestamp)
+
+    assert len(scores) == 1
+    symbol, score = scores[0]
+    assert symbol == "TEST"
+    assert 0.0 <= score.score <= 100.0
+
+
+def test_momentum_event_registered_and_marked_traded_on_successful_entry():
+    from webull_bot.collection.event_recorder import EventRecorder, MomentumEventTracker
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    recorder = EventRecorder()
+    tracker = MomentumEventTracker(recorder)
+    loop = _build_loop(broker, momentum_event_tracker=tracker)
+
+    for bar in _build_bars():
+        broker.feed_snapshot(bar)
+        loop.run_once(now=bar.timestamp)
+
+    event = recorder.get(1)
+    assert event.symbol == "TEST"
+    assert event.was_traded is True
+    assert "momentum_breakout" in event.trigger_reason
+    assert event.price_at_event == pytest.approx(5.20)
+
+
+def test_momentum_event_not_marked_traded_when_risk_engine_rejects():
+    from webull_bot.collection.event_recorder import EventRecorder, MomentumEventTracker
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    recorder = EventRecorder()
+    tracker = MomentumEventTracker(recorder)
+    # max_trades_per_day=0 guarantees the risk engine rejects every entry signal.
+    float_provider = _SingleSymbolFloatProvider("TEST", 3_000_000)
+    broad_scanner = BroadScanner(broker, float_provider)
+    watcher = CandidateWatcher(config=WatcherConfig(heating_up_score_threshold=15.0, armed_score_threshold=35.0))
+    from webull_bot.scanner.trigger_engine import TriggerEngine
+
+    risk_engine = RiskEngine(RiskConfig(max_trades_per_day=0))
+    order_manager = OrderManager(broker, risk_engine, get_settings())
+    loop = TradingLoop(
+        broker, StaticUniverseProvider(["TEST"]), broad_scanner, watcher,
+        TriggerEngine([MomentumBreakoutStrategy()]), order_manager, PositionManager(), risk_engine,
+        config=TradingLoopConfig(universe_rescan_interval_seconds=3600),
+        momentum_event_tracker=tracker,
+    )
+
+    for bar in _build_bars():
+        broker.feed_snapshot(bar)
+        loop.run_once(now=bar.timestamp)
+
+    event = recorder.get(1)
+    assert event.was_traded is False

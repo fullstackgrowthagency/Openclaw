@@ -107,12 +107,17 @@ class MomentumEventTracker:
                     setattr(event, field_name, self._snapshot_outcome(event, snapshot))
                     pending.filled_windows.add(field_name)
 
+            all_windows_filled = len(pending.filled_windows) >= len(OUTCOME_WINDOWS)
+            if all_windows_filled:
+                # Must run BEFORE recorder.update() below, so the final
+                # CONTINUED/FAILED/CHOPPY label is included in what gets
+                # persisted -- previously this ran after the last update()
+                # call and the label change was silently never saved.
+                self._finalize(event)
             self.recorder.update(pending.event_id)
 
-            if len(pending.filled_windows) < len(OUTCOME_WINDOWS):
+            if not all_windows_filled:
                 still_pending.append(pending)
-            else:
-                self._finalize(event)
 
         if still_pending:
             self._pending[symbol] = still_pending

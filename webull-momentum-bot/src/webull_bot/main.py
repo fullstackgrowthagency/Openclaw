@@ -19,15 +19,18 @@ autonomous discovery.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Callable, Optional
 
 from webull_bot.brokers import get_broker_client
 from webull_bot.brokers.webull.client import WebullBrokerClient
+from webull_bot.collection.event_recorder import MomentumEventTracker
 from webull_bot.config import Settings, get_settings
 from webull_bot.data.float_providers import get_float_provider
 from webull_bot.data.universe import StaticUniverseProvider, WebullUniverseProvider
+from webull_bot.enums import CandidateState
 from webull_bot.execution.order_manager import OrderManager
-from webull_bot.models import Order, Trade
+from webull_bot.models import MomentumScore, Order, Trade
 from webull_bot.position.position_manager import PositionManager
 from webull_bot.risk.risk_engine import RiskEngine
 from webull_bot.runtime.trading_loop import TradingLoop
@@ -44,11 +47,15 @@ def build_trading_loop(
     settings: Optional[Settings] = None,
     on_trade_closed: Optional[Callable[[Trade], None]] = None,
     on_order_update: Optional[Callable[[Order], None]] = None,
+    on_state_transition: Optional[Callable[[str, CandidateState, CandidateState, datetime], None]] = None,
+    on_score_computed: Optional[Callable[[str, MomentumScore], None]] = None,
+    momentum_event_tracker: Optional[MomentumEventTracker] = None,
 ) -> TradingLoop:
     """Builds the full pipeline. `on_trade_closed`/`on_order_update` default to
-    printing (this module's original behavior); pass your own to also (or
-    instead) persist to a database -- see scripts/run_dashboard.py, which
-    wraps these to write through db/repository.py while still printing."""
+    printing (this module's original behavior); pass your own (and the other
+    hooks) to also (or instead) persist to a database -- see
+    scripts/run_dashboard.py, which wraps these to write through
+    db/repository.py while still printing trade closures."""
     settings = settings or get_settings()
     settings.require_non_live_or_authorized()
 
@@ -76,6 +83,9 @@ def build_trading_loop(
         order_manager, position_manager, risk_engine,
         on_trade_closed=on_trade_closed or (lambda trade: print(f"TRADE CLOSED: {trade}")),
         on_order_update=on_order_update,
+        on_state_transition=on_state_transition,
+        on_score_computed=on_score_computed,
+        momentum_event_tracker=momentum_event_tracker,
     )
 
 

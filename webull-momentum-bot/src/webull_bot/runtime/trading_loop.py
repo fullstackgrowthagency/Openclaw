@@ -32,11 +32,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
+from ..collection.event_recorder import MomentumEventTracker
 from ..enums import CandidateState, ExitReason, OrderStatus
 from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
-from ..models import Candidate, MarketSnapshot, Order, Position, Signal, Trade
+from ..models import Candidate, MarketSnapshot, MomentumEvent, MomentumScore, Order, Position, Signal, Trade
 from ..position.position_manager import PositionManager
 from ..risk.risk_engine import RiskEngine
 from ..scanner.broad_scanner import BroadScanner
@@ -70,6 +71,9 @@ class TradingLoop:
         config: Optional[TradingLoopConfig] = None,
         on_trade_closed: Optional[Callable[[Trade], None]] = None,
         on_order_update: Optional[Callable[[Order], None]] = None,
+        on_state_transition: Optional[Callable[[str, CandidateState, CandidateState, datetime], None]] = None,
+        on_score_computed: Optional[Callable[[str, MomentumScore], None]] = None,
+        momentum_event_tracker: Optional[MomentumEventTracker] = None,
     ):
         self.broker = broker
         self.universe_provider = universe_provider
@@ -88,6 +92,20 @@ class TradingLoop:
         # the DB layer itself. May be called multiple times for the same
         # client_order_id as its status changes.
         self.on_order_update = on_order_update
+        # Called once per state-machine transition (symbol, from_state,
+        # to_state, timestamp), diffed off Candidate.state_history at the end
+        # of every _process_candidate() call -- see _flush_state_transitions.
+        # This covers transitions made anywhere (watcher, trigger_engine, or
+        # this class itself) without those modules needing to know about it.
+        self.on_state_transition = on_state_transition
+        # Called with the freshly computed MomentumScore every time
+        # CandidateWatcher.update() produces one.
+        self.on_score_computed = on_score_computed
+        # Optional collaborator (not a callback) since momentum-event
+        # tracking needs ongoing state across many ticks (filling forward-
+        # looking outcome windows over up to 15 minutes) -- see
+        # collection/event_recorder.py.
+        self.momentum_event_tracker = momentum_event_tracker
 
         self.candidates: dict[str, Candidate] = {}
         self._entry_signals: dict[str, Signal] = {}       # symbol -> signal that triggered a pending entry
@@ -95,6 +113,7 @@ class TradingLoop:
         self._pending_exit_orders: dict[str, tuple[Order, Signal]] = {}  # symbol -> (order, exit signal)
         self._positions: dict[str, Position] = {}          # symbol -> our own tracked open position
         self._last_universe_scan: Optional[datetime] = None
+        self._persisted_transition_counts: dict[str, int] = {}  # symbol -> len(state_history) already flushed
 
     # -- universe / discovery ------------------------------------------------
 
@@ -118,6 +137,15 @@ class TradingLoop:
     # -- per-candidate processing ---------------------------------------------
 
     def _process_candidate(self, candidate: Candidate, now: datetime) -> None:
+        """Thin wrapper that guarantees _flush_state_transitions runs exactly
+        once per tick regardless of which branch below returns early --
+        _process_candidate_inner uses plain `return` freely."""
+        try:
+            self._process_candidate_inner(candidate, now)
+        finally:
+            self._flush_state_transitions(candidate)
+
+    def _process_candidate_inner(self, candidate: Candidate, now: datetime) -> None:
         if candidate.state == CandidateState.REJECTED:
             return
 
@@ -132,6 +160,12 @@ class TradingLoop:
             logger.warning("get_snapshot failed for %s this cycle; skipping.", candidate.symbol, exc_info=True)
             return
 
+        if self.momentum_event_tracker is not None:
+            try:
+                self.momentum_event_tracker.on_snapshot(candidate.symbol, snapshot)
+            except Exception:
+                logger.exception("momentum_event_tracker.on_snapshot failed for %s.", candidate.symbol)
+
         if candidate.state == CandidateState.TRIGGERED:
             self._poll_pending_entry(candidate, now)
             return
@@ -142,6 +176,7 @@ class TradingLoop:
 
         # DISCOVERED / WATCHING / HEATING_UP / ARMED
         self.watcher.update(candidate, snapshot)
+        self._notify_score(candidate)
         signal = self.trigger_engine.on_snapshot(candidate, snapshot)
         # Roll this bar's high into resistance only AFTER the trigger engine
         # has checked it against the pre-bar level (see candidate_watcher.py).
@@ -149,7 +184,51 @@ class TradingLoop:
 
         if signal is None:
             return
-        self._submit_entry(candidate, signal, snapshot, now)
+        momentum_event = self._register_momentum_event(candidate, signal, now)
+        self._submit_entry(candidate, signal, snapshot, now, momentum_event=momentum_event)
+
+    def _notify_score(self, candidate: Candidate) -> None:
+        if self.on_score_computed is not None and candidate.latest_score is not None:
+            try:
+                self.on_score_computed(candidate.symbol, candidate.latest_score)
+            except Exception:
+                logger.exception("on_score_computed callback raised for %s.", candidate.symbol)
+
+    def _flush_state_transitions(self, candidate: Candidate) -> None:
+        if self.on_state_transition is None:
+            return
+        already_persisted = self._persisted_transition_counts.get(candidate.symbol, 0)
+        history = candidate.state_history
+        total = len(history)
+        if total <= already_persisted:
+            return
+        for i in range(already_persisted, total):
+            from_state, timestamp = history[i]
+            to_state = history[i + 1][0] if i + 1 < total else candidate.state
+            try:
+                self.on_state_transition(candidate.symbol, from_state, to_state, timestamp)
+            except Exception:
+                logger.exception("on_state_transition callback raised for %s.", candidate.symbol)
+        self._persisted_transition_counts[candidate.symbol] = total
+
+    def _register_momentum_event(self, candidate: Candidate, signal: Signal, now: datetime) -> Optional[MomentumEvent]:
+        if self.momentum_event_tracker is None:
+            return None
+        event = MomentumEvent(
+            symbol=candidate.symbol,
+            detected_at=now,
+            trigger_reason=f"{signal.strategy_name}:{signal.action.value}",
+            was_traded=False,  # flipped to True in _submit_entry if the order actually gets submitted
+            score_at_event=candidate.latest_score.score if candidate.latest_score else None,
+            metrics_at_event=candidate.latest_metrics,
+            price_at_event=signal.reference_price,
+        )
+        try:
+            self.momentum_event_tracker.register(event)
+        except Exception:
+            logger.exception("momentum_event_tracker.register failed for %s.", candidate.symbol)
+            return None
+        return event
 
     def _notify_order_update(self, order: Order) -> None:
         if self.on_order_update is not None:
@@ -158,12 +237,20 @@ class TradingLoop:
             except Exception:
                 logger.exception("on_order_update callback raised for order %s.", order.client_order_id)
 
-    def _submit_entry(self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot, now: datetime) -> None:
+    def _submit_entry(
+        self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot, now: datetime,
+        momentum_event: Optional[MomentumEvent] = None,
+    ) -> None:
         try:
             order = self.order_manager.submit_signal(signal, snapshot=snapshot)
         except OrderRejected as exc:
             transition(candidate, CandidateState.ARMED, now=now, reason=f"risk engine rejected entry: {exc.decision.reason}")
             return
+        if momentum_event is not None:
+            # Mutating in place is enough -- the tracker holds this same
+            # object and will persist the change on its next on_snapshot()
+            # call for this symbol (see _register_momentum_event).
+            momentum_event.was_traded = True
         self._notify_order_update(order)
 
         if order.status == OrderStatus.FILLED:

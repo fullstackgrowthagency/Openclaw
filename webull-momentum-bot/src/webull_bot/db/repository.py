@@ -2,15 +2,23 @@
 Thin persistence layer between in-memory domain objects (models.py) and the
 SQLAlchemy schema (db/models.py). Kept separate from TradingLoop so the
 orchestrator never imports the DB layer directly -- it only calls the
-on_trade_closed/on_order_update callbacks it already exposes, and callers
-(main.py, scripts/run_dashboard.py) decide whether/how to persist.
+on_trade_closed/on_order_update/on_state_transition/on_score_computed hooks
+it already exposes (plus an optional MomentumEventTracker collaborator for
+momentum events), and callers (main.py, scripts/run_dashboard.py) decide
+whether/how to persist.
 """
 from __future__ import annotations
 
+from dataclasses import asdict
+from datetime import datetime
+from typing import Callable, Optional
+
 from sqlalchemy.orm import Session
 
-from ..models import Order, Trade
-from .models import OrderRecord, TradeRecord
+from ..collection.event_recorder import EventRecorder
+from ..enums import CandidateState
+from ..models import MomentumEvent, MomentumScore, Order, Trade
+from .models import MomentumEventRecord, MomentumScoreRecord, OrderRecord, ScannerEvent, TradeRecord
 
 
 def record_trade(session: Session, trade: Trade, *, trading_mode: str) -> TradeRecord:
@@ -88,3 +96,125 @@ def get_performance_summary(session: Session) -> dict:
         "total_pnl": sum(t.pnl for t in trades),
         "avg_pnl_pct": sum(t.pnl_pct for t in trades) / total_trades,
     }
+
+
+def record_scanner_event(
+    session: Session,
+    *,
+    symbol: str,
+    from_state: CandidateState,
+    to_state: CandidateState,
+    timestamp: datetime,
+    reason: str,
+) -> ScannerEvent:
+    record = ScannerEvent(
+        symbol=symbol,
+        timestamp=timestamp,
+        event_type="state_transition",
+        from_state=from_state.value,
+        to_state=to_state.value,
+        reason=reason,
+    )
+    session.add(record)
+    session.flush()
+    return record
+
+
+def record_momentum_score(session: Session, score: MomentumScore) -> MomentumScoreRecord:
+    record = MomentumScoreRecord(
+        symbol=score.symbol,
+        timestamp=score.timestamp,
+        score=score.score,
+        weights_version=score.weights_version,
+        components=asdict(score.components),
+    )
+    session.add(record)
+    session.flush()
+    return record
+
+
+def _metrics_to_json(metrics) -> Optional[dict]:
+    if metrics is None:
+        return None
+    data = asdict(metrics)
+    data["timestamp"] = metrics.timestamp.isoformat()  # datetime isn't JSON-serializable as-is
+    return data
+
+
+def record_momentum_event(
+    session: Session, event: MomentumEvent, *, existing_id: Optional[int] = None
+) -> MomentumEventRecord:
+    """Upsert by `existing_id` (the DB row id) rather than a natural key --
+    unlike orders (client_order_id) or trades, a momentum event has no
+    natural unique identifier of its own. Callers that need to update the
+    same row repeatedly (see DBBackedEventRecorder below) must remember the
+    id returned by the first call and pass it back in on subsequent calls."""
+    record = session.get(MomentumEventRecord, existing_id) if existing_id is not None else None
+    if record is None:
+        record = MomentumEventRecord(
+            symbol=event.symbol,
+            detected_at=event.detected_at,
+            trigger_reason=event.trigger_reason,
+            price_at_event=event.price_at_event,
+        )
+        session.add(record)
+
+    record.was_traded = event.was_traded
+    record.score_at_event = event.score_at_event
+    record.metrics_at_event = _metrics_to_json(event.metrics_at_event)
+    record.outcome_30s = event.outcome_30s
+    record.outcome_1m = event.outcome_1m
+    record.outcome_3m = event.outcome_3m
+    record.outcome_5m = event.outcome_5m
+    record.outcome_10m = event.outcome_10m
+    record.outcome_15m = event.outcome_15m
+    record.max_favorable_excursion_pct = event.max_favorable_excursion_pct
+    record.max_adverse_excursion_pct = event.max_adverse_excursion_pct
+    record.hod_broken = event.hod_broken
+    record.vwap_failed = event.vwap_failed
+    record.outcome_label = event.outcome_label.value
+    session.flush()
+    return record
+
+
+class DBBackedEventRecorder(EventRecorder):
+    """Write-through EventRecorder: keeps the in-memory dict the base class
+    already provides (MomentumEventTracker's polling logic reads events back
+    via `get()`, so that must keep working identically) while also
+    persisting every save()/update() to the database.
+
+    Uses a fresh, short-lived Session per call rather than one long-lived
+    session, since MomentumEventTracker.on_snapshot() (which drives update())
+    is typically called from TradingLoop's poll loop over a span of up to 15
+    minutes per event -- holding one session open that whole time would be
+    both wasteful and fragile across reconnects.
+    """
+
+    def __init__(self, session_factory: Callable[[], Session]):
+        super().__init__()
+        self.session_factory = session_factory
+        self._db_ids: dict[int, int] = {}  # in-memory event_id -> DB row id
+
+    def save(self, event: MomentumEvent) -> int:
+        event_id = super().save(event)
+        with self.session_factory() as session:
+            try:
+                record = record_momentum_event(session, event)
+                session.commit()
+                self._db_ids[event_id] = record.id
+            except Exception:
+                session.rollback()
+                raise
+        return event_id
+
+    def update(self, event_id: int) -> None:
+        super().update(event_id)
+        event = self.get(event_id)
+        with self.session_factory() as session:
+            try:
+                record = record_momentum_event(session, event, existing_id=self._db_ids.get(event_id))
+                session.commit()
+                self._db_ids[event_id] = record.id
+            except Exception:
+                session.rollback()
+                raise
