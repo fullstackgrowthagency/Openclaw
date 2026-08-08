@@ -123,6 +123,42 @@ the raw material for improving the MIS formula and strategies offline; it
 persists via `EventRecorder`, which is a thin seam meant to be backed by
 `db.models.MomentumEventRecord` in a real deployment.
 
+## Dashboard
+
+`dashboard/app.py`'s `create_app(trading_loop, session_factory, trading_mode)`
+takes both as explicit arguments rather than importing globals, specifically
+so tests (`tests/test_dashboard.py`) can pass a real `TradingLoop` wired to
+`PaperBrokerClient` plus an in-memory SQLite session factory, with no live
+bot or real database required.
+
+Two different data paths, deliberately:
+- **Live panels** (candidates, open positions, risk events, kill-switch
+  state) read directly off `trading_loop.get_candidates()` /
+  `get_open_positions()` / `risk_engine.events` -- no DB round-trip, so they
+  reflect the current process's actual in-memory state, not a snapshot that
+  might be stale or never got persisted. `get_candidates()`/`get_open_positions()`
+  return shallow copies specifically so a dashboard request from another
+  thread can't race a concurrent `run_once()` mutating the underlying dicts.
+- **Historical panels** (trade history, performance/win-rate) read from the
+  database via `db/repository.py`.
+
+`scripts/run_dashboard.py` is what makes the historical panels have
+anything to show: it wires `TradingLoop`'s `on_trade_closed`/`on_order_update`
+callbacks (added for exactly this purpose) to `record_trade()`/`record_order()`,
+runs the loop in a background thread, and serves the FastAPI app in the
+foreground. Before this, nothing in the live loop persisted anywhere --
+`on_trade_closed` just printed. `record_order()` upserts by `client_order_id`
+rather than inserting a new row per call, since one order is reported
+multiple times as its status changes (`SUBMITTED` -> `FILLED`, see the
+Webull integration section above) and `OrderRecord.client_order_id` has a
+uniqueness constraint.
+
+The frontend (`dashboard/static/`) is plain HTML/CSS/JS with no build step
+and no external dependencies (no CDN scripts) -- it polls the REST
+endpoints every 5s. Keep it that way unless there's a real reason to add a
+frontend toolchain; a monitoring dashboard for a single operator doesn't
+need one.
+
 ## Free-float data (FMP)
 
 `data/float_providers/fmp.py` is a real, network-verified integration

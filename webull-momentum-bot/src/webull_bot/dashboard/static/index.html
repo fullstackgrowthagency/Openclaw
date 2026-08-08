@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webull Momentum Bot</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <h1>Webull Momentum Bot</h1>
+  <div class="status-bar" id="status-bar">
+    <span class="muted">Loading...</span>
+  </div>
+</header>
+
+<main>
+
+  <section class="panel">
+    <h2>Candidates</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Symbol</th><th>State</th><th>Score</th><th>Resistance</th><th>Updated</th></tr>
+        </thead>
+        <tbody id="candidates-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Open Positions</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Last</th><th>Unrl. P&amp;L</th><th>Stop</th><th>Target</th></tr>
+        </thead>
+        <tbody id="positions-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Recent Risk Events</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Type</th><th>Symbol</th><th>Reason</th></tr>
+        </thead>
+        <tbody id="risk-events-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Performance</h2>
+    <div class="status-bar" id="performance-bar"></div>
+  </section>
+
+  <section class="panel full-width">
+    <h2>Trade History</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Closed</th><th>Symbol</th><th>Strategy</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Reason</th><th>P&amp;L</th><th>P&amp;L %</th></tr>
+        </thead>
+        <tbody id="trades-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<footer>Auto-refreshes every 5s. Paper/sandbox mode uses fake money -- see the project README's safety model.</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

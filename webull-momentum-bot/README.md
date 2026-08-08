@@ -51,6 +51,18 @@ What's implemented and tested:
   `screener.get_most_active(rank_type="RELATIVE_VOLUME_10D")` endpoint
   (`data/universe.py`), which lines up directly with the project's
   "high relative volume" criterion.
+- **Dashboard** (`dashboard/app.py` + `scripts/run_dashboard.py`): a FastAPI
+  backend + self-contained HTML/JS frontend, run with
+  `python scripts/run_dashboard.py`. Live panels (candidates, open
+  positions with unrealized P&L, risk events, kill-switch state) read
+  directly off the running `TradingLoop`/`RiskEngine` in-process -- no DB
+  round-trip, so they reflect the current process exactly. Historical
+  panels (trade history, win rate/P&L performance) read from the database.
+  This is also what wired up actual DB persistence for the first time:
+  `db/repository.py` + `TradingLoop`'s `on_trade_closed`/`on_order_update`
+  hooks now write trades and order status changes to Postgres/Supabase (or
+  SQLite for local dev) as they happen -- previously nothing in the live
+  loop persisted anywhere.
 - Data-collection scaffolding for recording momentum events (traded and
   not-traded) with forward-looking outcome windows
 - SQLAlchemy schema for Postgres/Supabase covering the tables in the
@@ -74,6 +86,13 @@ What's still a skeleton or unverified (explicitly, not silently):
 - Real resistance/support level detection (currently just running HOD)
 - Level 2 / order-flow features
 - Alembic migrations (use `scripts/init_db.py` for now)
+- DB persistence only covers trades and orders so far -- candidate state
+  transitions, momentum scores/events, and market observations are not yet
+  written to their respective tables (`scanner_events`, `momentum_scores`,
+  `momentum_events`, `market_observations` all exist in the schema but stay
+  empty). The dashboard's live panels don't need them (they read the
+  in-process state directly), but longer-term data collection/backtesting
+  against real history will.
 
 ## Safety model
 
@@ -119,10 +138,17 @@ string in `DATABASE_URL`:
 python scripts/init_db.py
 ```
 
-Run the bot (defaults to whatever `TRADING_MODE` is set to in `.env`):
+Run the bot without a UI (defaults to whatever `TRADING_MODE` is set to in `.env`):
 
 ```bash
 python -m webull_bot.main
+```
+
+Or run it with the dashboard (same run loop, plus a web UI + DB persistence
+of trades/orders as they happen):
+
+```bash
+python scripts/run_dashboard.py   # http://127.0.0.1:8000
 ```
 
 In `sandbox` mode this polls the real Webull sandbox account and screener
@@ -143,7 +169,9 @@ optimization -> L2/order-flow -> production-readiness testing.
 This repo currently covers architecture, database, calculations, scanner,
 MIS, state machine, backtesting, risk engine, position management, real
 free-float data (FMP), a real Webull sandbox connection (account, market
-data, order submission), and a production poll-based run-loop. Next up:
-confirm the sandbox streaming host so the loop can react to pushed ticks
-instead of polling, and re-verify the still-best-effort response shapes
-during market hours with a real filled order.
+data, order submission), a production poll-based run-loop, DB persistence
+of trades/orders, and a dashboard. Next up: confirm the sandbox streaming
+host so the loop can react to pushed ticks instead of polling, re-verify
+the still-best-effort response shapes during market hours with a real
+filled order, and expand persistence to scanner events/momentum
+scores/momentum events for large-scale data collection.

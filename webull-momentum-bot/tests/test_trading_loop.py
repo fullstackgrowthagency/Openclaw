@@ -239,17 +239,25 @@ def test_entry_stays_triggered_while_order_pending_then_enters_on_fill():
         symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
         strategy_name="test", strategy_version="v1", reference_price=5.20, suggested_stop=5.00,
     )
+    order_updates = []
+    loop.on_order_update = order_updates.append
+
     loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
     assert candidate.symbol in loop._pending_entry_orders
+    assert len(order_updates) == 1
+    assert order_updates[0].status.value == "submitted"
 
     # First poll: still not filled (fills_after_polls=2, this is poll #1).
     loop._poll_pending_entry(candidate, snapshot.timestamp)
     assert candidate.symbol in loop._pending_entry_orders
     assert candidate.state.value == "triggered"
+    assert len(order_updates) == 2
 
     # Second poll: fills.
     loop._poll_pending_entry(candidate, snapshot.timestamp)
     assert candidate.symbol not in loop._pending_entry_orders
+    assert len(order_updates) == 3
+    assert order_updates[-1].status.value == "filled"
     assert candidate.state.value == "managing"
     assert "TEST" in loop._positions
     assert loop._positions["TEST"].avg_entry_price == 5.20  # from broker.get_positions()

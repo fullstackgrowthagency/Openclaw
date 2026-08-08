@@ -69,6 +69,7 @@ class TradingLoop:
         *,
         config: Optional[TradingLoopConfig] = None,
         on_trade_closed: Optional[Callable[[Trade], None]] = None,
+        on_order_update: Optional[Callable[[Order], None]] = None,
     ):
         self.broker = broker
         self.universe_provider = universe_provider
@@ -80,6 +81,13 @@ class TradingLoop:
         self.risk_engine = risk_engine
         self.config = config or TradingLoopConfig()
         self.on_trade_closed = on_trade_closed
+        # Called with every Order object this loop sees at each of its four
+        # order-status touchpoints (submit entry, poll pending entry, submit
+        # exit, poll pending exit) -- lets a caller persist order state
+        # changes (e.g. SUBMITTED -> FILLED) without TradingLoop importing
+        # the DB layer itself. May be called multiple times for the same
+        # client_order_id as its status changes.
+        self.on_order_update = on_order_update
 
         self.candidates: dict[str, Candidate] = {}
         self._entry_signals: dict[str, Signal] = {}       # symbol -> signal that triggered a pending entry
@@ -143,12 +151,20 @@ class TradingLoop:
             return
         self._submit_entry(candidate, signal, snapshot, now)
 
+    def _notify_order_update(self, order: Order) -> None:
+        if self.on_order_update is not None:
+            try:
+                self.on_order_update(order)
+            except Exception:
+                logger.exception("on_order_update callback raised for order %s.", order.client_order_id)
+
     def _submit_entry(self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot, now: datetime) -> None:
         try:
             order = self.order_manager.submit_signal(signal, snapshot=snapshot)
         except OrderRejected as exc:
             transition(candidate, CandidateState.ARMED, now=now, reason=f"risk engine rejected entry: {exc.decision.reason}")
             return
+        self._notify_order_update(order)
 
         if order.status == OrderStatus.FILLED:
             self._confirm_entry_filled(candidate, signal, order, now)
@@ -171,6 +187,7 @@ class TradingLoop:
         except Exception:
             logger.warning("get_order_status failed for %s this cycle.", candidate.symbol, exc_info=True)
             return
+        self._notify_order_update(status_order)
 
         if status_order.status == OrderStatus.FILLED:
             signal = self._entry_signals.pop(candidate.symbol)
@@ -234,6 +251,7 @@ class TradingLoop:
             # but don't crash the loop if something unexpected happens.
             logger.exception("Unexpected OrderRejected on an exit signal for %s.", candidate.symbol)
             return
+        self._notify_order_update(order)
 
         if order.status == OrderStatus.FILLED:
             self._finalize_exit(candidate, position, order, exit_signal, now)
@@ -247,6 +265,7 @@ class TradingLoop:
         except Exception:
             logger.warning("get_order_status failed for pending exit on %s.", candidate.symbol, exc_info=True)
             return
+        self._notify_order_update(status_order)
 
         if status_order.status == OrderStatus.FILLED:
             self._pending_exit_orders.pop(candidate.symbol)
@@ -302,6 +321,17 @@ class TradingLoop:
 
         transition(candidate, CandidateState.EXITED, now=now, reason=exit_reason.value)
         transition(candidate, CandidateState.COOLDOWN, now=now, reason="post-trade cooldown")
+
+    # -- read-only accessors for external consumers (e.g. the dashboard) -----
+
+    def get_candidates(self) -> dict[str, Candidate]:
+        """Shallow copy of the tracked candidates dict -- safe to iterate
+        without racing a concurrent run_once() mutating it (e.g. from a
+        dashboard reading this loop's state from another thread)."""
+        return dict(self.candidates)
+
+    def get_open_positions(self) -> dict[str, Position]:
+        return dict(self._positions)
 
     # -- main loop -------------------------------------------------------------
 
