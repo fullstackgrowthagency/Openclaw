@@ -20,8 +20,9 @@ RiskEngine.evaluate()      (deterministic: risk-per-trade sizing, exposure/
 OrderManager                (the ONLY thing allowed to call the broker)
       |
       v
-BrokerClient                (PaperBrokerClient today; WebullBrokerClient
-                              once Phase 2 wires up the real SDK)
+BrokerClient                (PaperBrokerClient for fully local sim, or
+                              WebullBrokerClient against the real sandbox --
+                              picked by TradingMode via brokers/__init__.py)
 ```
 
 Exits follow a parallel, shorter path: `PositionManager.check_exit` emits an
@@ -97,6 +98,39 @@ remains as an alternate skeleton, unused unless FMP is unconfigured.
 `FMPFloatProvider` takes an injectable `http_get` callable specifically so
 `tests/test_fmp_float_provider.py` can run hermetically against canned
 responses shaped like the real API, without a network call or API key.
+
+## Webull integration
+
+`brokers/webull/client.py` wraps the official `webull-openapi-python-sdk`.
+Read its module docstring before touching it -- it lists exactly which
+field mappings were confirmed against live sandbox responses (auth,
+account balance, market snapshot/bars, order request schema) versus which
+are best-effort guesses pending re-verification (populated position rows,
+a successful order response body, fill executions), and why: the sandbox
+account had zero positions and every live order test happened on a weekend
+market close, so those specific shapes couldn't be observed.
+
+Two non-obvious things worth knowing if you're debugging this client:
+
+1. **App key/secret are environment-locked.** A key issued for production
+   authenticates fine against `api.webull.com` but gets a generic
+   `401 UNAUTHORIZED: ... ensure you are connecting to the correct
+   environment` from the sandbox host, and vice versa -- confirmed by
+   testing the exact same credentials against both hosts. If sandbox auth
+   ever breaks, test against production first (read-only calls like
+   `get_account_list` are enough) before assuming the integration code
+   regressed.
+2. **`instrument_type` for orders is the string `"EQUITY"`**, not
+   `webull.trade.common.instrument_type.InstrumentType.STOCK.name` (which
+   is `"STOCK"` and gets rejected with `INVALID_PARAMETER: Instrument type
+   invalid.`) -- that Python enum apparently isn't what the order-placement
+   endpoint expects, despite looking like the obvious match. Confirmed by
+   testing both live.
+
+Streaming (`subscribe_quotes`) intentionally raises `NotImplementedError`:
+`DataStreamingClient` needs an `mqtt_host`, and only the production value
+(`data-api.webull.com`) is documented anywhere found so far. Don't guess a
+sandbox equivalent -- confirm it live (or from support/docs) first.
 
 ## Database
 

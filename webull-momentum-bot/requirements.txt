@@ -3,4 +3,5 @@ SQLAlchemy>=2.0
 psycopg[binary]>=3.1
 python-dotenv>=1.0
 requests>=2.31
+webull-openapi-python-sdk>=2.0.17
 pytest>=8.0

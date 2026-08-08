@@ -2,14 +2,15 @@
 Reference wiring for the live/sandbox pipeline. This is intentionally
 minimal -- it shows how the pieces connect (broker -> scanner -> watcher ->
 trigger engine -> risk engine -> order manager -> position manager) without
-prescribing a production run-loop, since streaming subscription details
-depend on the real Webull SDK integration (Phase 2, not yet implemented --
-see brokers/webull/client.py).
+prescribing a production run-loop.
 
-Run with `python -m webull_bot.main` once WebullBrokerClient is wired up.
-Until then this will raise NotImplementedError by design when it tries to
-connect/stream, since PAPER mode is the only backend that works out of the
-box (see brokers/paper/client.py) and has no live market data of its own.
+Run with `python -m webull_bot.main`. Account/market-data calls work in both
+PAPER mode (fully local, see brokers/paper/client.py) and SANDBOX mode
+(real Webull sandbox account, verified live -- see brokers/webull/client.py).
+Streaming (broker.subscribe_quotes) is NOT implemented for Webull yet: its
+sandbox MQTT host was never confirmed, so a real run-loop that reacts to
+live ticks still needs that piece before this can run unattended. Poll
+get_snapshot()/get_bars() in the meantime.
 """
 from __future__ import annotations
 
@@ -44,7 +45,8 @@ def main() -> None:
     print(
         "Wiring is constructed. Streaming run-loop (broker.subscribe_quotes -> "
         "watcher.update -> trigger_engine.on_snapshot -> order_manager.submit_signal) "
-        "is Phase 2/3 work, pending the real Webull streaming integration."
+        "still needs a confirmed Webull sandbox MQTT host before it can react "
+        "to live ticks unattended; poll-based wiring can be built now."
     )
     # Intentionally not started here -- see module docstring.
     _ = (broad_scanner, watcher, trigger_engine, order_manager)

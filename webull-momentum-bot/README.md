@@ -4,15 +4,23 @@ Automated scanner + paper/live trading system for low-free-float momentum
 stocks, built on the Webull OpenAPI. See `docs/ARCHITECTURE.md` for the full
 data-flow and module map.
 
-## Status: Phase 1 (architecture) + core Phase 2 interfaces
+## Status: Phase 1 (architecture) + Phase 2 (real Webull sandbox + FMP integrations)
 
 What's implemented and tested:
 
 - Config/safety layer with a hard-disabled-by-default live trading gate
 - Candidate lifecycle state machine (DISCOVERED -> ... -> COOLDOWN)
 - Broker abstraction with a fully working local `PaperBrokerClient` and a
-  `WebullBrokerClient` skeleton (methods raise `NotImplementedError` until
-  wired to the real SDK against current docs)
+  **real, sandbox-verified** `WebullBrokerClient` built on the official
+  `webull-openapi-python-sdk` -- account balance/positions, order
+  place/cancel/replace/detail, and market data (snapshot + historical bars)
+  all confirmed live against `api.sandbox.webull.com`. See the module
+  docstring in `brokers/webull/client.py` for exactly what was verified
+  live vs. best-effort (a few response shapes -- populated positions, a
+  successful order response, fill executions -- couldn't be confirmed
+  because the sandbox account had no positions and testing happened on a
+  weekend; re-verify those during market hours). Streaming
+  (`subscribe_quotes`) is not implemented: no sandbox MQTT host was found.
 - Free-float provider abstraction + local disk cache, backed by a **real,
   verified** Financial Modeling Prep (FMP) integration
   (`data/float_providers/fmp.py`, selected automatically by
@@ -38,15 +46,22 @@ What's implemented and tested:
 - SQLAlchemy schema for Postgres/Supabase covering the tables in the
   project outline
 
-What's still a skeleton (explicitly, not silently):
+What's still a skeleton or unverified (explicitly, not silently):
 
-- `brokers/webull/client.py` -- real Webull OpenAPI/SDK calls. **Blocked on
-  Webull OpenAPI developer credentials** (sandbox app key/secret); wire this
-  up as soon as those exist, against Webull's current official docs.
+- `brokers/webull/client.py` streaming -- MQTT-based `DataStreamingClient`
+  needs a confirmed sandbox `mqtt_host`; only the production host
+  (`data-api.webull.com`) is documented. Poll `get_snapshot()`/`get_bars()`
+  until this is confirmed.
+- A few Webull response shapes are best-effort, not verified live: populated
+  `get_account_position()` rows (sandbox account had zero positions), a
+  successful `place_order()` response body (every live attempt was
+  correctly rejected for being outside market hours -- weekend testing),
+  and `get_order_executions()` fill rows. Re-verify during market hours
+  with an actual position open.
 - `data/float_providers/massive.py` -- unused now that FMP is wired up; kept
   only as an alternate skeleton
-- Real-time streaming wiring / production run-loop (`main.py` only builds
-  the object graph)
+- Production run-loop (`main.py` only builds the object graph; no
+  poll/react loop wired up yet)
 - RVOL's historical intraday-volume-by-time-of-day baseline
 - Real resistance/support level detection (currently just running HOD)
 - Level 2 / order-flow features
@@ -64,10 +79,16 @@ This is checked in three independent places: `Settings.require_non_live_or_autho
 (called by the broker factory and `main.py`), `WebullBrokerClient.__init__`,
 and again by `OrderManager` before every order. See `src/webull_bot/config.py`.
 
-Until Webull sandbox credentials are wired up, `TRADING_MODE=paper` is the
-only mode that runs end-to-end for execution (fully local simulated broker,
-no external calls). Free-float *data* is real (FMP) regardless of trading
-mode -- only order execution is simulated in paper mode.
+`TRADING_MODE=sandbox` now runs end-to-end against a real Webull sandbox
+account (fake money) -- verified live for account balance/positions,
+snapshots, historical bars, and order submission (rejected only for being
+outside market hours during testing, which confirmed the request schema is
+correct). **Important:** a Webull app key/secret is tied to one specific
+environment -- a production-issued key will authenticate fine but gets
+silently rejected by the sandbox host with a generic "invalid credentials"
+error, and vice versa. If sandbox auth ever starts failing, check that
+first before assuming the code broke. `TRADING_MODE=paper` remains fully
+local/synthetic with zero external calls.
 
 ## Setup
 
@@ -99,8 +120,8 @@ management -> dashboard -> data collection at scale -> strategy
 optimization -> L2/order-flow -> production-readiness testing.
 
 This repo currently covers architecture, database, calculations, scanner,
-MIS, state machine, backtesting, risk engine, position management, and real
-free-float data (FMP). Next up: real Webull OpenAPI + streaming integration
-(against current official docs, not guessed) once sandbox developer
-credentials are available, then paper-mode end-to-end runs against live
-sandbox market data.
+MIS, state machine, backtesting, risk engine, position management, real
+free-float data (FMP), and a real Webull sandbox connection (account,
+market data, order submission). Next up: confirm the sandbox streaming
+host, re-verify the still-best-effort response shapes during market hours
+with a real filled order, then build the production run-loop.
