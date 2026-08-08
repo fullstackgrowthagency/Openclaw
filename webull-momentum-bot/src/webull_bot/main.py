@@ -27,7 +27,14 @@ from webull_bot.brokers.webull.client import WebullBrokerClient
 from webull_bot.collection.event_recorder import MomentumEventTracker
 from webull_bot.config import Settings, get_settings
 from webull_bot.data.float_providers import get_float_provider
-from webull_bot.data.universe import StaticUniverseProvider, WebullUniverseProvider
+from webull_bot.data.universe import (
+    MultiSourceUniverseProvider,
+    StaticUniverseProvider,
+    WebullGainersLosersConfig,
+    WebullGainersLosersUniverseProvider,
+    WebullUniverseConfig,
+    WebullUniverseProvider,
+)
 from webull_bot.enums import CandidateState
 from webull_bot.execution.order_manager import OrderManager
 from webull_bot.models import MomentumScore, Order, Trade
@@ -68,7 +75,18 @@ def build_trading_loop(
     broad_scanner = BroadScanner(broker, float_provider)
 
     if isinstance(broker, WebullBrokerClient):
-        universe_provider = WebullUniverseProvider.from_broker(broker)
+        # Three independent discovery sources, unioned (not a priority
+        # fallback chain) -- each catches a different kind of momentum:
+        # relative volume, float turnover, and raw price change. A symbol
+        # only needs to show up on ONE list; BroadScanner vets every symbol
+        # the same way regardless of which list(s) surfaced it.
+        universe_provider = MultiSourceUniverseProvider([
+            WebullUniverseProvider.from_broker(broker, WebullUniverseConfig(rank_type="RELATIVE_VOLUME_10D")),
+            WebullUniverseProvider.from_broker(broker, WebullUniverseConfig(rank_type="TURNOVER_RATE")),
+            WebullGainersLosersUniverseProvider.from_broker(
+                broker, WebullGainersLosersConfig(rank_type="DAY_1", sort_by="CHANGE_RATIO", direction="DESC")
+            ),
+        ])
     else:
         universe_provider = StaticUniverseProvider(_PAPER_MODE_PLACEHOLDER_WATCHLIST)
 

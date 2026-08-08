@@ -66,13 +66,40 @@ in place, and the broker returns a fresh object on every call -- refetching
 every tick would silently discard the running trailing-stop/MFE/MAE state
 computed on prior ticks.
 
-`data/universe.py`'s `WebullUniverseProvider` feeds the scanner using the
-verified `screener.get_most_active(..., rank_type="RELATIVE_VOLUME_10D")`
-endpoint, which lines up directly with the project's "high relative volume"
-discovery criterion. `PaperBrokerClient` has no live screener of its own, so
-paper mode falls back to `StaticUniverseProvider` with a placeholder
-watchlist -- paper mode is for exercising the pipeline against
-manually-fed snapshots, not autonomous discovery.
+`data/universe.py` feeds the scanner from three independent, live-verified
+Webull screener sources, combined by `MultiSourceUniverseProvider`:
+
+- `WebullUniverseProvider` with `rank_type="RELATIVE_VOLUME_10D"` -- the
+  project's "high relative volume" criterion directly.
+- The same `WebullUniverseProvider` class again with `rank_type="TURNOVER_RATE"`
+  (% of a stock's float traded today) -- confirmed live to surface a
+  meaningfully different, generally more extreme set of names than relative
+  volume, and conceptually the same thing as the `float_turnover` metric the
+  MIS already computes, just used as a discovery filter instead of a score
+  input.
+- `WebullGainersLosersUniverseProvider` wrapping `screener.get_gainers_losers(rank_type="DAY_1", sort_by="CHANGE_RATIO", direction="DESC")`
+  -- today's top % price movers. Note `get_gainers_losers`'s `rank_type` is
+  a **time period** (`DAY_1`, `MIN_5`, `WEEK_52`, etc.), unrelated to
+  `get_most_active`'s `rank_type` despite the shared parameter name --
+  confirmed against the live SDK, not assumed from the naming.
+
+`MultiSourceUniverseProvider` is a plain union (every source queried every
+cycle, not a priority fallback chain) with per-source failure isolation --
+one source raising is logged and skipped rather than aborting the scan.
+Critically, it **interleaves results round-robin** across sources rather
+than concatenating them: `TradingLoop._rescan_universe` truncates the
+combined list to `max_universe_size` before scanning, and concatenation
+would let whichever source is listed first fill that entire cap before the
+others contributed a single symbol -- exactly the "one list dominates"
+outcome three independent sources are meant to avoid. A symbol only needs
+to appear on one list to reach `BroadScanner`, which vets every symbol
+identically (price, dollar volume, real free float via FMP) regardless of
+which list(s) surfaced it.
+
+`PaperBrokerClient` has no live screener of its own, so paper mode falls
+back to `StaticUniverseProvider` with a placeholder watchlist -- paper mode
+is for exercising the pipeline against manually-fed snapshots, not
+autonomous discovery.
 
 ## State machine
 

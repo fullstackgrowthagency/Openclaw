@@ -47,10 +47,18 @@ What's implemented and tested:
   `WebullBrokerClient.place_order` returning `SUBMITTED` rather than
   `FILLED` (confirmed live) via pending-order polling for both entries and
   exits, rather than assuming synchronous fills like the backtest engine
-  can. Universe discovery in sandbox/live mode uses the verified
-  `screener.get_most_active(rank_type="RELATIVE_VOLUME_10D")` endpoint
-  (`data/universe.py`), which lines up directly with the project's
-  "high relative volume" criterion.
+  can. Universe discovery in sandbox/live mode combines **three
+  independent, verified Webull screener sources** (`data/universe.py`),
+  unioned via `MultiSourceUniverseProvider` rather than a priority fallback
+  chain -- a symbol only needs to show up on one list, and `BroadScanner`
+  vets every symbol the same way regardless of which list(s) surfaced it:
+  `get_most_active(rank_type="RELATIVE_VOLUME_10D")` (high relative
+  volume), `get_most_active(rank_type="TURNOVER_RATE")` (% of float traded
+  today -- directly analogous to the float_turnover metric the MIS already
+  computes), and `get_gainers_losers(rank_type="DAY_1")` (today's top %
+  price movers). Results are interleaved round-robin across sources before
+  the per-cycle size cap is applied, so the cap doesn't let one source
+  crowd out the others.
 - **Dashboard** (`dashboard/app.py` + `scripts/run_dashboard.py`): a FastAPI
   backend + self-contained HTML/JS frontend, run with
   `python scripts/run_dashboard.py`. Live panels (candidates, open
