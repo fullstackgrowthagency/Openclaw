@@ -13,8 +13,11 @@ What's implemented and tested:
 - Broker abstraction with a fully working local `PaperBrokerClient` and a
   `WebullBrokerClient` skeleton (methods raise `NotImplementedError` until
   wired to the real SDK against current docs)
-- Free-float provider abstraction + local disk cache (Massive client is a
-  skeleton pending real API wiring)
+- Free-float provider abstraction + local disk cache, backed by a **real,
+  verified** Financial Modeling Prep (FMP) integration
+  (`data/float_providers/fmp.py`, selected automatically by
+  `get_float_provider()` when `FMP_API_KEY` is set). Massive remains an
+  alternate skeleton if you switch providers later.
 - Momentum metrics (float turnover/velocity, RVOL, volume/price
   acceleration, VWAP, spread, dollar volume, etc.)
 - Momentum Ignition Score with YAML-configurable weights/thresholds
@@ -37,8 +40,11 @@ What's implemented and tested:
 
 What's still a skeleton (explicitly, not silently):
 
-- `brokers/webull/client.py` -- real Webull OpenAPI/SDK calls (Phase 2)
-- `data/float_providers/massive.py` -- real Massive API call (Phase 2)
+- `brokers/webull/client.py` -- real Webull OpenAPI/SDK calls. **Blocked on
+  Webull OpenAPI developer credentials** (sandbox app key/secret); wire this
+  up as soon as those exist, against Webull's current official docs.
+- `data/float_providers/massive.py` -- unused now that FMP is wired up; kept
+  only as an alternate skeleton
 - Real-time streaming wiring / production run-loop (`main.py` only builds
   the object graph)
 - RVOL's historical intraday-volume-by-time-of-day baseline
@@ -59,8 +65,9 @@ This is checked in three independent places: `Settings.require_non_live_or_autho
 and again by `OrderManager` before every order. See `src/webull_bot/config.py`.
 
 Until Webull sandbox credentials are wired up, `TRADING_MODE=paper` is the
-only mode that runs end-to-end (fully local simulated broker, no external
-calls).
+only mode that runs end-to-end for execution (fully local simulated broker,
+no external calls). Free-float *data* is real (FMP) regardless of trading
+mode -- only order execution is simulated in paper mode.
 
 ## Setup
 
@@ -68,9 +75,13 @@ calls).
 cd webull-momentum-bot
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env   # fill in credentials when you have them
+cp .env.example .env   # fill in FMP_API_KEY now; Webull creds once you have them
 pytest -q
 ```
+
+`FMP_API_KEY` (Financial Modeling Prep) is required for real free-float
+data; without it, `get_float_provider()` raises rather than silently
+falling back to fake data. Get a key at financialmodelingprep.com.
 
 Create the database schema once you have a Postgres/Supabase connection
 string in `DATABASE_URL`:
@@ -88,7 +99,8 @@ management -> dashboard -> data collection at scale -> strategy
 optimization -> L2/order-flow -> production-readiness testing.
 
 This repo currently covers architecture, database, calculations, scanner,
-MIS, state machine, backtesting, risk engine, and position management. Next
-up: real Webull OpenAPI + streaming integration (against current official
-docs, not guessed), then real Massive integration, then paper-mode
-end-to-end runs against live sandbox data.
+MIS, state machine, backtesting, risk engine, position management, and real
+free-float data (FMP). Next up: real Webull OpenAPI + streaming integration
+(against current official docs, not guessed) once sandbox developer
+credentials are available, then paper-mode end-to-end runs against live
+sandbox market data.

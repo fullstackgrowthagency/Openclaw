@@ -13,7 +13,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from dotenv import load_dotenv
+
+# parents[2] from src/webull_bot/config.py is the webull-momentum-bot project
+# root itself (webull_bot -> src -> project root) -- NOT the outer Openclaw
+# repo, despite the name of this constant's more common usage elsewhere.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Loads webull-momentum-bot/.env if present. Does not override variables
+# already set in the real environment (e.g. by a process manager), and is a
+# no-op if no .env file exists -- safe to call unconditionally at import time.
+load_dotenv(PROJECT_ROOT / ".env")
 
 # The exact phrase an operator must set in LIVE_TRADING_CONFIRMATION to ever
 # route an order to a live account. Changing this string is itself a
@@ -77,6 +87,22 @@ class MassiveCredentials:
 
 
 @dataclass(frozen=True)
+class FMPCredentials:
+    """Financial Modeling Prep -- the currently active free-float data source
+    (see data/float_providers/fmp.py). Verified live against FMP's `stable`
+    API namespace; their older /api/v3 and /api/v4 endpoints are being
+    retired, so base_url defaults to /stable rather than the legacy paths."""
+
+    api_key: str = field(default_factory=lambda: os.environ.get("FMP_API_KEY", ""))
+    base_url: str = field(
+        default_factory=lambda: os.environ.get("FMP_BASE_URL", "https://financialmodelingprep.com/stable")
+    )
+
+    def is_configured(self) -> bool:
+        return bool(self.api_key)
+
+
+@dataclass(frozen=True)
 class DatabaseSettings:
     url: str = field(
         default_factory=lambda: os.environ.get(
@@ -104,10 +130,11 @@ class Settings:
 
     webull: WebullCredentials = field(default_factory=WebullCredentials)
     massive: MassiveCredentials = field(default_factory=MassiveCredentials)
+    fmp: FMPCredentials = field(default_factory=FMPCredentials)
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
 
     float_cache_dir: Path = field(
-        default_factory=lambda: REPO_ROOT / "webull-momentum-bot" / "data" / "float_cache"
+        default_factory=lambda: PROJECT_ROOT / "data" / "float_cache"
     )
     float_cache_ttl_hours: int = field(default_factory=lambda: _env_int("FLOAT_CACHE_TTL_HOURS", 24))
 

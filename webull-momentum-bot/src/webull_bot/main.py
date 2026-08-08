@@ -15,8 +15,7 @@ from __future__ import annotations
 
 from webull_bot.brokers import get_broker_client
 from webull_bot.config import get_settings
-from webull_bot.data.float_providers.cache import CachedFloatProvider
-from webull_bot.data.float_providers.massive import MassiveFloatProvider
+from webull_bot.data.float_providers import get_float_provider
 from webull_bot.risk.risk_engine import RiskEngine
 from webull_bot.scanner.broad_scanner import BroadScanner
 from webull_bot.scanner.candidate_watcher import CandidateWatcher
@@ -34,9 +33,7 @@ def main() -> None:
     broker = get_broker_client(settings)
     broker.connect()
 
-    float_provider = CachedFloatProvider(
-        MassiveFloatProvider(settings.massive), settings.float_cache_dir, settings.float_cache_ttl_hours
-    )
+    float_provider = get_float_provider(settings)
 
     broad_scanner = BroadScanner(broker, float_provider)
     watcher = CandidateWatcher()

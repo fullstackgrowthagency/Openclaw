@@ -83,6 +83,21 @@ the raw material for improving the MIS formula and strategies offline; it
 persists via `EventRecorder`, which is a thin seam meant to be backed by
 `db.models.MomentumEventRecord` in a real deployment.
 
+## Free-float data (FMP)
+
+`data/float_providers/fmp.py` is a real, network-verified integration
+against Financial Modeling Prep's `stable` API namespace (`/stable/shares-float`
+and `/stable/profile`) -- confirmed live on 2026-08-08, including that FMP's
+older `/api/v4/shares_float` now hard-fails with a "Legacy Endpoint" error.
+`get_float_provider(settings)` (`data/float_providers/__init__.py`) is the
+only place that should construct a float provider; it picks FMP when
+`FMP_API_KEY` is set and wraps it in `CachedFloatProvider`. `MassiveFloatProvider`
+remains as an alternate skeleton, unused unless FMP is unconfigured.
+
+`FMPFloatProvider` takes an injectable `http_get` callable specifically so
+`tests/test_fmp_float_provider.py` can run hermetically against canned
+responses shaped like the real API, without a network call or API key.
+
 ## Database
 
 See `db/models.py`. Deliberately does not store a raw tick log --
