@@ -1,0 +1,37 @@
+# Momentum Ignition Score (MIS) default weights.
+#
+# These are starting guesses, NOT tuned values -- the whole point of keeping
+# them in a versioned config file is so backtesting/paper-trading results can
+# drive changes here without touching code. Weights are relative and get
+# normalized to sum to 1.0 at load time, so you don't need to keep them
+# summing to any particular total when editing.
+#
+# Bump `version` any time you change a weight or threshold so MomentumScore
+# records stay traceable to the formula that produced them.
+version: "v1-initial-unvalidated"
+
+weights:
+  float_score: 1.0
+  float_velocity_score: 1.5
+  relative_volume_score: 1.5
+  volume_acceleration_score: 1.5
+  price_acceleration_score: 1.5
+  breakout_proximity_score: 1.0
+  trend_quality_score: 1.0
+  liquidity_score: 1.0
+
+# Thresholds used to normalize raw metrics into 0-100 sub-scores, and to
+# drive DISCOVERED -> WATCHING -> HEATING_UP -> ARMED transitions. All
+# tunable; see scoring/momentum_ignition_score.py for how they're applied.
+thresholds:
+  max_free_float_shares: 20_000_000
+  preferred_free_float_shares: 10_000_000
+  min_price: 1.0
+  max_price: 20.0
+  min_relative_volume_for_watch: 2.0
+  min_relative_volume_for_armed: 5.0
+  min_float_velocity_5m_for_armed: 0.03   # 3% of float traded in 5 minutes
+  max_spread_pct: 2.0
+  min_dollar_volume: 500_000
+  armed_score_threshold: 70.0
+  heating_up_score_threshold: 40.0
