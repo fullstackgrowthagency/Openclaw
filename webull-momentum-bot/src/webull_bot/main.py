@@ -1,31 +1,42 @@
 """
-Reference wiring for the live/sandbox pipeline. This is intentionally
-minimal -- it shows how the pieces connect (broker -> scanner -> watcher ->
-trigger engine -> risk engine -> order manager -> position manager) without
-prescribing a production run-loop.
+Entrypoint: builds the full pipeline and runs the poll-based TradingLoop.
 
 Run with `python -m webull_bot.main`. Account/market-data calls work in both
 PAPER mode (fully local, see brokers/paper/client.py) and SANDBOX mode
 (real Webull sandbox account, verified live -- see brokers/webull/client.py).
+
 Streaming (broker.subscribe_quotes) is NOT implemented for Webull yet: its
-sandbox MQTT host was never confirmed, so a real run-loop that reacts to
-live ticks still needs that piece before this can run unattended. Poll
-get_snapshot()/get_bars() in the meantime.
+sandbox MQTT host was never confirmed. TradingLoop (runtime/trading_loop.py)
+polls broker.get_snapshot() per candidate instead of reacting to a push
+feed -- see that module's docstring for how it also copes with
+WebullBrokerClient.place_order returning SUBMITTED rather than FILLED.
+
+PAPER mode has no real market universe of its own (PaperBrokerClient is a
+pure execution simulator with no live quotes) -- it falls back to a small
+static watchlist here, meant for exercising the pipeline against snapshots
+you feed it yourself (see brokers/paper/client.py's feed_snapshot), not for
+autonomous discovery.
 """
 from __future__ import annotations
 
 from webull_bot.brokers import get_broker_client
+from webull_bot.brokers.webull.client import WebullBrokerClient
 from webull_bot.config import get_settings
 from webull_bot.data.float_providers import get_float_provider
+from webull_bot.data.universe import StaticUniverseProvider, WebullUniverseProvider
+from webull_bot.execution.order_manager import OrderManager
+from webull_bot.position.position_manager import PositionManager
 from webull_bot.risk.risk_engine import RiskEngine
+from webull_bot.runtime.trading_loop import TradingLoop
 from webull_bot.scanner.broad_scanner import BroadScanner
 from webull_bot.scanner.candidate_watcher import CandidateWatcher
 from webull_bot.scanner.trigger_engine import TriggerEngine
 from webull_bot.strategy.momentum_breakout import MomentumBreakoutStrategy
-from webull_bot.execution.order_manager import OrderManager
+
+_PAPER_MODE_PLACEHOLDER_WATCHLIST = ["AAPL"]  # replace with symbols you intend to feed snapshots for
 
 
-def main() -> None:
+def build_trading_loop() -> TradingLoop:
     settings = get_settings()
     settings.require_non_live_or_authorized()
 
@@ -35,21 +46,33 @@ def main() -> None:
     broker.connect()
 
     float_provider = get_float_provider(settings)
-
     broad_scanner = BroadScanner(broker, float_provider)
+
+    if isinstance(broker, WebullBrokerClient):
+        universe_provider = WebullUniverseProvider.from_broker(broker)
+    else:
+        universe_provider = StaticUniverseProvider(_PAPER_MODE_PLACEHOLDER_WATCHLIST)
+
     watcher = CandidateWatcher()
     trigger_engine = TriggerEngine(strategies=[MomentumBreakoutStrategy()])
     risk_engine = RiskEngine()
     order_manager = OrderManager(broker, risk_engine, settings)
+    position_manager = PositionManager()
 
-    print(
-        "Wiring is constructed. Streaming run-loop (broker.subscribe_quotes -> "
-        "watcher.update -> trigger_engine.on_snapshot -> order_manager.submit_signal) "
-        "still needs a confirmed Webull sandbox MQTT host before it can react "
-        "to live ticks unattended; poll-based wiring can be built now."
+    return TradingLoop(
+        broker, universe_provider, broad_scanner, watcher, trigger_engine,
+        order_manager, position_manager, risk_engine,
+        on_trade_closed=lambda trade: print(f"TRADE CLOSED: {trade}"),
     )
-    # Intentionally not started here -- see module docstring.
-    _ = (broad_scanner, watcher, trigger_engine, order_manager)
+
+
+def main() -> None:
+    loop = build_trading_loop()
+    print("Trading loop constructed. Starting poll loop (Ctrl+C to stop)...")
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        print("Stopped.")
 
 
 if __name__ == "__main__":

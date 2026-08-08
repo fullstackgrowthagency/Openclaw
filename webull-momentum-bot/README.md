@@ -41,6 +41,16 @@ What's implemented and tested:
 - Position manager (stop/target/trailing/VWAP-failure/time exits)
 - Event-driven backtest engine using the *same* strategy/risk/order-manager
   code as live trading, with a configurable slippage/fee model
+- **Production run-loop** (`runtime/trading_loop.py`, wired up in `main.py`):
+  polls `broker.get_snapshot()` per candidate (no streaming yet -- see
+  below) and periodically rescans a symbol universe. Correctly handles
+  `WebullBrokerClient.place_order` returning `SUBMITTED` rather than
+  `FILLED` (confirmed live) via pending-order polling for both entries and
+  exits, rather than assuming synchronous fills like the backtest engine
+  can. Universe discovery in sandbox/live mode uses the verified
+  `screener.get_most_active(rank_type="RELATIVE_VOLUME_10D")` endpoint
+  (`data/universe.py`), which lines up directly with the project's
+  "high relative volume" criterion.
 - Data-collection scaffolding for recording momentum events (traded and
   not-traded) with forward-looking outcome windows
 - SQLAlchemy schema for Postgres/Supabase covering the tables in the
@@ -60,8 +70,6 @@ What's still a skeleton or unverified (explicitly, not silently):
   with an actual position open.
 - `data/float_providers/massive.py` -- unused now that FMP is wired up; kept
   only as an alternate skeleton
-- Production run-loop (`main.py` only builds the object graph; no
-  poll/react loop wired up yet)
 - RVOL's historical intraday-volume-by-time-of-day baseline
 - Real resistance/support level detection (currently just running HOD)
 - Level 2 / order-flow features
@@ -111,6 +119,19 @@ string in `DATABASE_URL`:
 python scripts/init_db.py
 ```
 
+Run the bot (defaults to whatever `TRADING_MODE` is set to in `.env`):
+
+```bash
+python -m webull_bot.main
+```
+
+In `sandbox` mode this polls the real Webull sandbox account and screener
+on a timer (`Ctrl+C` to stop) -- fake money only, per the safety model
+above. In `paper` mode there's no live market data source, so it polls a
+placeholder watchlist (`main.py`'s `_PAPER_MODE_PLACEHOLDER_WATCHLIST`)
+that won't do anything useful until you feed it snapshots yourself via
+`PaperBrokerClient.feed_snapshot()`.
+
 ## Development order
 
 Following the project outline: architecture -> Webull integration ->
@@ -121,7 +142,8 @@ optimization -> L2/order-flow -> production-readiness testing.
 
 This repo currently covers architecture, database, calculations, scanner,
 MIS, state machine, backtesting, risk engine, position management, real
-free-float data (FMP), and a real Webull sandbox connection (account,
-market data, order submission). Next up: confirm the sandbox streaming
-host, re-verify the still-best-effort response shapes during market hours
-with a real filled order, then build the production run-loop.
+free-float data (FMP), a real Webull sandbox connection (account, market
+data, order submission), and a production poll-based run-loop. Next up:
+confirm the sandbox streaming host so the loop can react to pushed ticks
+instead of polling, and re-verify the still-best-effort response shapes
+during market hours with a real filled order.

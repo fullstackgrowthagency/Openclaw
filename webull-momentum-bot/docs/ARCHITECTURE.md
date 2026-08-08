@@ -35,6 +35,45 @@ no broker reference. If new code calls `broker.place_order` from anywhere
 outside `execution/order_manager.py`, that's a bypass of the architecture --
 don't do it, even for "just a quick script."
 
+## Production run-loop (polling, not streaming)
+
+`runtime/trading_loop.py`'s `TradingLoop` is what actually drives the data
+flow above outside of a backtest -- `main.py` constructs one and calls
+`run_forever()`. Since Webull streaming isn't implemented, it polls
+`broker.get_snapshot()` per tracked candidate on a timer
+(`TradingLoopConfig.poll_interval_seconds`) instead of reacting to pushed
+ticks, and periodically re-runs `BroadScanner.scan()` against a
+`SymbolUniverseProvider` to discover new candidates
+(`universe_rescan_interval_seconds`).
+
+The one thing this loop has to handle that the backtest engine doesn't:
+**`WebullBrokerClient.place_order` returns `status=SUBMITTED`, not
+`FILLED`** (confirmed live -- a 2xx response means Webull accepted the
+order for processing, not that it has executed). `PaperBrokerClient`, by
+contrast, fills synchronously. So every entry and exit order goes through a
+pending-order tracking step (`_pending_entry_orders` / `_pending_exit_orders`)
+that polls `OrderManager.get_status()` on subsequent ticks until it
+resolves to `FILLED` or a terminal failure, rather than assuming the order
+in front of it already executed.
+
+The other non-obvious bit: `TradingLoop` keeps its own `_positions` dict as
+the source of truth for an open position's stop/target/trailing-stop/MFE/MAE
+state, seeded once (with a real `avg_entry_price` from `broker.get_positions()`)
+right when an entry fill is confirmed. It deliberately does NOT re-fetch
+`broker.get_positions()` on every tick to read that state back, because
+`PositionManager.check_exit` mutates the Position object it's given
+in place, and the broker returns a fresh object on every call -- refetching
+every tick would silently discard the running trailing-stop/MFE/MAE state
+computed on prior ticks.
+
+`data/universe.py`'s `WebullUniverseProvider` feeds the scanner using the
+verified `screener.get_most_active(..., rank_type="RELATIVE_VOLUME_10D")`
+endpoint, which lines up directly with the project's "high relative volume"
+discovery criterion. `PaperBrokerClient` has no live screener of its own, so
+paper mode falls back to `StaticUniverseProvider` with a placeholder
+watchlist -- paper mode is for exercising the pipeline against
+manually-fed snapshots, not autonomous discovery.
+
 ## State machine
 
 ```
