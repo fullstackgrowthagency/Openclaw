@@ -2,14 +2,24 @@
 Tier 1: Broad Scanner.
 
 Continuously screens a symbol universe down to candidates worth watching
-closely. Only two things are genuinely *structural* gates here -- price
-range and free float -- both checked cheaply before any candidate object
-gets built. Dollar volume and average volume are deliberately NOT gates:
-a historically-quiet low-float stock suddenly seeing abnormal volume is
-exactly the pattern this bot targets, so a low reading on either must not
-disqualify a symbol. Both are still computed and attached to the Candidate
-as informational context (Candidate.dollar_volume_today/average_daily_volume/
-previous_day_volume) for scoring/diagnostics instead of a pass/fail cutoff.
+closely. Structural gates here -- price range, free float, and a volume
+floor -- are all checked cheaply before a candidate is fully built out.
+
+Dollar volume (Candidate.dollar_volume_today) is still deliberately NOT a
+gate: it's still just informational/scoring context. Average daily volume
+and previous-day volume, however, ARE a gate again as of 2026-08-09 (a
+prior pass through this file had made both purely informational -- see
+git history/ARCHITECTURE.md for that reasoning -- but per explicit user
+request they're back to rejecting, with new, looser thresholds and an
+either-or exemption): a symbol is rejected only when BOTH
+average_daily_volume is below BroadScannerConfig.min_average_daily_volume
+AND previous_day_volume is below min_previous_day_volume -- clearing
+either bar alone is enough to survive. Missing data on either side (paper/
+backtest brokers, or a failed lookup) can't prove both bars were missed,
+so it does NOT reject -- same fail-soft spirit as the free-float check
+failing soft on a lookup error, just applied to a value comparison instead
+of an exception. See _fails_volume_floor.
+
 Expensive per-tick metric work happens in CandidateWatcher, not here.
 
 The symbol universe itself (e.g. a premarket-gappers or most-active list)
@@ -33,13 +43,14 @@ for one symbol overlap with another symbol's (paced) Webull snapshot call,
 which is where concurrency actually still buys wall-clock time now.
 
 Call ordering inside `_check_symbol` is deliberately cost-conscious: the
-free-float check (still a hard structural gate) runs *before* the
-average-volume/resistance network calls, so a symbol that's structurally
-disqualified by float size never pays for those extra Webull round-trips.
-`_compute_average_volume_info` and `_compute_static_resistance_levels`
-both fail soft (never reject the candidate) for the same reason neither is
-a gate: a missing/failed lookup just means less informational context on
-the candidate, not a reason to discard it.
+free-float check runs first, then the volume-floor check right after
+`_compute_average_volume_info`, and only THEN the resistance computation
+(`_compute_static_resistance_levels`) -- the most expensive remaining call
+-- so a symbol disqualified by float size or volume never pays for that
+extra Webull round-trip. `_compute_static_resistance_levels` itself still
+fails soft (never rejects): a missing/failed lookup there just means less
+informational context on a candidate that's already been decided to be
+valid, not a reason to discard it.
 """
 from __future__ import annotations
 
@@ -56,17 +67,24 @@ from ..state_machine import CandidateState, new_candidate, transition
 
 @dataclass
 class BroadScannerConfig:
-    # Structural gates: a symbol outside this price range, or with a free
-    # float above the ceiling below, is never a candidate -- see the module
-    # docstring for why dollar volume/average volume are NOT included here.
+    # Structural gates: a symbol outside this price range, with a free
+    # float above the ceiling below, or that misses BOTH volume floors
+    # below, is never a candidate -- see the module docstring for the
+    # either-or exemption on the volume floors and why dollar volume is
+    # NOT included here.
     min_price: float = 0.40
     max_price: float = 25.00
     max_free_float_shares: float = 20_000_000
+    # Volume floor (see module docstring and _fails_volume_floor): a symbol
+    # is rejected only when its average_daily_volume is below this AND its
+    # previous_day_volume is below min_previous_day_volume -- clearing
+    # either one alone is enough to survive. Unvalidated starting values
+    # per explicit user request (2026-08-09), not backtested.
+    min_average_daily_volume: float = 500_000
+    min_previous_day_volume: float = 750_000
     # How many days of daily-volume history to fetch for average_daily_volume
-    # / previous_day_volume -- purely informational now (see module
-    # docstring), not compared against any threshold here anymore. Matches
-    # the relative_volume_10d convention used elsewhere (universe.py, MIS
-    # scoring).
+    # / previous_day_volume above. Matches the relative_volume_10d convention
+    # used elsewhere (universe.py, MIS scoring).
     avg_volume_lookback_days: int = 10
     # Volume-profile resistance detection (metrics/volume_profile.py). 780
     # 5-minute bars is ~10 trading days of continuous coverage for a liquid
@@ -116,23 +134,46 @@ class BroadScanner:
         if float_data.free_float_shares > self.config.max_free_float_shares:
             return None
 
+        # Structural gate: volume floor. Checked before the (more
+        # expensive) resistance network call below so a symbol disqualified
+        # here never pays for that extra round-trip (see module docstring).
+        average_volume, previous_day_volume = self._compute_average_volume_info(symbol)
+        if self._fails_volume_floor(average_volume, previous_day_volume):
+            return None
+
         candidate = new_candidate(symbol, now=snapshot.timestamp)
         candidate.float_data = float_data
         candidate.dollar_volume_today = snapshot.last_price * snapshot.cumulative_volume
-        average_volume, previous_day_volume = self._compute_average_volume_info(symbol)
         candidate.average_daily_volume = average_volume
         candidate.previous_day_volume = previous_day_volume
         candidate.static_resistance_levels = self._compute_static_resistance_levels(symbol)
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate
 
+    def _fails_volume_floor(self, average_volume: Optional[float], previous_day_volume: Optional[float]) -> bool:
+        """True only when BOTH volume floors are missed -- clearing either
+        min_average_daily_volume or min_previous_day_volume alone is enough
+        to survive (see module docstring/BroadScannerConfig). Missing data
+        on either side (None) can't prove both bars were missed, so this
+        returns False rather than rejecting -- same fail-soft spirit as
+        _compute_average_volume_info returning (None, None) on a lookup
+        failure below: a candidate is never punished for data we don't
+        have."""
+        if average_volume is None or previous_day_volume is None:
+            return False
+        return (
+            average_volume < self.config.min_average_daily_volume
+            and previous_day_volume < self.config.min_previous_day_volume
+        )
+
     def _compute_average_volume_info(self, symbol: str) -> tuple[Optional[float], Optional[float]]:
-        """Returns (average_daily_volume, previous_day_volume) -- purely
-        informational (see module docstring for why this no longer gates
-        discovery). Returns (None, None) rather than raising on any failure
-        or missing capability, same fail-soft contract as
-        _compute_static_resistance_levels below: this enriches a candidate
-        that's already been decided to be valid, it doesn't decide validity.
+        """Returns (average_daily_volume, previous_day_volume), the two
+        values _fails_volume_floor above compares against
+        BroadScannerConfig's floors. Returns (None, None) rather than
+        raising on any failure or missing capability -- see
+        _fails_volume_floor for why that means "don't reject" rather than
+        "reject," same fail-soft contract as _compute_static_resistance_levels
+        below.
 
         Skipped for brokers with no real daily-volume history (paper/
         backtest mode) via getattr, same reasoning as

@@ -69,12 +69,17 @@ What's implemented and tested:
   by a fixed number; see `docs/ARCHITECTURE.md` for the measured
   per-symbol timing this implies (noting those numbers predate this wider
   price range/pagination/4th source and now understate real scan time).
-  Dollar volume and average volume are informational `Candidate` fields,
-  not discovery gates -- see `docs/ARCHITECTURE.md`'s "Structural vs.
-  temporary disqualification" section for why, and for the same
-  distinction applied to `CandidateWatcher`'s spread/liquidity checks
-  (`Candidate.trade_eligible`/`block_reasons`, which no longer permanently
-  reject a candidate either).
+  Dollar volume is an informational `Candidate` field, not a discovery
+  gate. Average-daily and previous-day volume, however, ARE a structural
+  gate again (`BroadScannerConfig.min_average_daily_volume`/
+  `min_previous_day_volume`, 500,000/750,000 by default) -- a symbol is
+  rejected only when it misses BOTH, so clearing either bar alone is
+  enough to survive. See `docs/ARCHITECTURE.md`'s "Volume floor" and
+  "Structural vs. temporary disqualification" sections for the full
+  reasoning, and for the same temporary-not-permanent distinction still
+  applied to `CandidateWatcher`'s spread/liquidity checks
+  (`Candidate.trade_eligible`/`block_reasons`, which don't permanently
+  reject a candidate).
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars and builds a volume-at-price

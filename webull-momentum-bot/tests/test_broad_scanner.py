@@ -8,6 +8,8 @@ scanning.
 import time
 from datetime import datetime
 
+import pytest
+
 from webull_bot.enums import CandidateState
 from webull_bot.interfaces.broker import BrokerClient
 from webull_bot.interfaces.float_provider import FloatDataProvider
@@ -198,16 +200,69 @@ class _DailyVolumeAwareBroker(_SlowFakeBroker):
         return self.daily_volumes[symbol]
 
 
-def test_scan_does_not_reject_low_average_volume_symbol():
-    # Historical average volume is informational only now -- see
-    # broad_scanner.py's module docstring: a historically-quiet low-float
-    # stock is exactly the pattern this bot is meant to catch, not exclude.
+def test_scan_keeps_candidate_exactly_at_average_volume_floor():
+    # 500,000 is the default min_average_daily_volume floor -- AT it, not
+    # below it, so this alone is enough to survive regardless of
+    # previous_day_volume (also 500,000 here, below its own 750,000 floor).
     broker = _DailyVolumeAwareBroker({"QUIET": [500_000] * 10})
     scanner = BroadScanner(broker, _FakeFloatProvider())
     candidates = scanner.scan(["QUIET"])
     assert [c.symbol for c in candidates] == ["QUIET"]
     assert candidates[0].average_daily_volume == 500_000
     assert candidates[0].previous_day_volume == 500_000
+
+
+# -- volume floor (min_average_daily_volume / min_previous_day_volume) ------
+#
+# Rejects only when BOTH are missed -- clearing either alone is enough to
+# survive (see broad_scanner.py's module docstring/BroadScannerConfig).
+
+def test_scan_rejects_when_both_volume_floors_are_missed():
+    broker = _DailyVolumeAwareBroker({"DEAD": [400_000] * 10})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert scanner.scan(["DEAD"]) == []
+
+
+def test_scan_keeps_candidate_when_only_average_volume_clears_its_floor():
+    # previous_day_volume (400,000, the most-recent-first first element)
+    # misses min_previous_day_volume (750,000); average_daily_volume
+    # (~670,000 across all 10 days) clears min_average_daily_volume
+    # (500,000) -- either one clearing is enough, so this survives.
+    broker = _DailyVolumeAwareBroker({"OK": [400_000] + [700_000] * 9})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["OK"])
+    assert [c.symbol for c in candidates] == ["OK"]
+    assert candidates[0].average_daily_volume == pytest.approx((400_000 + 700_000 * 9) / 10)
+    assert candidates[0].previous_day_volume == 400_000
+
+
+def test_scan_keeps_candidate_when_only_previous_day_volume_clears_its_floor():
+    # average_daily_volume (300,000) misses min_average_daily_volume
+    # (500,000); previous_day_volume (800,000) clears min_previous_day_volume
+    # (750,000) -- surviving on the other bar alone.
+    broker = _DailyVolumeAwareBroker({"OK": [800_000] + [200_000] * 9})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["OK"])
+    assert [c.symbol for c in candidates] == ["OK"]
+    assert candidates[0].previous_day_volume == 800_000
+
+
+def test_scan_keeps_candidate_exactly_at_previous_day_volume_floor():
+    # 750,000 is the default min_previous_day_volume floor -- AT it, not
+    # below it, so this alone is enough to survive regardless of a
+    # below-floor average_daily_volume (also 400,000 here).
+    broker = _DailyVolumeAwareBroker({"EDGE": [750_000] + [400_000] * 9})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert [c.symbol for c in scanner.scan(["EDGE"])] == ["EDGE"]
+
+
+def test_scan_does_not_reject_symbol_when_volume_data_is_missing_on_one_side():
+    # A missing/failed lookup means (None, None) from _compute_average_volume_info
+    # (see the daily-volume-lookup-failure and no-get_daily_volumes tests
+    # below) -- can't prove both floors were missed, so this must not reject.
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ANY": 5.0})  # no get_daily_volumes at all
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert [c.symbol for c in scanner.scan(["ANY"])] == ["ANY"]
 
 
 def test_scan_does_not_reject_symbol_on_daily_volume_lookup_failure():

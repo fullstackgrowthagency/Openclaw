@@ -3,8 +3,10 @@
 ## Data flow
 
 ```
-BroadScanner            (structural gates only: price range, float ceiling --
-      |                   dollar volume/average volume are informational, not gates)
+BroadScanner            (structural gates: price range, float ceiling, and a
+      |                   volume floor -- either avg-daily or previous-day
+      |                   volume clearing its bar is enough; dollar volume
+      |                   remains informational, not a gate)
       v  Candidate(DISCOVERED -> WATCHING)
 CandidateWatcher         (recomputes MomentumMetrics + Momentum Ignition
       |                   Score on every snapshot; drives WATCHING ->
@@ -167,13 +169,11 @@ one source raising is logged and skipped rather than aborting the scan, so
 a broken/rate-limited source never destroys results already gathered from
 the others. A symbol only needs to appear on one list to reach
 `BroadScanner`, which vets every symbol identically regardless of which
-list(s) surfaced it -- **but "vets" now means only price range and real
-free float via FMP are structural pass/fail gates.** Dollar volume and
-average volume used to also gate discovery; they're deliberately
-informational only now (see `scanner/broad_scanner.py`'s module docstring)
-since a historically-quiet low-float stock suddenly seeing abnormal volume
-is exactly the pattern this bot is meant to catch, not exclude for having
-been quiet. `TradingLoop._rescan_universe` scans **every** symbol this
+list(s) surfaced it -- **price range, real free float via FMP, and a
+volume floor are the structural pass/fail gates** (see "Volume floor"
+below for the volume one). Dollar volume remains informational only (see
+`scanner/broad_scanner.py`'s module docstring). `TradingLoop._rescan_universe`
+scans **every** symbol this
 returns -- there is deliberately no truncation, so a mover can never be
 silently dropped for appearing past some cutoff. (An earlier version of
 this class interleaved results round-robin across sources specifically to
@@ -228,19 +228,27 @@ see that config's comments for the measured numbers (and their caveat:
 they predate the wider price range, pagination, and 4th source, so they
 understate current scan time).
 
-**Average-volume info is now purely informational, not a filter**
-(`BroadScanner._compute_average_volume_info`): it used to exclude a
-symbol trading under 1,000,000 shares/day on average unless its previous
-trading day alone cleared that bar. That hard rejection is gone --
-`Candidate.average_daily_volume`/`previous_day_volume` are populated for
-scoring/diagnostics, but a low reading no longer disqualifies a symbol,
-since a previously-quiet float suddenly seeing abnormal volume is exactly
-the pattern this bot targets, not a reason to exclude it. Same story for
-dollar volume: `Candidate.dollar_volume_today` is populated but doesn't
-gate discovery either (see `scanner/broad_scanner.py`'s module
-docstring). Both calls fail soft (`None` on any error or missing broker
-capability) rather than rejecting the candidate, since neither is a
-pass/fail check anymore.
+**Volume floor** (`BroadScanner._fails_volume_floor`, fed by
+`_compute_average_volume_info`): a symbol is rejected only when BOTH
+`average_daily_volume` is below `BroadScannerConfig.min_average_daily_volume`
+(500,000 by default) AND `previous_day_volume` is below
+`min_previous_day_volume` (750,000 by default) -- clearing either bar
+alone is enough to survive. This is a re-introduction: an earlier pass
+through this file (documented just above, in spirit) had made both purely
+informational, reasoning that a previously-quiet float suddenly seeing
+abnormal volume is exactly the pattern this bot targets. Per explicit user
+request (2026-08-09) the gate is back, but looser (the original hard
+rejection was ≥1,000,000 shares/day with no exemption) and with an
+either-or exemption instead of an all-or-nothing bar, which keeps most of
+that original reasoning intact: a stock that's been quiet on average but
+just had one real volume day still survives on `previous_day_volume`
+alone. Missing data on either side (a failed lookup, or a broker with no
+real daily-volume history at all -- paper/backtest mode) can't prove both
+bars were missed, so it does NOT reject; see `_fails_volume_floor`'s
+docstring. Dollar volume remains purely informational either way:
+`Candidate.dollar_volume_today` is populated but never gates discovery
+(see `scanner/broad_scanner.py`'s module docstring). Unvalidated starting
+thresholds, not backtested -- same framing as `scoring/weights.yaml`.
 
 The average-volume lookup is backed by `WebullBrokerClient.get_daily_volumes`,
 which deliberately does **not** reuse `get_bars()`/`_snapshots_from_bars()`:
@@ -251,18 +259,23 @@ together instead of reporting each day's own total). Confirmed live
 (2026-08-09) against raw daily bars that each day's `volume` field is
 already a clean, distinct per-day total, most-recent-first.
 
-A live finding from that verification is worth flagging regardless of the
-filter being gone, since it still describes the data this now feeds into
-scoring: **sandbox historical data quality varies by symbol liquidity.**
-Mega-caps (AAPL, TSLA, NVDA) returned consistent, plausible volume across
-all 10 days requested. Every low-float/micro-cap symbol tested (the bot's
-actual target universe) returned a real-looking value for only the *most
-recent* day, with the other 9 showing near-zero placeholder-looking
-figures. This means `average_daily_volume` may not be meaningful in
-sandbox testing for this bot's real target names -- `previous_day_volume`
-is the reliable one of the two there. This appears to be a sandbox
-data-population limitation, not a code bug, and should be re-verified
-once trading against real production data.
+A live finding from that verification is directly relevant now that the
+volume floor gates discovery again: **sandbox historical data quality
+varies by symbol liquidity.** Mega-caps (AAPL, TSLA, NVDA) returned
+consistent, plausible volume across all 10 days requested. Every low-
+float/micro-cap symbol tested (the bot's actual target universe) returned
+a real-looking value for only the *most recent* day, with the other 9
+showing near-zero placeholder-looking figures. This means
+`average_daily_volume` may not be meaningful in sandbox testing for this
+bot's real target names -- `previous_day_volume` is the reliable one of
+the two there. This appears to be a sandbox data-population limitation,
+not a code bug, and should be re-verified once trading against real
+production data. It's also exactly why the volume floor's either-or
+exemption matters in practice, not just in principle: a genuinely active
+low-float name whose sandbox `average_daily_volume` gets dragged toward
+zero by 9 fake-looking days still survives the gate on
+`previous_day_volume` alone, so this known data-quality gap shouldn't
+cause real misses even before it's fixed.
 
 Separately (found during this same live testing, unrelated to the
 average-volume work itself): the configured FMP API key was returning
@@ -432,12 +445,19 @@ actual order-submission gate, with its own separate config -- see
 plus a future cheap short-circuit, not the only thing standing between a
 wide-spread name and an order.
 
-The same "temporary, not permanent" philosophy applies to `BroadScanner`'s
-discovery-time checks -- see the "Average-volume info is now purely
-informational" section above: dollar volume and average volume are
-`Candidate` fields for scoring context, not pass/fail gates, for exactly
-the same reason (a stock waking up from quiet is the target, not a
-disqualifier).
+The same "temporary, not permanent" philosophy still applies to dollar
+volume at `BroadScanner`'s discovery-time checks: it's a `Candidate` field
+for scoring context, not a pass/fail gate, since a stock waking up from
+quiet is the target, not a disqualifier. The volume floor (average-daily/
+previous-day volume, see "Volume floor" above) is the one exception to
+that philosophy in `BroadScanner` -- it IS a structural, permanent gate
+again (a symbol that misses it is never even discovered, not marked
+temporarily untradeable), per explicit user request. Its either-or design
+is what keeps it from re-introducing the exact problem the original
+all-or-nothing version had: a name only needs ONE of the two figures to
+clear its bar to survive, so a previously-quiet float seeing a single real
+volume day isn't excluded just because its longer-run average hasn't
+caught up yet.
 
 ## Momentum Ignition Score
 
