@@ -380,3 +380,58 @@ def test_scan_leaves_static_resistance_levels_empty_without_get_raw_bars():
     candidates = scanner.scan(["ANY"])
     assert len(candidates) == 1
     assert candidates[0].static_resistance_levels == []
+
+
+# -- check_symbol_verbose (used by the dashboard's on-demand single-ticker
+# scan, dashboard/app.py's POST /api/scan-symbol) -- same structural checks
+# as _check_symbol/scan(), but also explains a rejection instead of
+# silently returning None. ------------------------------------------------
+
+def test_check_symbol_verbose_returns_candidate_and_no_reason_on_success():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"GOOD": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidate, reason = scanner.check_symbol_verbose("GOOD")
+    assert candidate is not None
+    assert candidate.symbol == "GOOD"
+    assert candidate.state == CandidateState.WATCHING
+    assert reason is None
+
+
+def test_check_symbol_verbose_explains_price_rejection():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"EXPENSIVE": 30.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidate, reason = scanner.check_symbol_verbose("EXPENSIVE")
+    assert candidate is None
+    assert "30.00" in reason
+    assert "range" in reason.lower()
+
+
+def test_check_symbol_verbose_explains_float_rejection():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"BIGFLOAT": 5.0})
+    float_provider = _FakeFloatProvider({"BIGFLOAT": 50_000_000})
+    scanner = BroadScanner(broker, float_provider)
+    candidate, reason = scanner.check_symbol_verbose("BIGFLOAT")
+    assert candidate is None
+    assert "50,000,000" in reason
+    assert "float" in reason.lower()
+
+
+def test_check_symbol_verbose_explains_volume_floor_rejection():
+    broker = _DailyVolumeAwareBroker({"DEAD": [400_000] * 10})  # current-day defaults to 200,000
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidate, reason = scanner.check_symbol_verbose("DEAD")
+    assert candidate is None
+    assert "volume" in reason.lower()
+    assert "400,000" in reason  # the actual average/previous-day figure
+
+
+def test_check_symbol_verbose_explains_broker_failure():
+    class _FlakyBroker(_SlowFakeBroker):
+        def get_snapshot(self, symbol):
+            raise RuntimeError("simulated broker failure")
+
+    scanner = BroadScanner(_FlakyBroker(0.0, {}), _FakeFloatProvider())
+    candidate, reason = scanner.check_symbol_verbose("BROKEN")
+    assert candidate is None
+    assert "BROKEN" in reason
+    assert "simulated broker failure" in reason

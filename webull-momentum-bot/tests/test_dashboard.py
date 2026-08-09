@@ -175,6 +175,57 @@ def test_mis_weights_endpoint_returns_current_config(client):
     assert abs(sum(body["weights"].values()) - 1.0) < 1e-9
 
 
+def test_scan_symbol_adds_a_passing_ticker(loop, client):
+    loop.broker.feed_snapshot(
+        MarketSnapshot(
+            symbol="NEWSYM", timestamp=datetime.utcnow(), last_price=5.0, bid=4.99, ask=5.01,
+            bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=5.0, high_of_day=5.0,
+            low_of_day=5.0, open_price=5.0,
+        )
+    )
+    resp = client.post("/api/scan-symbol", params={"symbol": "newsym"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "NEWSYM"
+    assert body["added"] is True
+    assert body["already_tracked"] is False
+    assert body["state"] == "watching"
+    assert body["reason"] == "passed broad scanner filters"
+    assert "NEWSYM" in loop.candidates
+
+
+def test_scan_symbol_reports_rejected_state_with_reason(loop, client):
+    loop.broker.feed_snapshot(
+        MarketSnapshot(
+            symbol="TOOEXPENSIVE", timestamp=datetime.utcnow(), last_price=30.0, bid=29.99, ask=30.01,
+            bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=30.0, high_of_day=30.0,
+            low_of_day=30.0, open_price=30.0,
+        )
+    )
+    resp = client.post("/api/scan-symbol", params={"symbol": "TOOEXPENSIVE"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["added"] is False
+    assert body["state"] == "rejected"
+    assert "range" in body["reason"].lower()
+    assert "TOOEXPENSIVE" not in loop.candidates
+
+
+def test_scan_symbol_reports_already_tracked_state_without_rescanning(loop, client):
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    transition(candidate, CandidateState.HEATING_UP)
+    loop.candidates["TEST"] = candidate
+    # No snapshot fed for TEST -- if this re-scanned instead of returning
+    # the existing candidate, the response would come back rejected.
+
+    resp = client.post("/api/scan-symbol", params={"symbol": "TEST"})
+    body = resp.json()
+    assert body["added"] is False
+    assert body["already_tracked"] is True
+    assert body["state"] == "heating_up"
+
+
 def test_positions_includes_unrealized_pnl_from_live_snapshot(loop, client):
     loop.broker.feed_snapshot(
         MarketSnapshot(

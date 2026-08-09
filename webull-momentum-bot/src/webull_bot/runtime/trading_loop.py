@@ -201,6 +201,53 @@ class TradingLoop:
         with self._candidates_lock:
             return list(self.candidates.values())
 
+    def scan_and_add_candidate(self, symbol: str) -> tuple[Optional[Candidate], Optional[str], bool]:
+        """On-demand, single-symbol equivalent of _rescan_universe -- runs
+        one ticker through BroadScanner's structural gates right now and,
+        if it passes, adds it to self.candidates so it starts being
+        processed on this loop's normal cadence, instead of waiting for
+        the next full universe pass (which can take many minutes, see
+        TradingLoopConfig). Backs the dashboard's manual "scan a ticker"
+        feature (dashboard/app.py's POST /api/scan-symbol).
+
+        If `symbol` is already tracked, it's returned as-is (its real,
+        current state -- WATCHING, ARMED, REJECTED, whatever it actually
+        is) without re-scanning or being overwritten, same "don't clobber
+        an existing candidate" behavior _rescan_universe already has for
+        the periodic path. Otherwise runs
+        BroadScanner.check_symbol_verbose and, on success, inserts the new
+        candidate under self._candidates_lock (guarding a race against the
+        background rescan thread discovering the same symbol at the same
+        time -- see this module's docstring's "Concurrency model" section);
+        `dict.setdefault` inside the lock means whichever candidate object
+        won that race is what gets returned, not necessarily the one this
+        call just built.
+
+        Returns (candidate_or_None, reason_or_None, was_newly_added) --
+        reason is only ever set when candidate is None (a fresh rejection);
+        was_newly_added is True only when THIS call is what inserted the
+        candidate (checked under the same lock as the insert, so a
+        concurrent rescan-thread discovery racing this call is reported
+        accurately rather than guessed from a separate, unlocked check)."""
+        symbol = symbol.upper()
+        with self._candidates_lock:
+            existing = self.candidates.get(symbol)
+        if existing is not None:
+            return existing, None, False
+
+        try:
+            candidate, reason = self.broad_scanner.check_symbol_verbose(symbol)
+        except Exception:
+            logger.exception("check_symbol_verbose failed for manually-scanned symbol %s.", symbol)
+            return None, f"Unexpected error while scanning {symbol}; see server logs.", False
+        if candidate is None:
+            return None, reason, False
+
+        with self._candidates_lock:
+            was_newly_added = symbol not in self.candidates
+            stored = self.candidates.setdefault(symbol, candidate)
+        return stored, None, was_newly_added
+
     # -- per-candidate processing ---------------------------------------------
 
     def _process_candidate(self, candidate: Candidate, now: datetime) -> None:

@@ -123,31 +123,59 @@ class BroadScanner:
         self.config = config or BroadScannerConfig()
 
     def _check_symbol(self, symbol: str) -> Optional[Candidate]:
+        """Used by scan()'s bulk per-cycle path, which only cares about the
+        resulting candidate list, not why a rejected symbol was rejected --
+        see check_symbol_verbose for the version that also explains a
+        rejection, used by the dashboard's on-demand single-ticker scan."""
+        candidate, _reason = self.check_symbol_verbose(symbol)
+        return candidate
+
+    def check_symbol_verbose(self, symbol: str) -> tuple[Optional[Candidate], Optional[str]]:
+        """Runs the exact same structural checks as _check_symbol, but also
+        returns a human-readable reason when the symbol is rejected (i.e.
+        the candidate is None) -- for the dashboard's on-demand
+        single-ticker scan (dashboard/app.py's POST /api/scan-symbol),
+        where a human explicitly asked to check one symbol and wants to
+        know why, unlike scan()'s bulk path which silently drops rejected
+        symbols by the thousand every cycle."""
         try:
             snapshot = self.broker.get_snapshot(symbol)
-        except Exception:
-            return None
+        except Exception as exc:
+            return None, f"Failed to fetch a market snapshot for {symbol}: {exc}"
 
         if not (self.config.min_price <= snapshot.last_price <= self.config.max_price):
-            return None
+            return None, (
+                f"Price ${snapshot.last_price:.2f} is outside the allowed range "
+                f"(${self.config.min_price:.2f}-${self.config.max_price:.2f})."
+            )
 
         # Structural gate: free float. Checked before the average-volume/
         # resistance network calls below so a symbol disqualified here never
         # pays for those extra round-trips (see module docstring).
         try:
             float_data = self.float_provider.get_float_data(symbol)
-        except Exception:
-            return None
+        except Exception as exc:
+            return None, f"Failed to fetch free-float data for {symbol}: {exc}"
 
         if float_data.free_float_shares > self.config.max_free_float_shares:
-            return None
+            return None, (
+                f"Free float {float_data.free_float_shares:,.0f} exceeds the "
+                f"{self.config.max_free_float_shares:,.0f}-share ceiling."
+            )
 
         # Structural gate: volume floor. Checked before the (more
         # expensive) resistance network call below so a symbol disqualified
         # here never pays for that extra round-trip (see module docstring).
         average_volume, previous_day_volume = self._compute_average_volume_info(symbol)
         if self._fails_volume_floor(average_volume, previous_day_volume, snapshot.cumulative_volume):
-            return None
+            return None, (
+                f"Average daily volume ({self._fmt_volume(average_volume)}), previous-day volume "
+                f"({self._fmt_volume(previous_day_volume)}), and today's volume-so-far "
+                f"({self._fmt_volume(snapshot.cumulative_volume)}) are all below their floors "
+                f"(min_average_daily_volume={self.config.min_average_daily_volume:,.0f}, "
+                f"min_previous_day_volume={self.config.min_previous_day_volume:,.0f}, "
+                f"min_current_day_volume={self.config.min_current_day_volume:,.0f})."
+            )
 
         candidate = new_candidate(symbol, now=snapshot.timestamp)
         candidate.float_data = float_data
@@ -156,7 +184,11 @@ class BroadScanner:
         candidate.previous_day_volume = previous_day_volume
         candidate.static_resistance_levels = self._compute_static_resistance_levels(symbol)
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
-        return candidate
+        return candidate, None
+
+    @staticmethod
+    def _fmt_volume(volume: Optional[float]) -> str:
+        return f"{volume:,.0f}" if volume is not None else "unknown"
 
     def _fails_volume_floor(
         self, average_volume: Optional[float], previous_day_volume: Optional[float], current_day_volume: float

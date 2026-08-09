@@ -213,6 +213,38 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
                 for r in rows
             ]
 
+    @app.post("/api/scan-symbol")
+    def scan_symbol(symbol: str):
+        """Manually runs one ticker through BroadScanner's structural
+        gates right now and adds it to the live candidate list if it
+        passes -- the on-demand, single-symbol equivalent of waiting for
+        the next full universe rescan (which can take many minutes). See
+        TradingLoop.scan_and_add_candidate. `state` is the resulting
+        candidate's real CandidateState value when it exists (whether
+        newly added or already tracked), or the literal string "rejected"
+        when BroadScanner's structural gates turned it away outright (no
+        Candidate object -- and therefore no CandidateState -- ever gets
+        created in that case)."""
+        symbol = symbol.strip().upper()
+        candidate, reason, was_newly_added = trading_loop.scan_and_add_candidate(symbol)
+        if candidate is None:
+            return {
+                "symbol": symbol,
+                "added": False,
+                "already_tracked": False,
+                "state": "rejected",
+                "reason": reason,
+                "score": None,
+            }
+        return {
+            "symbol": candidate.symbol,
+            "added": was_newly_added,
+            "already_tracked": not was_newly_added,
+            "state": candidate.state.value,
+            "reason": _last_transition_reason(candidate.notes),
+            "score": candidate.latest_score.score if candidate.latest_score else None,
+        }
+
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
 

@@ -93,17 +93,19 @@
   </section>
 
   <section class="panel full-width">
-    <h2>Score History Lookup <button class="info-btn" data-info="score-history" aria-label="What is this?">i</button></h2>
+    <h2>Ticker Scanner <button class="info-btn" data-info="score-history" aria-label="What is this?">i</button></h2>
+    <p class="hint">Scans any ticker through the broad scanner's structural gates right now and adds it to the live candidate list if it passes -- no need to wait for the next full universe rescan.</p>
     <form id="score-history-form" class="inline-form">
       <input type="text" id="score-history-symbol" placeholder="Symbol (e.g. GME)" autocomplete="off">
-      <button type="submit">Load</button>
+      <button type="submit">Scan &amp; Add</button>
     </form>
+    <div class="status-bar" id="scan-result"></div>
     <div class="table-scroll">
       <table>
         <thead>
           <tr><th>Time</th><th>Score</th><th>Weights Version</th><th>Top Contributing Components (raw score)</th></tr>
         </thead>
-        <tbody id="score-history-body"><tr class="empty-row"><td colspan="4">Enter a symbol above to load its score history</td></tr></tbody>
+        <tbody id="score-history-body"><tr class="empty-row"><td colspan="4">Enter a symbol above to scan it</td></tr></tbody>
       </table>
     </div>
   </section>

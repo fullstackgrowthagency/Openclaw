@@ -542,3 +542,79 @@ def test_candidates_dict_is_thread_safe_under_concurrent_rescan_and_reads():
     assert not writer.is_alive() and not reader.is_alive()
     assert errors == []
     assert len(loop.candidates) == 50
+
+
+# -- scan_and_add_candidate (on-demand single-ticker scan, backs the
+# dashboard's manual "scan a ticker" feature) --------------------------------
+
+def _feed(broker, symbol, price=5.0, cumulative_volume=200_000):
+    broker.feed_snapshot(MarketSnapshot(
+        symbol=symbol, timestamp=datetime.utcnow(), last_price=price, bid=price - 0.01, ask=price + 0.01,
+        bid_size=100, ask_size=100, cumulative_volume=cumulative_volume, vwap=price, high_of_day=price,
+        low_of_day=price, open_price=price,
+    ))
+
+
+def test_scan_and_add_candidate_adds_a_new_passing_symbol():
+    from webull_bot.enums import CandidateState
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _feed(broker, "NEWSYM")
+
+    candidate, reason, was_newly_added = loop.scan_and_add_candidate("newsym")  # lowercase input -- should be uppercased
+    assert reason is None
+    assert was_newly_added is True
+    assert candidate is not None
+    assert candidate.symbol == "NEWSYM"
+    assert candidate.state == CandidateState.WATCHING
+    assert loop.candidates["NEWSYM"] is candidate
+
+
+def test_scan_and_add_candidate_returns_reason_without_adding_on_rejection():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _feed(broker, "TOOEXPENSIVE", price=30.0)  # outside BroadScannerConfig's default $0.40-$25 range
+
+    candidate, reason, was_newly_added = loop.scan_and_add_candidate("TOOEXPENSIVE")
+    assert candidate is None
+    assert reason is not None
+    assert "range" in reason.lower()
+    assert was_newly_added is False
+    assert "TOOEXPENSIVE" not in loop.candidates
+
+
+def test_scan_and_add_candidate_returns_existing_candidate_without_rescanning():
+    from webull_bot.enums import CandidateState
+    from webull_bot.state_machine import new_candidate, transition
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    existing = new_candidate("TEST")
+    transition(existing, CandidateState.WATCHING)
+    transition(existing, CandidateState.HEATING_UP)
+    transition(existing, CandidateState.ARMED)
+    loop.candidates["TEST"] = existing
+    # No snapshot fed for TEST -- if this re-scanned instead of returning
+    # the existing candidate, get_snapshot would raise and reason would be set.
+
+    candidate, reason, was_newly_added = loop.scan_and_add_candidate("TEST")
+    assert candidate is existing
+    assert candidate.state == CandidateState.ARMED
+    assert reason is None
+    assert was_newly_added is False
+
+
+def test_scan_and_add_candidate_reports_unexpected_scanner_errors_without_raising():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    loop.broad_scanner.check_symbol_verbose = lambda symbol: (_ for _ in ()).throw(RuntimeError("boom"))
+
+    candidate, reason, was_newly_added = loop.scan_and_add_candidate("ANY")
+    assert candidate is None
+    assert "ANY" in reason
+    assert was_newly_added is False

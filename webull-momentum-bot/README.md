@@ -108,7 +108,15 @@ What's implemented and tested:
   across all candidates, but clicking a row in the live Candidates panel
   switches it to that exact candidate's own live component breakdown (no
   averaging) -- click the same row again, or the "show all candidates"
-  link, to go back.
+  link, to go back. The **Ticker Scanner** panel runs any entered symbol
+  through `BroadScanner`'s structural gates (price range, free float,
+  volume floor) on demand and adds it to the live candidate list if it
+  passes, instead of waiting for the next full universe rescan (which can
+  take many minutes) -- backed by `TradingLoop.scan_and_add_candidate` and
+  `BroadScanner.check_symbol_verbose`, which explains *why* a rejected
+  symbol was rejected rather than just dropping it silently the way the
+  bulk per-cycle scan path does. An already-tracked symbol is shown as-is
+  (its real current state) rather than being re-scanned.
 - **Full DB persistence** (`db/repository.py`, wired through `TradingLoop`'s
   `on_trade_closed` / `on_order_update` / `on_state_transition` /
   `on_score_computed` hooks and an optional `momentum_event_tracker`

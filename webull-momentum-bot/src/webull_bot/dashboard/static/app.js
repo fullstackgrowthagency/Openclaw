@@ -61,9 +61,11 @@ const COLUMN_INFO = {
       "The historical view only averages rows from the most recent weights_version, since older/newer formula versions have different components and mixing them would be meaningless. If a component you expect to matter (e.g. after a reweight) isn't near the top here, that's a sign the weights or thresholds need another pass.",
   },
   "score-history": {
-    title: "Score History Lookup",
+    title: "Ticker Scanner",
     body:
-      "Look up a specific symbol's recorded Momentum Ignition Score history -- one row per tick it was scored, most recent first, with its top 3 highest-contributing raw sub-scores that tick. Use this to spot-check that a real mover you remember actually scored the way you'd expect under the current weights (e.g. a low-float stock trading heavy volume should show high relative-volume/float-turnover sub-scores).",
+      "Enter any ticker and it's run through the broad scanner's structural gates (price range, free float, volume floor) right now, the same checks a symbol has to clear during the bot's normal periodic universe rescan -- except this happens immediately for one ticker instead of waiting for the next full pass, which can take many minutes.\n\n" +
+      "If it passes, it's added to the live Candidates table above and starts being watched on the bot's normal cadence. If it's rejected, you'll see why (e.g. price out of range, float too large, or all three volume floors missed). If it's already being tracked, its current real state is shown instead of re-scanning it.\n\n" +
+      "Below the result, any recorded Momentum Ignition Score history for that symbol is also shown -- one row per tick it's been scored, most recent first, with its top 3 highest-contributing raw sub-scores that tick. This will be empty right after a fresh scan (scoring only starts once CandidateWatcher ticks it) but fills in on the next poll cycle.",
   },
 };
 
@@ -429,13 +431,42 @@ async function loadScoreHistory(symbol) {
   }
 }
 
+async function scanAndAddTicker(symbol) {
+  const resultBar = document.getElementById("scan-result");
+  if (!symbol) return;
+  const upperSymbol = symbol.toUpperCase();
+  resultBar.innerHTML = `<span class="muted">Scanning ${upperSymbol}...</span>`;
+  try {
+    const res = await fetch(`/api/scan-symbol?symbol=${encodeURIComponent(symbol)}`, { method: "POST" });
+    if (!res.ok) throw new Error(`${res.status}`);
+    const result = await res.json();
+    const statePill = `<span class="state-pill state-${result.state}">${result.state.replace("_", " ")}</span>`;
+    const status = result.added ? "Newly added" : result.already_tracked ? "Already tracked" : "Not added";
+    resultBar.innerHTML = `
+      <div class="stat"><span class="label">Symbol</span><span class="value">${result.symbol}</span></div>
+      <div class="stat"><span class="label">State</span><span class="value">${statePill}</span></div>
+      <div class="stat"><span class="label">Status</span><span class="value">${status}</span></div>
+      <div class="stat"><span class="label">Reason</span><span class="value muted">${result.reason || "--"}</span></div>
+    `;
+    if (result.added) {
+      // Snappier feedback than waiting for the next 5s poll to show the
+      // new candidate in the table above.
+      const rows = await refreshCandidates();
+      await refreshScoreBreakdown(rows);
+    }
+    await loadScoreHistory(symbol);
+  } catch (e) {
+    resultBar.innerHTML = `<span class="neg">Failed to scan ${upperSymbol}: ${e.message}</span>`;
+  }
+}
+
 function initScoreHistoryForm() {
   const form = document.getElementById("score-history-form");
   const input = document.getElementById("score-history-symbol");
   if (!form) return;
   form.addEventListener("submit", (e) => {
     e.preventDefault();
-    loadScoreHistory(input.value.trim());
+    scanAndAddTicker(input.value.trim());
   });
 }
 
