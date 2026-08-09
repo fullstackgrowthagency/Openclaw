@@ -2,17 +2,26 @@
 Tier 1: Broad Scanner.
 
 Continuously screens a symbol universe down to candidates worth watching
-closely. Cheap checks only (price range, float ceiling, basic dollar
-volume) -- expensive per-tick metric work happens in CandidateWatcher.
+closely. Only two things are genuinely *structural* gates here -- price
+range and free float -- both checked cheaply before any candidate object
+gets built. Dollar volume and average volume are deliberately NOT gates:
+a historically-quiet low-float stock suddenly seeing abnormal volume is
+exactly the pattern this bot targets, so a low reading on either must not
+disqualify a symbol. Both are still computed and attached to the Candidate
+as informational context (Candidate.dollar_volume_today/average_daily_volume/
+previous_day_volume) for scoring/diagnostics instead of a pass/fail cutoff.
+Expensive per-tick metric work happens in CandidateWatcher, not here.
 
 The symbol universe itself (e.g. a premarket-gappers or most-active list)
 is supplied by the caller rather than fetched here -- see data/universe.py.
 
 Per-symbol checks run concurrently (a thread pool) rather than one at a
-time: each symbol costs two network round-trips (a broker snapshot + a
-float-data lookup), and with a universe that can now be 100+ symbols
-(data/universe.py's MultiSourceUniverseProvider), sequential checks would
-take long enough to meaningfully lag behind the rescan interval.
+time: each symbol can cost multiple network round-trips (broker snapshot,
+float lookup, average-volume history, resistance bars), and with a
+universe that can now be considerably larger than before (data/universe.py
+now paginates instead of capping at 100 per source, and the price range
+widened from $1-$20 to $0.40-$25), sequential checks would take long
+enough to meaningfully lag behind the rescan interval.
 
 Webull's own sandbox rate limit (confirmed live 2026-08-08: sustained
 ~1 req/s regardless of concurrency -- see brokers/webull/retry.py's module
@@ -23,23 +32,14 @@ threads just queue on the limiter -- but it does let the FMP float lookup
 for one symbol overlap with another symbol's (paced) Webull snapshot call,
 which is where concurrency actually still buys wall-clock time now.
 
-The average-volume filter (`_passes_average_volume_filter`) adds a second
-Webull-paced call (`get_daily_volumes`) for every symbol that clears the
-price/dollar-volume checks above it, which meaningfully adds to per-scan
-wall-clock time -- see runtime/trading_loop.py's TradingLoopConfig for the
-measured per-symbol cost. There is no cap on how many universe symbols get
-scanned (see TradingLoop._rescan_universe), so total scan time scales with
-however many symbols the universe returns that cycle rather than a fixed
-number. This filter is skipped for brokers without real daily-volume
-history (paper/backtest) rather than rejecting everything in those modes.
-
-`_compute_static_resistance_levels` adds a *third* Webull-paced call
-(`get_raw_bars`, fetching intraday bars for volume-profile analysis --
-see metrics/volume_profile.py) for every symbol that passes the filters
-above and gets an actual Candidate built. Unlike the filters above, a
-failure or missing capability here does not reject the candidate -- it
-just falls back to plain running-high-of-day resistance tracking, since
-this only enriches how resistance is tracked, it isn't a discovery gate.
+Call ordering inside `_check_symbol` is deliberately cost-conscious: the
+free-float check (still a hard structural gate) runs *before* the
+average-volume/resistance network calls, so a symbol that's structurally
+disqualified by float size never pays for those extra Webull round-trips.
+`_compute_average_volume_info` and `_compute_static_resistance_levels`
+both fail soft (never reject the candidate) for the same reason neither is
+a gate: a missing/failed lookup just means less informational context on
+the candidate, not a reason to discard it.
 """
 from __future__ import annotations
 
@@ -56,18 +56,18 @@ from ..state_machine import CandidateState, new_candidate, transition
 
 @dataclass
 class BroadScannerConfig:
-    min_price: float = 1.0
-    max_price: float = 20.0
+    # Structural gates: a symbol outside this price range, or with a free
+    # float above the ceiling below, is never a candidate -- see the module
+    # docstring for why dollar volume/average volume are NOT included here.
+    min_price: float = 0.40
+    max_price: float = 25.00
     max_free_float_shares: float = 20_000_000
-    min_dollar_volume: float = 200_000
-    # A stock averaging under this many shares/day is normally too illiquid
-    # for this strategy -- unless its previous trading day alone already
-    # cleared the bar (see _passes_average_volume_filter), which is exactly
-    # the "quiet float just woke up" pattern this bot targets. min_dollar_volume
-    # above is today's-volume-so-far * price and doesn't capture either of
-    # these on its own.
-    min_average_volume: float = 1_000_000
-    avg_volume_lookback_days: int = 10  # matches the relative_volume_10d convention used elsewhere (universe.py, MIS scoring)
+    # How many days of daily-volume history to fetch for average_daily_volume
+    # / previous_day_volume -- purely informational now (see module
+    # docstring), not compared against any threshold here anymore. Matches
+    # the relative_volume_10d convention used elsewhere (universe.py, MIS
+    # scoring).
+    avg_volume_lookback_days: int = 10
     # Volume-profile resistance detection (metrics/volume_profile.py). 780
     # 5-minute bars is ~10 trading days of continuous coverage for a liquid
     # name; for an illiquid one, Webull returns however far back it has to
@@ -105,13 +105,9 @@ class BroadScanner:
         if not (self.config.min_price <= snapshot.last_price <= self.config.max_price):
             return None
 
-        dollar_volume = snapshot.last_price * snapshot.cumulative_volume
-        if dollar_volume < self.config.min_dollar_volume:
-            return None
-
-        if not self._passes_average_volume_filter(symbol):
-            return None
-
+        # Structural gate: free float. Checked before the average-volume/
+        # resistance network calls below so a symbol disqualified here never
+        # pays for those extra round-trips (see module docstring).
         try:
             float_data = self.float_provider.get_float_data(symbol)
         except Exception:
@@ -122,35 +118,39 @@ class BroadScanner:
 
         candidate = new_candidate(symbol, now=snapshot.timestamp)
         candidate.float_data = float_data
+        candidate.dollar_volume_today = snapshot.last_price * snapshot.cumulative_volume
+        average_volume, previous_day_volume = self._compute_average_volume_info(symbol)
+        candidate.average_daily_volume = average_volume
+        candidate.previous_day_volume = previous_day_volume
         candidate.static_resistance_levels = self._compute_static_resistance_levels(symbol)
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate
 
-    def _passes_average_volume_filter(self, symbol: str) -> bool:
-        """Reject a stock trading under min_average_volume shares/day on
-        average, UNLESS the previous trading day alone already cleared that
-        bar -- a previously-quiet float that just had one big volume day is
-        exactly the pattern this bot targets, and shouldn't be excluded
-        just because a longer average hasn't caught up to it yet.
+    def _compute_average_volume_info(self, symbol: str) -> tuple[Optional[float], Optional[float]]:
+        """Returns (average_daily_volume, previous_day_volume) -- purely
+        informational (see module docstring for why this no longer gates
+        discovery). Returns (None, None) rather than raising on any failure
+        or missing capability, same fail-soft contract as
+        _compute_static_resistance_levels below: this enriches a candidate
+        that's already been decided to be valid, it doesn't decide validity.
 
-        Skipped (returns True -- doesn't filter anything out) for brokers
-        with no real daily-volume history: paper/backtest mode has nothing
-        to check this against, so this uses getattr rather than requiring
-        every BrokerClient implementation to support it -- see
-        WebullBrokerClient.get_daily_volumes's docstring for why this isn't
-        part of the BrokerClient interface."""
+        Skipped for brokers with no real daily-volume history (paper/
+        backtest mode) via getattr, same reasoning as
+        WebullBrokerClient.get_daily_volumes's docstring: this isn't part
+        of the BrokerClient interface since there's no real backing data in
+        those modes."""
         get_daily_volumes = getattr(self.broker, "get_daily_volumes", None)
         if get_daily_volumes is None:
-            return True
+            return (None, None)
         try:
             volumes = get_daily_volumes(symbol, self.config.avg_volume_lookback_days)
         except Exception:
-            return False  # consistent with get_snapshot/float_provider above: a failed lookup rejects, it doesn't pass through
+            return (None, None)
         if not volumes:
-            return True
+            return (None, None)
         average_volume = sum(volumes) / len(volumes)
         previous_day_volume = volumes[0]  # most-recent-first, per get_daily_volumes' contract
-        return average_volume >= self.config.min_average_volume or previous_day_volume > self.config.min_average_volume
+        return (average_volume, previous_day_volume)
 
     def _compute_static_resistance_levels(self, symbol: str) -> list[float]:
         """High-volume-node price levels from recent volume-profile
@@ -160,11 +160,12 @@ class BroadScanner:
         this is a one-time enrichment of the candidate, not a per-snapshot
         recomputation.
 
-        Unlike _passes_average_volume_filter, a failure or missing
-        capability here returns an empty list rather than failing the
-        candidate: this only affects how CandidateWatcher.update_resistance
-        merges in static levels on top of the running high of day, it
-        isn't a pass/fail discovery gate, so there's nothing to reject."""
+        A failure or missing capability here returns an empty list rather
+        than failing the candidate: this only affects how
+        CandidateWatcher.update_resistance merges in static levels on top
+        of the running high of day, it isn't a pass/fail discovery gate,
+        so there's nothing to reject -- same fail-soft contract as
+        _compute_average_volume_info above."""
         get_raw_bars = getattr(self.broker, "get_raw_bars", None)
         if get_raw_bars is None:
             return []

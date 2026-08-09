@@ -26,8 +26,12 @@ weights:
 thresholds:
   max_free_float_shares: 20_000_000
   preferred_free_float_shares: 10_000_000
-  min_price: 1.0
-  max_price: 20.0
+  # min_price/max_price here are NOT read by momentum_ignition_score.py --
+  # kept only so this file doesn't carry a stale price range next to the
+  # real ones (scanner/broad_scanner.py, data/universe.py). Update all
+  # three together if this range changes again.
+  min_price: 0.40
+  max_price: 25.00
   min_relative_volume_for_watch: 2.0
   min_relative_volume_for_armed: 5.0
   min_float_velocity_5m_for_armed: 0.03   # 3% of float traded in 5 minutes

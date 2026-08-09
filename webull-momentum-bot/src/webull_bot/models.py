@@ -19,6 +19,7 @@ from .enums import (
     OrderType,
     SignalAction,
     TimeInForce,
+    TradeBlockReason,
 )
 
 
@@ -59,17 +60,45 @@ class MomentumMetrics:
     symbol: str
     timestamp: datetime
 
-    float_turnover: float             # cumulative_volume / free_float
+    float_turnover: float             # cumulative_volume / free_float -- i.e. today's float turnover
     float_velocity_1m: float          # volume in last 1m / free_float
     float_velocity_3m: float
-    float_velocity_5m: float
+    float_velocity_5m: float          # i.e. 5-minute float turnover (volume_last_5m / free_float)
 
-    relative_volume: float            # current volume vs typical volume at this time of day
+    relative_volume: float            # current volume vs typical volume at this time of day (whole session)
+    # Same idea as relative_volume above but windowed: current 1m/5m volume
+    # vs. this symbol's typical 1m/5m volume. Defaults to a neutral 1.0
+    # (via relative_volume()'s own safe-division default) until a real
+    # per-symbol intraday volume-distribution baseline exists to compare
+    # against -- see compute_metrics' typical_volume_1m/5m parameters,
+    # which mirror the already-existing typical_volume_same_time pattern
+    # rather than inventing a new one.
+    relative_volume_1m: float
+    relative_volume_5m: float
     volume_accel_1m_3m: float         # recent 1m volume rate vs preceding 3m average rate
 
-    price_velocity_1m: float          # % price change over window
+    # Raw share volume in each trailing window (not float- or dollar-normalized).
+    volume_1m: float
+    volume_5m: float
+    volume_15m: float
+
+    # Dollar volume in each trailing window, approximated via
+    # dollar_volume_from_avg_price (boundary-price averaging -- see that
+    # function's docstring). Distinct from `dollar_volume` below, which is
+    # today's *cumulative* dollar volume at the current price.
+    dollar_volume_1m: float
+    dollar_volume_5m: float
+    dollar_volume_15m: float
+    # Recent-vs-preceding dollar-volume rate ratio, mirroring
+    # volume_accel_1m_3m's share-based version but in dollars -- genuinely
+    # distinct (not just a rescaled duplicate) because dollar_volume_1m/5m
+    # use different boundary-price averages per window, so this also
+    # reflects price movement between windows, not just volume alone.
+    dollar_volume_accel_1m_3m: float
+
+    price_velocity_1m: float          # % price change over window (i.e. price_change_1m)
     price_velocity_3m: float
-    price_velocity_5m: float
+    price_velocity_5m: float          # i.e. price_change_5m
     price_velocity_15m: float
     price_acceleration: float         # change in price velocity itself
 
@@ -81,7 +110,7 @@ class MomentumMetrics:
 
     spread_abs: float
     spread_pct: float
-    dollar_volume: float
+    dollar_volume: float               # today's cumulative dollar volume (i.e. dollar_volume_today)
     trade_velocity: Optional[float] = None  # trades/sec, once tick data is wired up
 
 
@@ -131,6 +160,33 @@ class Candidate:
     pullback_low: Optional[float] = None        # for breakout-pullback strategy tracking
     state_history: list[tuple[CandidateState, datetime]] = field(default_factory=list)
     notes: str = ""
+
+    # -- structural vs. temporary eligibility ---------------------------------
+    # trade_eligible/block_reasons are ORTHOGONAL to `state` above: state is
+    # driven purely by the Momentum Ignition Score (see candidate_watcher.py),
+    # while these track *tradeability* conditions (spread, liquidity) that can
+    # come and go tick to tick. A candidate can be ARMED (score-qualified) and
+    # still not trade_eligible (e.g. its spread is temporarily too wide) --
+    # that's the whole point of keeping this separate from `state` rather than
+    # forcing a state transition for something that isn't permanent. Recomputed
+    # from scratch every CandidateWatcher.update() call, so a resolved
+    # condition clears itself automatically; nothing needs to explicitly
+    # "un-block" a candidate. Contrast with CandidateState.REJECTED, which is
+    # for genuinely permanent/structural disqualification (float too large,
+    # unsupported security, etc.) and never clears.
+    trade_eligible: bool = True
+    block_reasons: list[TradeBlockReason] = field(default_factory=list)
+
+    # -- informational volume context (see scanner/broad_scanner.py) ----------
+    # None of these gate discovery anymore -- a historically-quiet low-float
+    # stock suddenly seeing abnormal volume is exactly the pattern this bot
+    # targets, so low readings here must not disqualify a candidate. Kept for
+    # scoring/diagnostics: comparing today's/current activity against these
+    # baselines is how "abnormal" gets measured, instead of requiring the
+    # baseline itself to already be high.
+    dollar_volume_today: Optional[float] = None
+    average_daily_volume: Optional[float] = None   # N-day average shares/day, see BroadScannerConfig.avg_volume_lookback_days
+    previous_day_volume: Optional[float] = None     # most recent complete trading day's volume
 
 
 @dataclass

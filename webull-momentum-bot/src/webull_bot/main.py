@@ -75,17 +75,59 @@ def build_trading_loop(
     broad_scanner = BroadScanner(broker, float_provider)
 
     if isinstance(broker, WebullBrokerClient):
-        # Three independent discovery sources, unioned (not a priority
+        # Four independent discovery sources, unioned (not a priority
         # fallback chain) -- each catches a different kind of momentum:
-        # relative volume, float turnover, and raw price change. A symbol
-        # only needs to show up on ONE list; BroadScanner vets every symbol
-        # the same way regardless of which list(s) surfaced it.
+        # relative volume, float turnover, today's raw price change, and
+        # the last 5 minutes' raw price change. A symbol only needs to
+        # show up on ONE list; BroadScanner vets every symbol the same way
+        # regardless of which list(s) surfaced it.
+        #
+        # All four sources set rank_value_field/min_rank_value -- pagination
+        # WITHOUT one was confirmed live (2026-08-09) to be a real problem,
+        # not a theoretical one: each of TURNOVER_RATE/DAY_1/MIN_5 paginated
+        # all the way to max_pages (2000 raw results) and still hadn't
+        # dropped below any meaningful activity level, landing 950-1100+
+        # symbols each (RELATIVE_VOLUME_10D, the one source with a threshold
+        # from the start, landed at a much more reasonable 301). Across 4
+        # sources that's thousands of symbols/cycle -- an actual API-call
+        # explosion at BroadScanner's ~1.25-2.86s/symbol, not the rare
+        # circuit-breaker case max_pages was designed for. With the
+        # thresholds below, the same live check landed at 301/146/195/88
+        # per source and 547 unique symbols combined after dedup -- a real,
+        # substantial increase in coverage over the old fixed-100-per-source
+        # cap (previously ~150 combined), at a real, substantial increase in
+        # per-cycle scan time (see docs/ARCHITECTURE.md). These three
+        # thresholds are first-pass estimates from the live decay curves
+        # observed that day, not backtested -- tune them with real data
+        # before trusting the exact cutoff.
         universe_provider = MultiSourceUniverseProvider([
-            WebullUniverseProvider.from_broker(broker, WebullUniverseConfig(rank_type="RELATIVE_VOLUME_10D")),
-            WebullUniverseProvider.from_broker(broker, WebullUniverseConfig(rank_type="TURNOVER_RATE")),
-            WebullGainersLosersUniverseProvider.from_broker(
-                broker, WebullGainersLosersConfig(rank_type="DAY_1", sort_by="CHANGE_RATIO", direction="DESC")
-            ),
+            WebullUniverseProvider.from_broker(broker, WebullUniverseConfig(
+                # Reuses scoring/weights.yaml's min_relative_volume_for_watch.
+                rank_type="RELATIVE_VOLUME_10D", rank_value_field="relative_volume_10d", min_rank_value=2.0,
+            )),
+            WebullUniverseProvider.from_broker(broker, WebullUniverseConfig(
+                # 0.10 = 10% of float traded that day -- still notably
+                # active, roughly where the live decay curve was by page 3-4.
+                rank_type="TURNOVER_RATE", rank_value_field="turnover_rate", min_rank_value=0.10,
+            )),
+            WebullGainersLosersUniverseProvider.from_broker(broker, WebullGainersLosersConfig(
+                # 0.10 = 10% gain/loss for the full day -- a genuinely
+                # notable full-day move for this bot's target universe.
+                rank_type="DAY_1", sort_by="CHANGE_RATIO", direction="DESC",
+                rank_value_field="change_ratio", min_rank_value=0.10,
+            )),
+            # 4th source: Webull's real, verified 5-minute price-change
+            # ranking -- see WebullGainersLosersUniverseProvider's
+            # docstring for the live confirmation and why there's no
+            # 5-minute *volume* equivalent to pair with it. Threshold is
+            # lower than DAY_1's (0.05 vs 0.10) since the same % move
+            # packed into 5 minutes instead of a full day is a much more
+            # intense signal -- requiring DAY_1's bar here would miss real
+            # ignition moves.
+            WebullGainersLosersUniverseProvider.from_broker(broker, WebullGainersLosersConfig(
+                rank_type="MIN_5", sort_by="CHANGE_RATIO", direction="DESC",
+                rank_value_field="change_ratio", min_rank_value=0.05,
+            )),
         ])
     else:
         universe_provider = StaticUniverseProvider(_PAPER_MODE_PLACEHOLDER_WATCHLIST)

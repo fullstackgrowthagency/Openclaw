@@ -6,6 +6,24 @@ snapshot for symbols already in WATCHING/HEATING_UP/ARMED, and drives the
 corresponding state transitions. Reaching ARMED means "hand this to the
 Trigger Engine for real-time entry monitoring" -- it is not itself a trade
 decision.
+
+Structural vs. temporary disqualification (read before touching `update()`):
+spread and dollar volume used to permanently REJECT a candidate the moment
+either crossed its threshold. That's wrong for this bot's actual target
+pattern -- a low-float name can go from an unwatchable 8% spread to a
+tight, tradeable one within seconds once real volume shows up, and a
+permanent rejection would mean the bot can never come back to a name it
+gave up on one bad tick earlier. These are now tracked as a *temporary*,
+every-tick-recomputed `trade_eligible`/`block_reasons` pair on the
+Candidate instead (see enums.TradeBlockReason) -- state (WATCHING/
+HEATING_UP/ARMED/...) keeps being driven purely by the Momentum Ignition
+Score, completely independent of tradeability, so a candidate can be
+ARMED (score-qualified) while still not trade_eligible (e.g. spread is
+temporarily too wide right now). CandidateState.REJECTED remains reserved
+for genuinely permanent/structural disqualification (free float too
+large, unsupported security, etc. -- see BroadScanner and
+state_machine.py's _ALWAYS_CAN_REJECT), which this module doesn't set at
+all anymore.
 """
 from __future__ import annotations
 
@@ -13,7 +31,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
 
-from ..enums import CandidateState
+from ..enums import CandidateState, TradeBlockReason
 from ..metrics.rolling import MAX_HISTORY_MINUTES, compute_metrics
 from ..models import Candidate, MarketSnapshot
 from ..scoring.momentum_ignition_score import MISConfig, compute_score
@@ -25,6 +43,11 @@ class WatcherConfig:
     heating_up_score_threshold: float = 40.0
     armed_score_threshold: float = 70.0
     cooling_off_ratio: float = 0.5   # drop back a stage if score falls below threshold * this ratio
+    # Both of these gate `trade_eligible`, not `state` -- see module
+    # docstring. A candidate crossing either threshold stays in whatever
+    # state its score already put it in; it just can't be entered until
+    # the condition clears (checked fresh every tick, so it clears itself
+    # automatically -- nothing has to explicitly "un-block" a candidate).
     max_spread_pct: float = 2.0
     min_dollar_volume: float = 500_000
 
@@ -62,9 +85,18 @@ class CandidateWatcher:
         candidate.latest_metrics = metrics
         candidate.latest_score = compute_score(metrics, candidate.float_data, self.mis_config)
 
-        if metrics.spread_pct > self.config.max_spread_pct or metrics.dollar_volume < self.config.min_dollar_volume:
-            transition(candidate, CandidateState.REJECTED, now=snapshot.timestamp, reason="failed liquidity/spread check")
-            return candidate
+        # Recomputed from scratch every tick (not merged with the previous
+        # value) so a resolved condition clears itself the moment it's no
+        # longer true -- see module docstring. This does NOT return early:
+        # the score/state-transition logic below still runs regardless of
+        # trade eligibility, since eligibility and state are orthogonal.
+        block_reasons: list[TradeBlockReason] = []
+        if metrics.spread_pct > self.config.max_spread_pct:
+            block_reasons.append(TradeBlockReason.SPREAD_TOO_WIDE)
+        if metrics.dollar_volume < self.config.min_dollar_volume:
+            block_reasons.append(TradeBlockReason.LOW_LIQUIDITY)
+        candidate.block_reasons = block_reasons
+        candidate.trade_eligible = not block_reasons
 
         score = candidate.latest_score.score
 

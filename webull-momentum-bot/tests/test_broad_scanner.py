@@ -86,13 +86,51 @@ def test_scan_runs_symbols_concurrently_not_sequentially():
 
 def test_scan_filters_price_and_free_float():
     symbols = ["CHEAP", "GOOD", "EXPENSIVE", "BIGFLOAT"]
-    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"CHEAP": 0.50, "GOOD": 5.0, "EXPENSIVE": 25.0, "BIGFLOAT": 5.0})
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"CHEAP": 0.20, "GOOD": 5.0, "EXPENSIVE": 30.0, "BIGFLOAT": 5.0})
     float_provider = _FakeFloatProvider({"BIGFLOAT": 50_000_000})
     scanner = BroadScanner(broker, float_provider)
 
     candidates = scanner.scan(symbols)
     assert [c.symbol for c in candidates] == ["GOOD"]
     assert candidates[0].state == CandidateState.WATCHING
+
+
+def test_scan_accepts_price_at_lower_boundary():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"EDGE": 0.40})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert [c.symbol for c in scanner.scan(["EDGE"])] == ["EDGE"]
+
+
+def test_scan_accepts_price_at_upper_boundary():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"EDGE": 25.00})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert [c.symbol for c in scanner.scan(["EDGE"])] == ["EDGE"]
+
+
+def test_scan_rejects_price_just_below_lower_boundary():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"EDGE": 0.39})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert scanner.scan(["EDGE"]) == []
+
+
+def test_scan_rejects_price_just_above_upper_boundary():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"EDGE": 25.01})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert scanner.scan(["EDGE"]) == []
+
+
+def test_scan_rejects_free_float_above_ceiling():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"BIGFLOAT": 5.0})
+    float_provider = _FakeFloatProvider({"BIGFLOAT": 20_000_001})
+    scanner = BroadScanner(broker, float_provider)
+    assert scanner.scan(["BIGFLOAT"]) == []
+
+
+def test_scan_accepts_free_float_at_ceiling():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ATCEILING": 5.0})
+    float_provider = _FakeFloatProvider({"ATCEILING": 20_000_000})
+    scanner = BroadScanner(broker, float_provider)
+    assert [c.symbol for c in scanner.scan(["ATCEILING"])] == ["ATCEILING"]
 
 
 def test_scan_skips_symbol_on_broker_error_without_failing_others():
@@ -126,21 +164,31 @@ def test_scan_empty_universe_returns_empty_without_error():
     assert scanner.scan([]) == []
 
 
-def test_scan_min_dollar_volume_filter():
+def test_scan_does_not_reject_on_low_dollar_volume():
+    # Dollar volume is informational only now -- see broad_scanner.py's
+    # module docstring for why a low reading must not disqualify a symbol
+    # (a historically-quiet low-float stock waking up is the target pattern).
     class _VolumeAwareBroker(_SlowFakeBroker):
         def get_snapshot(self, symbol):
             volume = 1_000 if symbol == "LOWVOL" else 200_000
             return _snapshot(symbol, price=5.0, cumulative_volume=volume)
 
-    scanner = BroadScanner(_VolumeAwareBroker(0.0, {}), _FakeFloatProvider(), BroadScannerConfig(min_dollar_volume=200_000))
+    scanner = BroadScanner(_VolumeAwareBroker(0.0, {}), _FakeFloatProvider())
     candidates = scanner.scan(["LOWVOL", "HIGHVOL"])
-    assert [c.symbol for c in candidates] == ["HIGHVOL"]
+    assert sorted(c.symbol for c in candidates) == ["HIGHVOL", "LOWVOL"]
+
+
+def test_scan_records_dollar_volume_today_on_the_candidate():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"SYM": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["SYM"])
+    assert candidates[0].dollar_volume_today == 5.0 * 200_000  # _snapshot()'s default cumulative_volume
 
 
 class _DailyVolumeAwareBroker(_SlowFakeBroker):
     """Adds get_daily_volumes -- a capability real WebullBrokerClient has
     but _SlowFakeBroker (standing in for paper/backtest) does not, since
-    _passes_average_volume_filter is meant to be a no-op without it."""
+    _compute_average_volume_info is meant to be a no-op without it."""
 
     def __init__(self, daily_volumes: dict[str, list[float]]):
         super().__init__(delay_seconds=0.0, prices={})
@@ -150,47 +198,42 @@ class _DailyVolumeAwareBroker(_SlowFakeBroker):
         return self.daily_volumes[symbol]
 
 
-def test_scan_rejects_low_average_volume_symbol():
+def test_scan_does_not_reject_low_average_volume_symbol():
+    # Historical average volume is informational only now -- see
+    # broad_scanner.py's module docstring: a historically-quiet low-float
+    # stock is exactly the pattern this bot is meant to catch, not exclude.
     broker = _DailyVolumeAwareBroker({"QUIET": [500_000] * 10})
     scanner = BroadScanner(broker, _FakeFloatProvider())
-    assert scanner.scan(["QUIET"]) == []
+    candidates = scanner.scan(["QUIET"])
+    assert [c.symbol for c in candidates] == ["QUIET"]
+    assert candidates[0].average_daily_volume == 500_000
+    assert candidates[0].previous_day_volume == 500_000
 
 
-def test_scan_keeps_low_average_volume_symbol_with_a_big_previous_day():
-    # Average is well under the 1M bar, but the most recent (index 0,
-    # most-recent-first) day alone cleared it -- the "quiet float just woke
-    # up" exception the filter exists for.
-    broker = _DailyVolumeAwareBroker({"WOKEUP": [1_500_000] + [200_000] * 9})
-    scanner = BroadScanner(broker, _FakeFloatProvider())
-    candidates = scanner.scan(["WOKEUP"])
-    assert [c.symbol for c in candidates] == ["WOKEUP"]
-
-
-def test_scan_keeps_symbol_with_healthy_average_volume():
-    broker = _DailyVolumeAwareBroker({"LIQUID": [2_000_000] * 10})
-    scanner = BroadScanner(broker, _FakeFloatProvider())
-    candidates = scanner.scan(["LIQUID"])
-    assert [c.symbol for c in candidates] == ["LIQUID"]
-
-
-def test_scan_rejects_symbol_on_daily_volume_lookup_failure():
+def test_scan_does_not_reject_symbol_on_daily_volume_lookup_failure():
     class _FlakyDailyVolumeBroker(_DailyVolumeAwareBroker):
         def get_daily_volumes(self, symbol, lookback_days):
             raise RuntimeError("simulated Webull failure")
 
     broker = _FlakyDailyVolumeBroker({})
     scanner = BroadScanner(broker, _FakeFloatProvider())
-    assert scanner.scan(["ANY"]) == []
+    candidates = scanner.scan(["ANY"])
+    # Unlike a real discovery gate, a failed lookup must not reject the
+    # candidate -- it's informational enrichment, not a pass/fail check.
+    assert [c.symbol for c in candidates] == ["ANY"]
+    assert candidates[0].average_daily_volume is None
+    assert candidates[0].previous_day_volume is None
 
 
-def test_scan_average_volume_filter_is_a_no_op_without_get_daily_volumes():
+def test_scan_leaves_average_volume_info_none_without_get_daily_volumes():
     # _SlowFakeBroker has no get_daily_volumes at all -- representative of
-    # PaperBrokerClient, which has no real daily-volume history to check
-    # against. The filter must not reject anything in that case.
+    # PaperBrokerClient, which has no real daily-volume history at all.
     broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ANY": 5.0})
     scanner = BroadScanner(broker, _FakeFloatProvider())
     candidates = scanner.scan(["ANY"])
     assert [c.symbol for c in candidates] == ["ANY"]
+    assert candidates[0].average_daily_volume is None
+    assert candidates[0].previous_day_volume is None
 
 
 class _RawBarsAwareBroker(_SlowFakeBroker):

@@ -47,7 +47,7 @@ What's implemented and tested:
   `WebullBrokerClient.place_order` returning `SUBMITTED` rather than
   `FILLED` (confirmed live) via pending-order polling for both entries and
   exits, rather than assuming synchronous fills like the backtest engine
-  can. Universe discovery in sandbox/live mode combines **three
+  can. Universe discovery in sandbox/live mode combines **four
   independent, verified Webull screener sources** (`data/universe.py`),
   unioned via `MultiSourceUniverseProvider` rather than a priority fallback
   chain -- a symbol only needs to show up on one list, and `BroadScanner`
@@ -55,12 +55,26 @@ What's implemented and tested:
   `get_most_active(rank_type="RELATIVE_VOLUME_10D")` (high relative
   volume), `get_most_active(rank_type="TURNOVER_RATE")` (% of float traded
   today -- directly analogous to the float_turnover metric the MIS already
-  computes), and `get_gainers_losers(rank_type="DAY_1")` (today's top %
-  price movers). There is no cap on how many symbols get scanned per cycle
-  -- every symbol every source returns gets checked, so full-scan duration
-  scales with universe size (measured live at ~150 symbols) rather than
-  being bounded by a fixed number; see `docs/ARCHITECTURE.md` for the
-  measured per-symbol timing this implies.
+  computes), `get_gainers_losers(rank_type="DAY_1")` (today's top % price
+  movers), and `get_gainers_losers(rank_type="MIN_5")` (the last 5
+  minutes' top % price movers -- Webull's real equivalent of "most active
+  last 5 minutes" for price; there is no equivalent 5-minute *volume*
+  ranking anywhere in the API, confirmed live). Each source paginates
+  instead of taking a single fixed-size page, stopping at a data-driven
+  threshold or a generous safety valve rather than an arbitrary result
+  count -- see `docs/ARCHITECTURE.md` for the exact stopping rule. Price
+  range is $0.40-$25.00. There is no cap on how many symbols get scanned
+  per cycle -- every symbol every source returns gets checked, so
+  full-scan duration scales with universe size rather than being bounded
+  by a fixed number; see `docs/ARCHITECTURE.md` for the measured
+  per-symbol timing this implies (noting those numbers predate this wider
+  price range/pagination/4th source and now understate real scan time).
+  Dollar volume and average volume are informational `Candidate` fields,
+  not discovery gates -- see `docs/ARCHITECTURE.md`'s "Structural vs.
+  temporary disqualification" section for why, and for the same
+  distinction applied to `CandidateWatcher`'s spread/liquidity checks
+  (`Candidate.trade_eligible`/`block_reasons`, which no longer permanently
+  reject a candidate either).
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars and builds a volume-at-price

@@ -5,12 +5,13 @@ see scanner/candidate_watcher.py's docstring for the "nearest untested
 ceiling" rationale. update()'s score/state-transition behavior has
 integration coverage via test_trading_loop.py/test_backtest_engine.py;
 this file is specifically about the resistance-merge logic that changed,
-plus update()'s candidate.last_price bookkeeping (dashboard/app.py's
-Price column reads that field).
+candidate.last_price bookkeeping (dashboard/app.py's Price column reads
+that field), and the temporary trade_eligible/block_reasons behavior that
+replaced permanent REJECTED-on-spread/liquidity (see module docstring).
 """
 from datetime import datetime
 
-from webull_bot.enums import CandidateState
+from webull_bot.enums import CandidateState, TradeBlockReason
 from webull_bot.models import Candidate
 from webull_bot.scanner.candidate_watcher import CandidateWatcher
 from webull_bot.state_machine import new_candidate, transition
@@ -22,6 +23,19 @@ def _snapshot(high_of_day: float):
         symbol="TEST", timestamp=datetime.utcnow(), last_price=high_of_day, bid=high_of_day - 0.01,
         ask=high_of_day + 0.01, bid_size=100, ask_size=100, cumulative_volume=100_000, vwap=high_of_day,
         high_of_day=high_of_day, low_of_day=high_of_day, open_price=high_of_day,
+    )
+
+
+def _snapshot_with_conditions(price: float, spread_pct: float, cumulative_volume: float):
+    """Builds a snapshot with a precisely-controlled spread_pct and dollar
+    volume (price * cumulative_volume), for exercising
+    CandidateWatcher.update()'s trade_eligible/block_reasons logic."""
+    from webull_bot.models import MarketSnapshot
+    half_spread = price * (spread_pct / 100.0) / 2.0
+    return MarketSnapshot(
+        symbol="TEST", timestamp=datetime.utcnow(), last_price=price, bid=price - half_spread,
+        ask=price + half_spread, bid_size=100, ask_size=100, cumulative_volume=cumulative_volume,
+        vwap=price, high_of_day=price, low_of_day=price, open_price=price,
     )
 
 
@@ -90,3 +104,77 @@ def test_update_does_not_touch_last_price_once_rejected():
     transition(candidate, CandidateState.REJECTED, reason="test")
     watcher.update(candidate, _snapshot(9.0))
     assert candidate.last_price == 4.0  # update() returns early for REJECTED, nothing should change
+
+
+# -- trade_eligible / block_reasons (temporary, not permanent, blocking) -----
+
+def test_update_blocks_trade_eligibility_on_wide_spread_without_rejecting():
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    transition(candidate, CandidateState.WATCHING)
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=5.0, cumulative_volume=1_000_000)  # > default max_spread_pct=2.0
+    watcher.update(candidate, snapshot)
+    assert candidate.trade_eligible is False
+    assert candidate.block_reasons == [TradeBlockReason.SPREAD_TOO_WIDE]
+    assert candidate.state == CandidateState.WATCHING  # NOT rejected
+
+
+def test_update_blocks_trade_eligibility_on_low_liquidity_without_rejecting():
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    transition(candidate, CandidateState.WATCHING)
+    # price 10 * volume 1_000 = $10,000 dollar volume, well under default min_dollar_volume=500_000
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=0.1, cumulative_volume=1_000)
+    watcher.update(candidate, snapshot)
+    assert candidate.trade_eligible is False
+    assert candidate.block_reasons == [TradeBlockReason.LOW_LIQUIDITY]
+    assert candidate.state == CandidateState.WATCHING  # NOT rejected
+
+
+def test_update_records_both_block_reasons_when_both_conditions_fail():
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    transition(candidate, CandidateState.WATCHING)
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=5.0, cumulative_volume=1_000)
+    watcher.update(candidate, snapshot)
+    assert set(candidate.block_reasons) == {TradeBlockReason.SPREAD_TOO_WIDE, TradeBlockReason.LOW_LIQUIDITY}
+    assert candidate.trade_eligible is False
+
+
+def test_update_trade_eligible_when_spread_and_liquidity_are_both_fine():
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    transition(candidate, CandidateState.WATCHING)
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=0.1, cumulative_volume=1_000_000)
+    watcher.update(candidate, snapshot)
+    assert candidate.trade_eligible is True
+    assert candidate.block_reasons == []
+
+
+def test_update_clears_block_reasons_automatically_once_spread_narrows():
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    transition(candidate, CandidateState.WATCHING)
+
+    watcher.update(candidate, _snapshot_with_conditions(price=10.0, spread_pct=5.0, cumulative_volume=1_000_000))
+    assert candidate.trade_eligible is False
+
+    # Nothing needs to explicitly "un-block" the candidate -- block_reasons
+    # is recomputed fresh every tick, so a resolved condition clears itself.
+    watcher.update(candidate, _snapshot_with_conditions(price=10.0, spread_pct=0.1, cumulative_volume=1_000_000))
+    assert candidate.trade_eligible is True
+    assert candidate.block_reasons == []
+
+
+def test_update_still_runs_score_logic_while_trade_blocked():
+    # trade_eligible/block_reasons must not short-circuit the rest of
+    # update() -- the score/state-transition logic runs regardless, since
+    # eligibility and state are orthogonal (see module docstring).
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    transition(candidate, CandidateState.WATCHING)
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=5.0, cumulative_volume=1_000_000)
+    watcher.update(candidate, snapshot)
+    assert candidate.trade_eligible is False
+    assert candidate.latest_score is not None  # score computation still happened
+    assert candidate.latest_metrics is not None

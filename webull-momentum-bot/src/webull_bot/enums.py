@@ -17,7 +17,18 @@ class CandidateState(str, Enum):
     MANAGING = "managing"
     EXITED = "exited"
     COOLDOWN = "cooldown"
-    REJECTED = "rejected"  # terminal: disqualified before ever arming (spread, liquidity, halt, etc.)
+    REJECTED = "rejected"  # terminal: disqualified before ever arming (float too large, unsupported security, etc.)
+
+
+class TradeBlockReason(str, Enum):
+    """A *temporary* condition currently preventing an otherwise-valid
+    candidate from being trade-eligible -- distinct from CandidateState.REJECTED,
+    which is permanent/structural. Cleared automatically the next time
+    CandidateWatcher.update() finds the underlying condition resolved; see
+    that module's docstring for why spread/liquidity moved from a
+    permanent rejection to this instead."""
+    SPREAD_TOO_WIDE = "spread_too_wide"
+    LOW_LIQUIDITY = "low_liquidity"
 
 
 class OrderSide(str, Enum):

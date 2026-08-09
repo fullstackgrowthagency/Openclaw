@@ -150,7 +150,10 @@ def _metrics() -> MomentumMetrics:
     return MomentumMetrics(
         symbol="TEST", timestamp=datetime(2026, 1, 1, 9, 31), float_turnover=0.1,
         float_velocity_1m=0.01, float_velocity_3m=0.02, float_velocity_5m=0.03,
-        relative_volume=3.0, volume_accel_1m_3m=1.5, price_velocity_1m=1.0, price_velocity_3m=2.0,
+        relative_volume=3.0, relative_volume_1m=1.0, relative_volume_5m=1.0, volume_accel_1m_3m=1.5,
+        volume_1m=0.0, volume_5m=0.0, volume_15m=0.0,
+        dollar_volume_1m=0.0, dollar_volume_5m=0.0, dollar_volume_15m=0.0, dollar_volume_accel_1m_3m=1.0,
+        price_velocity_1m=1.0, price_velocity_3m=2.0,
         price_velocity_5m=3.0, price_velocity_15m=4.0, price_acceleration=1.0, vwap=10.0,
         distance_from_vwap_pct=1.0, distance_from_hod_pct=1.0, distance_from_premarket_high_pct=None,
         distance_from_resistance_pct=None, spread_abs=0.01, spread_pct=0.1, dollar_volume=1_000_000,

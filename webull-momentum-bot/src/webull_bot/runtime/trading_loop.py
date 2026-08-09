@@ -56,7 +56,7 @@ class TradingLoopConfig:
     # BroadScanner's concurrency -- see brokers/webull/retry.py's module
     # docstring for the live discovery process. Measured live: ~1.25s/symbol
     # with just get_snapshot, ~2.86s/symbol once
-    # BroadScanner._passes_average_volume_filter added a second Webull call
+    # BroadScanner._compute_average_volume_info added a second Webull call
     # per symbol (scanner/broad_scanner.py) -- both above the limiter's bare
     # interval since occasional retries add real time on top.
     #
@@ -69,13 +69,18 @@ class TradingLoopConfig:
     # removed rather than set to some very large number, since keeping a
     # cap at all reintroduces the risk it existed to prevent).
     #
-    # The real cost: full scan duration now scales with how many symbols
-    # the 3 sources return that cycle instead of being bounded by a fixed
-    # number. A live check right now (2026-08-09) found 149 unique symbols
-    # in the combined universe; at the measured ~2.86s/symbol that's
-    # roughly 7 minutes for a full pass, not the ~2 minutes a 45-symbol cap
-    # took. This interval is therefore a floor ("don't start a new scan
-    # sooner than this after the last one *started*"), not a target
+    # The real cost: full scan duration scales with how many symbols the
+    # universe returns that cycle instead of being bounded by a fixed
+    # number. A live check on 2026-08-09 found 149 unique symbols in the
+    # (then 3-source, $1-$20, single-page-per-source) combined universe;
+    # at the measured ~2.86s/symbol that was roughly 7 minutes for a full
+    # pass. The universe is now wider on three more axes -- a 4th discovery
+    # source, a $0.40-$25 price range, and unbounded pagination per source
+    # (see data/universe.py) -- so a fresh symbol and timing count is
+    # needed rather than assuming these numbers still hold; they're kept
+    # here as the last *measured* baseline, not a current estimate. This
+    # interval is therefore a floor ("don't start a new scan sooner than
+    # this after the last one *started*"), not a target
     # duration -- in practice a scan will usually run longer than this
     # interval, so TradingLoop.run_once ends up starting the next scan
     # immediately after the previous one finishes, back-to-back, rather

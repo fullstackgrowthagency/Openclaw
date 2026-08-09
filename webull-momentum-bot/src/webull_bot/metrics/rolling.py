@@ -2,12 +2,16 @@
 Turns a rolling window of MarketSnapshots (+ free float) into a
 MomentumMetrics record, using the pure functions in calculations.py.
 
-`typical_volume_same_time` (RVOL baseline) and `resistance_level` are not
-computed here on purpose -- RVOL needs a historical intraday volume profile
-per symbol (future work once enough MarketObservation history has been
-collected in the DB), and resistance is a candidate-level concept owned by
-the scanner. Both are accepted as optional inputs so callers can supply them
-once those pieces exist, without this module needing to change.
+`typical_volume_same_time`/`typical_volume_1m`/`typical_volume_5m` (RVOL
+baselines) and `resistance_level` are not computed here on purpose -- RVOL
+needs a historical intraday volume profile per symbol (future work once
+enough MarketObservation history has been collected in the DB), and
+resistance is a candidate-level concept owned by the scanner. All three are
+accepted as optional inputs so callers can supply them once those pieces
+exist, without this module needing to change; until then they default to
+None and the corresponding relative-volume fields fall back to a neutral
+1.0 (see relative_volume()'s own safe-division default), same as the
+existing whole-session relative_volume already does.
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from .calculations import (
     bid_ask_spread,
     distance_pct,
     dollar_volume,
+    dollar_volume_from_avg_price,
     float_velocity,
     price_acceleration,
     price_velocity_pct,
@@ -46,6 +51,8 @@ def compute_metrics(
     history: list[MarketSnapshot],
     *,
     typical_volume_same_time: Optional[float] = None,
+    typical_volume_1m: Optional[float] = None,
+    typical_volume_5m: Optional[float] = None,
     resistance_level: Optional[float] = None,
 ) -> MomentumMetrics:
     if not history:
@@ -62,6 +69,7 @@ def compute_metrics(
     vol_1m = _volume_since(w1, latest)
     vol_3m = _volume_since(w3, latest)
     vol_5m = _volume_since(w5, latest)
+    vol_15m = _volume_since(w15, latest)
 
     free_float = free_float_shares or 0.0
     float_velocity_1m = float_velocity(vol_1m, free_float)
@@ -83,7 +91,25 @@ def compute_metrics(
     )
     price_accel = price_acceleration(price_velocity_1m, prior_segment_velocity)
 
+    # Dollar volume per window, using each window's own boundary-price
+    # average (dollar_volume_from_avg_price) rather than a single current
+    # price -- see that function's docstring for why this matters for
+    # dollar_volume_accel_1m_3m below to be a genuinely distinct signal
+    # from volume_accel_1m_3m, not just a rescaled duplicate of it.
+    dollar_vol_1m = dollar_volume_from_avg_price(vol_1m, w1[0].last_price, latest.last_price) if w1 else 0.0
+    dollar_vol_5m = dollar_volume_from_avg_price(vol_5m, w5[0].last_price, latest.last_price) if w5 else 0.0
+    dollar_vol_15m = dollar_volume_from_avg_price(vol_15m, w15[0].last_price, latest.last_price) if w15 else 0.0
+
+    preceding_dollar_volume = (
+        dollar_volume_from_avg_price(preceding_volume, w3[0].last_price, w1[0].last_price) if (w1 and w3) else 0.0
+    )
+    dollar_recent_rate = dollar_vol_1m
+    dollar_preceding_rate = preceding_dollar_volume / 2.0
+    dollar_vol_accel = volume_acceleration(dollar_recent_rate, dollar_preceding_rate)
+
     rvol = relative_volume(latest.cumulative_volume, typical_volume_same_time or 0.0)
+    rvol_1m = relative_volume(vol_1m, typical_volume_1m or 0.0)
+    rvol_5m = relative_volume(vol_5m, typical_volume_5m or 0.0)
 
     spread_abs, spread_pct = bid_ask_spread(latest.bid, latest.ask)
 
@@ -95,7 +121,16 @@ def compute_metrics(
         float_velocity_3m=float_velocity_3m,
         float_velocity_5m=float_velocity_5m,
         relative_volume=rvol,
+        relative_volume_1m=rvol_1m,
+        relative_volume_5m=rvol_5m,
         volume_accel_1m_3m=vol_accel,
+        volume_1m=vol_1m,
+        volume_5m=vol_5m,
+        volume_15m=vol_15m,
+        dollar_volume_1m=dollar_vol_1m,
+        dollar_volume_5m=dollar_vol_5m,
+        dollar_volume_15m=dollar_vol_15m,
+        dollar_volume_accel_1m_3m=dollar_vol_accel,
         price_velocity_1m=price_velocity_1m,
         price_velocity_3m=price_velocity_3m,
         price_velocity_5m=price_velocity_5m,

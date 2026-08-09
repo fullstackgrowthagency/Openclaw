@@ -3,12 +3,13 @@
 ## Data flow
 
 ```
-BroadScanner            (cheap filters: price range, float ceiling, $ volume)
-      |
+BroadScanner            (structural gates only: price range, float ceiling --
+      |                   dollar volume/average volume are informational, not gates)
       v  Candidate(DISCOVERED -> WATCHING)
 CandidateWatcher         (recomputes MomentumMetrics + Momentum Ignition
       |                   Score on every snapshot; drives WATCHING ->
-      |                   HEATING_UP -> ARMED; can REJECT on liquidity fail)
+      |                   HEATING_UP -> ARMED; spread/liquidity failures set
+      |                   a temporary trade_eligible=False, not REJECTED)
       v
 TriggerEngine             (only looks at ARMED candidates; asks each
       |                    Strategy for an entry Signal on real-time data)
@@ -66,7 +67,7 @@ in place, and the broker returns a fresh object on every call -- refetching
 every tick would silently discard the running trailing-stop/MFE/MAE state
 computed on prior ticks.
 
-`data/universe.py` feeds the scanner from three independent, live-verified
+`data/universe.py` feeds the scanner from **four** independent, live-verified
 Webull screener sources, combined by `MultiSourceUniverseProvider`:
 
 - `WebullUniverseProvider` with `rank_type="RELATIVE_VOLUME_10D"` -- the
@@ -82,18 +83,76 @@ Webull screener sources, combined by `MultiSourceUniverseProvider`:
   a **time period** (`DAY_1`, `MIN_5`, `WEEK_52`, etc.), unrelated to
   `get_most_active`'s `rank_type` despite the shared parameter name --
   confirmed against the live SDK, not assumed from the naming.
+- The same `WebullGainersLosersUniverseProvider` class again with
+  `rank_type="MIN_5"` -- confirmed live (2026-08-09) this is a genuine,
+  distinct 5-minute price-change ranking (not just DAY_1 recomputed over a
+  shorter window: a real pull surfaced names up double-digit % in just the
+  last 5 minutes that weren't yet among today's overall leaders). This is
+  Webull's real equivalent of "most active last 5 minutes" for *price*.
+  Also confirmed live: there is **no** equivalent 5-minute *volume*
+  ranking anywhere in the API -- `get_gainers_losers`' `volume` field is
+  always the whole day's cumulative volume regardless of `rank_type`, and
+  `get_most_active` has no time-windowed `rank_type` at all. A synthetic
+  volume-based 5-minute signal is computed per-candidate instead, once a
+  symbol is already being watched (`MomentumMetrics.volume_5m`/
+  `float_velocity_5m` in `metrics/rolling.py`), rather than invented from
+  a screener endpoint that doesn't exist.
+
+Each source **paginates** rather than taking a single fixed-size page
+(confirmed live: both endpoints accept `page_index`/`page_size` and return
+a `has_more` flag, with non-overlapping pages). Blindly paginating to
+`has_more=False` can go very deep -- confirmed live still `True` 1000+ rows
+into `RELATIVE_VOLUME_10D` -- so pagination stops at whichever comes first:
+an empty page, `has_more=False`, a value-based rank threshold (results are
+sorted descending by the ranking field, so a page dropping below the
+threshold means every later page is even less relevant), or a `max_pages`
+safety valve -- see `data/universe.py`'s `_paginate_screener`/
+`_page_below_rank_threshold`.
+
+**The value-based threshold isn't optional in practice -- confirmed live
+(2026-08-09) that skipping it is a real API-call explosion, not a
+theoretical one.** `RELATIVE_VOLUME_10D` shipped with one from the start
+(reusing `scoring/weights.yaml`'s `min_relative_volume_for_watch: 2.0`)
+and landed at a reasonable 301 symbols. `TURNOVER_RATE`/`DAY_1`/`MIN_5`
+initially shipped without one, relying on `max_pages` as the only
+backstop -- live-tested, each paginated all the way to `max_pages` (2000
+raw results) and still hadn't dropped below any meaningful activity
+level, landing 950-1100+ symbols *each*. That's `max_pages` firing as the
+*normal* operating point instead of the rare circuit-breaker it was
+designed to be -- across 4 sources, thousands of symbols/cycle at
+`BroadScanner`'s ~1.25-2.86s/symbol per Webull call is a real problem, not
+a rounding error. Fixed by adding first-pass calibrated thresholds to all
+three (`main.py`'s `build_trading_loop`): `turnover_rate >= 0.10` (10% of
+float traded that day), `change_ratio >= 0.10` for `DAY_1` (10% full-day
+move), `change_ratio >= 0.05` for `MIN_5` (a lower bar than DAY_1
+deliberately -- the same % move packed into 5 minutes instead of a full
+day is a much more intense signal, so requiring DAY_1's bar there would
+miss real ignition moves). Re-verified live with these in place: 301/146/195/88
+per source, **547 unique symbols combined** after dedup -- a real,
+substantial increase over the old fixed-100-per-source cap (~150
+combined previously), at a real, substantial increase in per-cycle scan
+time, not an explosion. These three new thresholds are first-pass
+estimates from the live decay curves observed that day, not backtested --
+treat them the same as `scoring/weights.yaml`'s "unvalidated starting
+point" framing, not settled values.
 
 `MultiSourceUniverseProvider` is a plain union (every source queried every
 cycle, not a priority fallback chain) with per-source failure isolation --
-one source raising is logged and skipped rather than aborting the scan. A
-symbol only needs to appear on one list to reach `BroadScanner`, which
-vets every symbol identically (price, dollar volume, average volume, real
-free float via FMP) regardless of which list(s) surfaced it.
-`TradingLoop._rescan_universe` scans **every** symbol this returns --
-there is deliberately no truncation, so a mover can never be silently
-dropped for appearing past some cutoff. (An earlier version of this class
-interleaved results round-robin across sources specifically to stop
-whichever source came first from filling a truncated cap before the
+one source raising is logged and skipped rather than aborting the scan, so
+a broken/rate-limited source never destroys results already gathered from
+the others. A symbol only needs to appear on one list to reach
+`BroadScanner`, which vets every symbol identically regardless of which
+list(s) surfaced it -- **but "vets" now means only price range and real
+free float via FMP are structural pass/fail gates.** Dollar volume and
+average volume used to also gate discovery; they're deliberately
+informational only now (see `scanner/broad_scanner.py`'s module docstring)
+since a historically-quiet low-float stock suddenly seeing abnormal volume
+is exactly the pattern this bot is meant to catch, not exclude for having
+been quiet. `TradingLoop._rescan_universe` scans **every** symbol this
+returns -- there is deliberately no truncation, so a mover can never be
+silently dropped for appearing past some cutoff. (An earlier version of
+this class interleaved results round-robin across sources specifically to
+stop whichever source came first from filling a truncated cap before the
 others contributed anything; once truncation was removed, that
 interleaving had nothing left to protect against and was simplified away
 -- see `data/universe.py`'s `MultiSourceUniverseProvider` docstring.)
@@ -127,66 +186,69 @@ last:**
    recovered by the now-paced retry), completing in 124.9s (~1.25s/symbol
    including retry overhead, vs. the limiter's own 1.0s interval).
 
-`BroadScanner` issues one paced Webull call per universe symbol (two once
-`_passes_average_volume_filter` below is involved), so scanning N symbols
-takes roughly `N * (per-symbol cost)` of Webull-bound time no matter how
-many worker threads are checking symbols concurrently -- more workers only
-let FMP float lookups overlap with that, they can't make Webull itself go
-faster. There is no cap on N (see `TradingLoop._rescan_universe` above):
-every symbol the multi-source universe returns gets scanned, so full-scan
-duration scales with however large that universe is on a given cycle
-(measured at 149 unique symbols on 2026-08-09) rather than being bounded
-by a fixed number. `TradingLoopConfig.universe_rescan_interval_seconds`
-is sized as a floor between scan *starts*, not a target duration, given
-that a full scan now routinely takes longer than any reasonable interval
--- see that config's comments for the measured numbers.
+`BroadScanner` issues one paced Webull call per universe symbol that
+clears the structural price gate (a second once
+`_compute_average_volume_info` below runs, a third for resistance
+analysis), so scanning N symbols takes roughly `N * (per-symbol cost)` of
+Webull-bound time no matter how many worker threads are checking symbols
+concurrently -- more workers only let FMP float lookups overlap with
+that, they can't make Webull itself go faster. There is no cap on N (see
+`TradingLoop._rescan_universe` above): every symbol the multi-source
+universe returns gets scanned, so full-scan duration scales with however
+large that universe is on a given cycle rather than being bounded by a
+fixed number. `TradingLoopConfig.universe_rescan_interval_seconds` is
+sized as a floor between scan *starts*, not a target duration, given that
+a full scan now routinely takes longer than any reasonable interval --
+see that config's comments for the measured numbers (and their caveat:
+they predate the wider price range, pagination, and 4th source, so they
+understate current scan time).
 
-**Average-volume filter** (`BroadScanner._passes_average_volume_filter`):
-excludes a symbol trading under `min_average_volume` (1,000,000) shares/day
-on average, unless its previous trading day alone already cleared that bar
--- a previously-quiet float that just had one big volume day is exactly
-the pattern this bot targets, and shouldn't be excluded just because a
-longer average hasn't caught up to it. Backed by
-`WebullBrokerClient.get_daily_volumes`, which deliberately does **not**
-reuse `get_bars()`/`_snapshots_from_bars()`: that method accumulates
-volume across every fetched bar for intraday VWAP, which is correct for
-minute bars within one session but wrong for daily bars spanning multiple
-days (it would sum several days' volume together instead of reporting
-each day's own total). Confirmed live (2026-08-09) against raw daily bars
-that each day's `volume` field is already a clean, distinct per-day total,
-most-recent-first.
+**Average-volume info is now purely informational, not a filter**
+(`BroadScanner._compute_average_volume_info`): it used to exclude a
+symbol trading under 1,000,000 shares/day on average unless its previous
+trading day alone cleared that bar. That hard rejection is gone --
+`Candidate.average_daily_volume`/`previous_day_volume` are populated for
+scoring/diagnostics, but a low reading no longer disqualifies a symbol,
+since a previously-quiet float suddenly seeing abnormal volume is exactly
+the pattern this bot targets, not a reason to exclude it. Same story for
+dollar volume: `Candidate.dollar_volume_today` is populated but doesn't
+gate discovery either (see `scanner/broad_scanner.py`'s module
+docstring). Both calls fail soft (`None` on any error or missing broker
+capability) rather than rejecting the candidate, since neither is a
+pass/fail check anymore.
 
-Two live findings from that verification are worth flagging:
-- **Sandbox historical data quality varies by symbol liquidity.** Mega-caps
-  (AAPL, TSLA, NVDA) returned consistent, plausible volume across all 10
-  days requested. Every low-float/micro-cap symbol tested (the bot's actual
-  target universe) returned a real-looking value for only the *most
-  recent* day, with the other 9 showing near-zero placeholder-looking
-  figures. This means the "average" side of the filter is not meaningfully
-  exercised in sandbox testing for this bot's real target names -- it
-  effectively falls back to the previous-day-volume exception path almost
-  always. This appears to be a sandbox data-population limitation, not a
-  code bug, and should be re-verified once trading against real production
-  data.
-- **This filter roughly doubled Webull-bound scan time, not exactly 2x**:
-  a live 60-symbol re-measurement came back at 171.9s (~2.86s/symbol) vs.
-  the single-call figure of ~1.25s/symbol -- more than double, since
-  occasional retries apply per call, not per symbol. Combined with there
-  being no cap on universe size, a full scan of the 149 symbols measured
-  live on 2026-08-09 works out to roughly 7 minutes, not the ~2 minutes a
-  fixed 100-symbol cap took previously. That's an explicit tradeoff: full
-  coverage of every list, at the cost of a much longer gap between when a
-  given symbol gets (re-)checked -- see `TradingLoopConfig`'s
-  `universe_rescan_interval_seconds` comments for how that's handled.
+The average-volume lookup is backed by `WebullBrokerClient.get_daily_volumes`,
+which deliberately does **not** reuse `get_bars()`/`_snapshots_from_bars()`:
+that method accumulates volume across every fetched bar for intraday
+VWAP, which is correct for minute bars within one session but wrong for
+daily bars spanning multiple days (it would sum several days' volume
+together instead of reporting each day's own total). Confirmed live
+(2026-08-09) against raw daily bars that each day's `volume` field is
+already a clean, distinct per-day total, most-recent-first.
 
-Separately (found during this same live testing, unrelated to the filter
-itself): the configured FMP API key was returning `429 Limit Reach` on
-every endpoint tested, meaning `FloatDataProvider.get_float_data` fails
-for every symbol and `BroadScanner` silently rejects everything at that
-step (`_check_symbol`'s `except Exception: return None`) regardless of any
-other filter. Until that plan/quota issue is resolved, **no candidates
-will be discovered at all**, independent of price, volume, or float
-settings.
+A live finding from that verification is worth flagging regardless of the
+filter being gone, since it still describes the data this now feeds into
+scoring: **sandbox historical data quality varies by symbol liquidity.**
+Mega-caps (AAPL, TSLA, NVDA) returned consistent, plausible volume across
+all 10 days requested. Every low-float/micro-cap symbol tested (the bot's
+actual target universe) returned a real-looking value for only the *most
+recent* day, with the other 9 showing near-zero placeholder-looking
+figures. This means `average_daily_volume` may not be meaningful in
+sandbox testing for this bot's real target names -- `previous_day_volume`
+is the reliable one of the two there. This appears to be a sandbox
+data-population limitation, not a code bug, and should be re-verified
+once trading against real production data.
+
+Separately (found during this same live testing, unrelated to the
+average-volume work itself): the configured FMP API key was returning
+`429 Limit Reach` on every endpoint tested, meaning `FloatDataProvider.get_float_data`
+fails for every symbol and `BroadScanner` silently excludes everything at
+that step (`_check_symbol`'s `except Exception: return None`) regardless
+of any other condition -- free float remains a hard structural gate, so a
+failed float lookup still means no candidate, even though volume/dollar
+volume no longer work that way. Until that plan/quota issue is resolved,
+**no candidates will be discovered at all**, independent of price or
+volume.
 
 `PaperBrokerClient` has no live screener of its own, so paper mode falls
 back to `StaticUniverseProvider` with a placeholder watchlist -- paper mode
@@ -282,14 +344,13 @@ the plain running high -- this whole mechanism's entire prior behavior --
 when no static level remains above it, or when `static_resistance_levels`
 is empty (paper/backtest mode, or a failed/unsupported lookup; see below).
 
-**Cost and failure handling, deliberately different from the
-average-volume filter**: `_compute_static_resistance_levels` is a third
-Webull-paced call, but only for symbols that already cleared every
-earlier filter and became an actual `Candidate` -- its cost scales with
-how many candidates get discovered per scan, not with universe size, unlike
-the price/dollar-volume/average-volume checks that run against every
+**Cost and failure handling**: `_compute_static_resistance_levels` is a
+third Webull-paced call, but only for symbols that already cleared the
+structural price/float gates and became an actual `Candidate` -- its cost
+scales with how many candidates get discovered per scan, not with
+universe size, unlike the price/float checks that run against every
 universe symbol. A failure or an unsupported broker (`getattr`, same
-pattern as `_passes_average_volume_filter`) returns an empty list rather
+pattern as `_compute_average_volume_info`) returns an empty list rather
 than rejecting the candidate: this only changes how resistance is
 *tracked*, it isn't a discovery gate, so there's nothing to fail closed on.
 
@@ -309,6 +370,50 @@ enforces some rolling quota tracked server-side, independent of any local
 pacing. Re-verify the full pipeline live once quota recovers (or during
 real market hours on the VPS) before trusting its output blindly.
 
+## Structural vs. temporary disqualification
+
+Two conceptually different kinds of "this candidate isn't tradeable right
+now" exist, and it matters which one a given check uses:
+
+- **Structural / permanent** -- `CandidateState.REJECTED`. Reserved for
+  conditions that can't meaningfully change for this candidate: free float
+  above the ceiling (`BroadScanner`), or (structurally) an unsupported
+  security type. Terminal -- `state_machine.py`'s `_ALLOWED_TRANSITIONS`
+  has nothing leaving `REJECTED`, and `CandidateWatcher` never revisits a
+  rejected candidate (`update()` returns immediately for one).
+- **Temporary / tradeability-only** -- `Candidate.trade_eligible` +
+  `Candidate.block_reasons` (a list of `enums.TradeBlockReason`).
+  `CandidateWatcher.update()` recomputes both from scratch on *every*
+  tick, so a resolved condition clears itself automatically -- nothing
+  ever needs to explicitly "un-block" a candidate. Currently drives two
+  reasons: `SPREAD_TOO_WIDE` (`spread_pct > WatcherConfig.max_spread_pct`)
+  and `LOW_LIQUIDITY` (`dollar_volume < WatcherConfig.min_dollar_volume`).
+
+**These used to both funnel into `REJECTED`.** That was wrong for this
+bot's actual target pattern: a low-float name can go from an unwatchable
+8% spread to a tight, tradeable one within seconds once real volume shows
+up, and a permanent rejection meant the bot could never reconsider a name
+it gave up on from one bad tick. The fix keeps `state`
+(WATCHING/HEATING_UP/ARMED/...) driven **purely** by the Momentum
+Ignition Score, completely independent of `trade_eligible` -- a candidate
+can be ARMED (score-qualified) while still not `trade_eligible` (spread
+temporarily too wide right now). Nothing currently reads `trade_eligible`
+before generating an entry `Signal` (`TriggerEngine`/`Strategy` aren't
+touched by this), but this doesn't reopen a safety gap:
+`RiskEngine.evaluate()` independently re-checks spread (`max_spread_pct`)
+and dollar volume (`min_dollar_volume`) against a fresh snapshot at the
+actual order-submission gate, with its own separate config -- see
+`risk/risk_engine.py`. `trade_eligible` is therefore visibility/diagnostics
+plus a future cheap short-circuit, not the only thing standing between a
+wide-spread name and an order.
+
+The same "temporary, not permanent" philosophy applies to `BroadScanner`'s
+discovery-time checks -- see the "Average-volume info is now purely
+informational" section above: dollar volume and average volume are
+`Candidate` fields for scoring context, not pass/fail gates, for exactly
+the same reason (a stock waking up from quiet is the target, not a
+disqualifier).
+
 ## Momentum Ignition Score
 
 `scoring/weights.yaml` holds component weights and normalization
@@ -317,6 +422,25 @@ normalizes weights to sum to 1.0 at load time and produces a 0-100 score
 plus its component breakdown (`MomentumScoreComponents`) so individual
 factors can be analyzed later. Nothing about the formula is assumed
 correct -- it exists to be replaced once backtest/paper data says otherwise.
+
+`metrics/rolling.py`'s `compute_metrics` tracks more raw windowed data
+than the current score formula consumes -- `volume_1m/5m/15m`,
+`dollar_volume_1m/5m/15m`, `dollar_volume_accel_1m_3m`, and
+`relative_volume_1m/5m` -- deliberately ahead of a v2 score formula that
+will actually weight them, kept modular (pure functions in
+`metrics/calculations.py`, plain fields on `MomentumMetrics`) specifically
+so that formula work doesn't require touching this module again.
+`dollar_volume_1m/5m/15m` use `dollar_volume_from_avg_price`, which
+averages each window's own boundary prices rather than one current price
+across all windows -- this is what makes `dollar_volume_accel_1m_3m` a
+genuinely distinct signal from `volume_accel_1m_3m` (a rescaled duplicate
+would result from using a single price, since it would cancel out of the
+ratio). `relative_volume_1m/5m` mirror the existing whole-session
+`relative_volume`'s already-established pattern: they accept an optional
+per-symbol baseline (`typical_volume_1m/5m`) and fall back to a neutral
+1.0 when none is supplied, since no per-symbol intraday volume-distribution
+baseline exists yet to compare against -- same honest gap as
+`relative_volume`'s own `typical_volume_same_time`, not a new one.
 
 ## Data collection
 

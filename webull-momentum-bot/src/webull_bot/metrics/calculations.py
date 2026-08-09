@@ -83,6 +83,21 @@ def dollar_volume(price: float, volume: float) -> float:
     return price * volume
 
 
+def dollar_volume_from_avg_price(volume: float, price_start: float, price_end: float) -> float:
+    """Dollar volume over a window, approximated using the average of the
+    window's boundary prices (its start and end snapshot prices) -- the
+    best estimate available given only boundary-snapshot granularity, not
+    true tick-level VWAP for the window. Deliberately distinct from
+    dollar_volume() above (which uses a single current price): using two
+    different boundary prices means a dollar-volume comparison across
+    windows can differ from a plain share-volume comparison when price
+    itself moved between windows, which is the whole point of tracking
+    dollar-volume acceleration as separate from share-volume acceleration
+    -- see metrics/rolling.py's compute_metrics."""
+    avg_price = (price_start + price_end) / 2.0
+    return volume * avg_price
+
+
 def trade_velocity(trade_count: int, seconds: float) -> float:
     """Trades per second over a short window -- requires tick/trade data."""
     return safe_div(trade_count, seconds)
