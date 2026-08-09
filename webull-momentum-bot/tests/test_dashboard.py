@@ -132,6 +132,49 @@ def test_candidates_exposes_the_reason_for_the_current_state(loop, client):
     assert rows[0]["reason"] == "failed liquidity/spread check"
 
 
+def test_candidates_exposes_component_breakdown_when_scored(loop, client):
+    # Feeds dashboard/static/app.js's click-a-candidate-row -> show its live
+    # score breakdown feature -- see /api/mis-weights for the weights this
+    # pairs with.
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    candidate.latest_score = MomentumScore(
+        symbol="TEST", timestamp=datetime.utcnow(), score=61.5, weights_version="v2-test",
+        components=MomentumScoreComponents(
+            float_score=10, float_velocity_score=20, relative_volume_score=90, volume_acceleration_score=10,
+            price_acceleration_score=10, breakout_proximity_score=10, trend_quality_score=10, liquidity_score=10,
+            float_turnover_score=10, short_term_relative_volume_score=10, dollar_volume_acceleration_score=10,
+        ),
+    )
+    loop.candidates["TEST"] = candidate
+
+    rows = client.get("/api/candidates").json()
+    assert rows[0]["components"]["relative_volume_score"] == 90
+    assert rows[0]["score_weights_version"] == "v2-test"
+
+
+def test_candidates_components_is_none_before_first_score(loop, client):
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    loop.candidates["TEST"] = candidate
+
+    rows = client.get("/api/candidates").json()
+    assert rows[0]["components"] is None
+    assert rows[0]["score_weights_version"] is None
+
+
+def test_mis_weights_endpoint_returns_current_config(client):
+    from webull_bot.scoring.momentum_ignition_score import MISConfig
+
+    resp = client.get("/api/mis-weights")
+    assert resp.status_code == 200
+    body = resp.json()
+    config = MISConfig.load()
+    assert body["weights_version"] == config.version
+    assert body["weights"]["relative_volume_score"] == pytest.approx(config.weights["relative_volume_score"])
+    assert abs(sum(body["weights"].values()) - 1.0) < 1e-9
+
+
 def test_positions_includes_unrealized_pnl_from_live_snapshot(loop, client):
     loop.broker.feed_snapshot(
         MarketSnapshot(

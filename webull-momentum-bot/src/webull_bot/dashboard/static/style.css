@@ -154,6 +154,39 @@ th {
   text-align: center;
 }
 
+.hint {
+  margin: -6px 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.candidate-row {
+  cursor: pointer;
+}
+
+.candidate-row:hover {
+  background: #182230;
+}
+
+.candidate-row.selected-row {
+  background: #1e2f4a;
+}
+
+.link-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.link-btn:hover {
+  color: var(--text);
+}
+
 .inline-form {
   display: flex;
   gap: 8px;

@@ -98,7 +98,11 @@ What's implemented and tested:
   panels (trade history, win rate/P&L performance, and a Momentum Ignition
   Score weighting breakdown + per-symbol score history lookup for
   sanity-checking `scoring/weights.yaml` against real data) read from the
-  database.
+  database. The score breakdown panel defaults to a historical average
+  across all candidates, but clicking a row in the live Candidates panel
+  switches it to that exact candidate's own live component breakdown (no
+  averaging) -- click the same row again, or the "show all candidates"
+  link, to go back.
 - **Full DB persistence** (`db/repository.py`, wired through `TradingLoop`'s
   `on_trade_closed` / `on_order_update` / `on_state_transition` /
   `on_score_computed` hooks and an optional `momentum_event_tracker`

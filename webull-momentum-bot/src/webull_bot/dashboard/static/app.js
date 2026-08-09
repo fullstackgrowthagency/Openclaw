@@ -56,8 +56,9 @@ const COLUMN_INFO = {
   "score-breakdown": {
     title: "Score Weighting Breakdown",
     body:
-      "A sanity check for the MIS weights (scoring/weights.yaml): each component's raw 0-100 sub-score, averaged over recent history, multiplied by its current normalized weight. Sorted by \"Avg Weighted Contribution\" descending -- this is what's actually driving scores up in practice, not just what the weights were intended to emphasize.\n\n" +
-      "Only rows from the most recent weights_version are averaged together, since older/newer formula versions have different components and mixing them would be meaningless. If a component you expect to matter (e.g. after a reweight) isn't near the top here, that's a sign the weights or thresholds need another pass.",
+      "By default, a sanity check for the MIS weights (scoring/weights.yaml): each component's raw 0-100 sub-score, averaged over recent history, multiplied by its current normalized weight. Sorted by weighted contribution descending -- this is what's actually driving scores up in practice, not just what the weights were intended to emphasize.\n\n" +
+      "Click a row in the Candidates table above to instead see that exact candidate's own live score breakdown (no averaging -- its most recent tick only). Click the same row again, or the \"(show all candidates)\" link, to go back to the historical view.\n\n" +
+      "The historical view only averages rows from the most recent weights_version, since older/newer formula versions have different components and mixing them would be meaningless. If a component you expect to matter (e.g. after a reweight) isn't near the top here, that's a sign the weights or thresholds need another pass.",
   },
   "score-history": {
     title: "Score History Lookup",
@@ -153,13 +154,17 @@ async function refreshStatus() {
   }
 }
 
+let selectedCandidateSymbol = null;
+let lastCandidateRows = [];
+
 async function refreshCandidates() {
   const body = document.getElementById("candidates-body");
   try {
     const rows = await fetchJSON("/api/candidates");
+    lastCandidateRows = rows;
     body.innerHTML = rows.length
       ? rows.map(c => `
-        <tr>
+        <tr class="candidate-row ${c.symbol === selectedCandidateSymbol ? "selected-row" : ""}" data-symbol="${c.symbol}">
           <td>${c.symbol}</td>
           <td><span class="state-pill state-${c.state}">${c.state.replace("_", " ")}</span></td>
           <td>${fmtNum(c.score, 1)}</td>
@@ -169,9 +174,25 @@ async function refreshCandidates() {
           <td class="muted">${fmtTime(c.last_updated_at)}</td>
         </tr>`).join("")
       : emptyRow(7, "No candidates tracked yet");
+    return rows;
   } catch (e) {
     body.innerHTML = emptyRow(7, `Failed to load: ${e.message}`);
+    lastCandidateRows = [];
+    return [];
   }
+}
+
+function initCandidateSelection() {
+  const body = document.getElementById("candidates-body");
+  if (!body) return;
+  body.addEventListener("click", (e) => {
+    const row = e.target.closest("tr[data-symbol]");
+    if (!row) return;
+    const symbol = row.dataset.symbol;
+    selectedCandidateSymbol = symbol === selectedCandidateSymbol ? null : symbol;
+    document.querySelectorAll(".candidate-row").forEach(r => r.classList.toggle("selected-row", r.dataset.symbol === selectedCandidateSymbol));
+    refreshScoreBreakdown(lastCandidateRows);
+  });
 }
 
 async function refreshPositions() {
@@ -258,12 +279,42 @@ function componentLabel(name) {
   return name.replace(/_score$/, "").split("_").map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
 }
 
-async function refreshScoreBreakdown() {
+let cachedMisWeights = null;
+
+async function loadMisWeightsOnce() {
+  if (cachedMisWeights) return cachedMisWeights;
+  try {
+    cachedMisWeights = await fetchJSON("/api/mis-weights");
+  } catch (e) {
+    cachedMisWeights = { weights_version: null, weights: {} };
+  }
+  return cachedMisWeights;
+}
+
+function setScoreBreakdownHeaders(mode) {
+  const labels = mode === "live"
+    ? { raw: "Raw Score", contribution: "Weighted Contribution", pct: "% of Score" }
+    : { raw: "Avg Raw Score", contribution: "Avg Weighted Contribution", pct: "% of Avg Score" };
+  document.getElementById("score-breakdown-th-raw").textContent = labels.raw;
+  document.getElementById("score-breakdown-th-contribution").textContent = labels.contribution;
+  document.getElementById("score-breakdown-th-pct").textContent = labels.pct;
+  document.getElementById("score-breakdown-th-samples").textContent = "Samples";
+}
+
+function clearCandidateSelection() {
+  selectedCandidateSymbol = null;
+  document.querySelectorAll(".candidate-row.selected-row").forEach(r => r.classList.remove("selected-row"));
+  refreshScoreBreakdown(lastCandidateRows);
+}
+
+async function renderAggregateScoreBreakdown() {
   const meta = document.getElementById("score-breakdown-meta");
   const body = document.getElementById("score-breakdown-body");
+  setScoreBreakdownHeaders("aggregate");
   try {
     const data = await fetchJSON("/api/score-breakdown");
     meta.innerHTML = `
+      <div class="stat"><span class="label">Showing</span><span class="value">All candidates (historical average)</span></div>
       <div class="stat"><span class="label">Weights Version</span><span class="value">${data.weights_version || "--"}</span></div>
       <div class="stat"><span class="label">Sample Size</span><span class="value">${data.sample_size}</span></div>
     `;
@@ -280,6 +331,63 @@ async function refreshScoreBreakdown() {
       : emptyRow(6, "No momentum scores recorded yet -- this fills in once candidates start being watched.");
   } catch (e) {
     body.innerHTML = emptyRow(6, `Failed to load: ${e.message}`);
+  }
+}
+
+async function renderCandidateScoreBreakdown(candidateRows) {
+  const meta = document.getElementById("score-breakdown-meta");
+  const body = document.getElementById("score-breakdown-body");
+  setScoreBreakdownHeaders("live");
+  const candidate = (candidateRows || []).find(c => c.symbol === selectedCandidateSymbol);
+
+  if (!candidate) {
+    meta.innerHTML = `
+      <div class="stat"><span class="label">Showing</span><span class="value">${selectedCandidateSymbol} <button class="link-btn" id="clear-candidate-breakdown">(show all candidates)</button></span></div>
+    `;
+    body.innerHTML = emptyRow(6, `${selectedCandidateSymbol} is no longer tracked.`);
+    document.getElementById("clear-candidate-breakdown")?.addEventListener("click", clearCandidateSelection);
+    return;
+  }
+
+  if (!candidate.components) {
+    meta.innerHTML = `
+      <div class="stat"><span class="label">Showing</span><span class="value">${candidate.symbol} <button class="link-btn" id="clear-candidate-breakdown">(show all candidates)</button></span></div>
+    `;
+    body.innerHTML = emptyRow(6, `${candidate.symbol} hasn't been scored yet -- it fills in on this candidate's first tick.`);
+    document.getElementById("clear-candidate-breakdown")?.addEventListener("click", clearCandidateSelection);
+    return;
+  }
+
+  const weightsData = await loadMisWeightsOnce();
+  const weights = weightsData.weights || {};
+  const rows = Object.entries(candidate.components).map(([name, value]) => ({
+    name, value, weight: weights[name] || 0, contribution: value * (weights[name] || 0),
+  }));
+  const totalContribution = rows.reduce((sum, r) => sum + r.contribution, 0) || 1;
+  rows.sort((a, b) => b.contribution - a.contribution);
+
+  meta.innerHTML = `
+    <div class="stat"><span class="label">Showing</span><span class="value">${candidate.symbol} <button class="link-btn" id="clear-candidate-breakdown">(show all candidates)</button></span></div>
+    <div class="stat"><span class="label">Live Score</span><span class="value">${fmtNum(candidate.score, 1)}</span></div>
+    <div class="stat"><span class="label">Weights Version</span><span class="value">${candidate.score_weights_version || weightsData.weights_version || "--"}</span></div>
+  `;
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td>${componentLabel(r.name)}</td>
+      <td>${fmtNum(r.weight, 2)}</td>
+      <td>${fmtNum(r.value, 1)}</td>
+      <td>${fmtNum(r.contribution, 2)}</td>
+      <td>${fmtNum(r.contribution / totalContribution * 100, 1)}%</td>
+      <td class="muted">1 (live)</td>
+    </tr>`).join("");
+  document.getElementById("clear-candidate-breakdown")?.addEventListener("click", clearCandidateSelection);
+}
+
+async function refreshScoreBreakdown(candidateRows) {
+  if (selectedCandidateSymbol) {
+    await renderCandidateScoreBreakdown(candidateRows);
+  } else {
+    await renderAggregateScoreBreakdown();
   }
 }
 
@@ -323,18 +431,22 @@ function initScoreHistoryForm() {
 }
 
 async function refreshAll() {
+  // refreshCandidates runs first (not in the Promise.all below) because
+  // refreshScoreBreakdown needs its freshly fetched rows when a candidate
+  // is selected -- see renderCandidateScoreBreakdown.
+  const candidateRows = await refreshCandidates();
   await Promise.all([
     refreshStatus(),
-    refreshCandidates(),
     refreshPositions(),
     refreshRiskEvents(),
     refreshPerformance(),
     refreshTrades(),
-    refreshScoreBreakdown(),
+    refreshScoreBreakdown(candidateRows),
   ]);
 }
 
 initInfoModal();
 initScoreHistoryForm();
+initCandidateSelection();
 refreshAll();
 setInterval(refreshAll, REFRESH_MS);

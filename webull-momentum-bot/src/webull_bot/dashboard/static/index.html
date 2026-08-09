@@ -19,6 +19,7 @@
 
   <section class="panel">
     <h2>Candidates</h2>
+    <p class="hint">Click a row to see its live score breakdown in the Score Weighting Breakdown card below.</p>
     <div class="table-scroll">
       <table>
         <thead>
@@ -84,7 +85,7 @@
     <div class="table-scroll">
       <table>
         <thead>
-          <tr><th>Component</th><th>Weight</th><th>Avg Raw Score</th><th>Avg Weighted Contribution</th><th>% of Avg Score</th><th>Samples</th></tr>
+          <tr><th>Component</th><th>Weight</th><th id="score-breakdown-th-raw">Avg Raw Score</th><th id="score-breakdown-th-contribution">Avg Weighted Contribution</th><th id="score-breakdown-th-pct">% of Avg Score</th><th id="score-breakdown-th-samples">Samples</th></tr>
         </thead>
         <tbody id="score-breakdown-body"></tbody>
       </table>

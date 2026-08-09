@@ -9,6 +9,7 @@ in-memory SQLite session factory without running a real bot or DB.
 """
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
@@ -24,6 +25,7 @@ from ..db.repository import (
     get_recent_trades,
 )
 from ..runtime.trading_loop import TradingLoop
+from ..scoring.momentum_ignition_score import MISConfig
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -99,9 +101,28 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
                 "discovered_at": candidate.discovered_at.isoformat(),
                 "last_updated_at": candidate.last_updated_at.isoformat(),
                 "reason": last_reason,
+                # Raw per-component sub-scores from this candidate's most
+                # recent live tick -- lets the dashboard show this exact
+                # candidate's actual score breakdown (see /api/mis-weights
+                # for the weights to pair them with) rather than only a
+                # historical database average across all candidates. None
+                # until CandidateWatcher.update() has ticked this candidate
+                # at least once.
+                "components": asdict(candidate.latest_score.components) if candidate.latest_score else None,
+                "score_weights_version": candidate.latest_score.weights_version if candidate.latest_score else None,
             })
         rows.sort(key=lambda r: r["score"] or 0, reverse=True)
         return rows
+
+    @app.get("/api/mis-weights")
+    def get_mis_weights():
+        """The currently active (normalized) MIS weights, straight from
+        scoring/weights.yaml -- independent of any DB history, so it's
+        available even with an empty database (e.g. right after a
+        restart). Pairs with /api/candidates' `components` field to render
+        a specific candidate's live score breakdown."""
+        config = MISConfig.load()
+        return {"weights_version": config.version, "weights": config.weights}
 
     @app.get("/api/positions")
     def get_positions():
