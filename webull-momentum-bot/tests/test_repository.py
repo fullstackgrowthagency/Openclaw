@@ -131,7 +131,11 @@ def test_record_scanner_event_persists(session):
 def _score(**overrides) -> MomentumScore:
     base = dict(
         symbol="TEST", timestamp=datetime(2026, 1, 1, 9, 31), score=72.5, weights_version="v1-test",
-        components=MomentumScoreComponents(80, 70, 60, 50, 40, 30, 20, 10),
+        components=MomentumScoreComponents(
+            float_score=80, float_velocity_score=70, relative_volume_score=60, volume_acceleration_score=50,
+            price_acceleration_score=40, breakout_proximity_score=30, trend_quality_score=20, liquidity_score=10,
+            float_turnover_score=90, short_term_relative_volume_score=85, dollar_volume_acceleration_score=75,
+        ),
     )
     base.update(overrides)
     return MomentumScore(**base)

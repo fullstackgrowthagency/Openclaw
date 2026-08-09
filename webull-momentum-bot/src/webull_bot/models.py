@@ -125,6 +125,18 @@ class MomentumScoreComponents:
     breakout_proximity_score: float
     trend_quality_score: float
     liquidity_score: float
+    # v2 additions (2026-08-09): these three were already computed by
+    # metrics/rolling.py's compute_metrics but sat unused on MomentumMetrics
+    # -- see this dataclass's docstring history / ARCHITECTURE.md's
+    # "Momentum Ignition Score" section. All three measure current/real-time
+    # activity level rather than float size or price behavior, which is
+    # deliberate: they're what should make an already-popular, actively-
+    # trading-right-now name outrank a name that merely looks structurally
+    # attractive (small float, near resistance) but isn't seeing real
+    # volume yet.
+    float_turnover_score: float             # today's cumulative float turnover (metrics.float_turnover) -- "how much of this stock has already changed hands today"
+    short_term_relative_volume_score: float  # windowed RVOL (metrics.relative_volume_5m) -- more responsive to a fresh surge than the whole-session relative_volume
+    dollar_volume_acceleration_score: float  # metrics.dollar_volume_accel_1m_3m -- distinct from volume_acceleration_score since it also reflects price movement between windows, not just share count
 
 
 @dataclass

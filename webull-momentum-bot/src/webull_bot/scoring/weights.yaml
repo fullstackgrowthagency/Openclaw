@@ -8,17 +8,32 @@
 #
 # Bump `version` any time you change a weight or threshold so MomentumScore
 # records stay traceable to the formula that produced them.
-version: "v1-initial-unvalidated"
+version: "v2-popularity-weighted"
 
+# v2 (2026-08-09): added float_turnover_score/short_term_relative_volume_score/
+# dollar_volume_acceleration_score -- metrics/rolling.py already computed
+# these (float_turnover, relative_volume_5m, dollar_volume_accel_1m_3m) but
+# the v1 score never consumed them (see ARCHITECTURE.md's "Momentum
+# Ignition Score" section, which flagged this gap explicitly). Also
+# reweighted so current real-time activity -- how much volume/turnover/
+# dollar flow a name is seeing RIGHT NOW, i.e. how "popular" it already is
+# -- dominates the ranking over structural/static factors (float size,
+# distance to a breakout level, VWAP trend). The dashboard's candidate list
+# is sorted by score descending, so this directly determines what surfaces
+# at the top: a name everyone's already piling into should outrank one that
+# merely looks structurally attractive but isn't seeing real volume yet.
 weights:
-  float_score: 1.0
-  float_velocity_score: 1.5
-  relative_volume_score: 1.5
-  volume_acceleration_score: 1.5
-  price_acceleration_score: 1.5
-  breakout_proximity_score: 1.0
-  trend_quality_score: 1.0
-  liquidity_score: 1.0
+  float_score: 1.0                          # structural (float size) -- unchanged
+  float_velocity_score: 2.0                 # popularity: 5m float turnover rate -- raised from 1.5
+  float_turnover_score: 2.0                 # NEW -- today's cumulative float turnover
+  relative_volume_score: 2.0                # popularity: whole-session RVOL -- raised from 1.5
+  short_term_relative_volume_score: 2.0     # NEW -- windowed (5m) RVOL, most responsive "hot right now" signal
+  volume_acceleration_score: 1.5            # unchanged
+  dollar_volume_acceleration_score: 1.5     # NEW -- dollar-denominated analog of volume_acceleration_score
+  price_acceleration_score: 1.0             # lowered from 1.5 -- price behavior, not activity level
+  breakout_proximity_score: 1.0             # unchanged
+  trend_quality_score: 0.75                 # lowered from 1.0 -- least popularity-relevant factor
+  liquidity_score: 1.0                      # unchanged
 
 # Thresholds used to normalize raw metrics into 0-100 sub-scores, and to
 # drive DISCOVERED -> WATCHING -> HEATING_UP -> ARMED transitions. All
@@ -35,6 +50,7 @@ thresholds:
   min_relative_volume_for_watch: 2.0
   min_relative_volume_for_armed: 5.0
   min_float_velocity_5m_for_armed: 0.03   # 3% of float traded in 5 minutes
+  min_float_turnover_for_notable: 0.5     # 50% of the float already traded today -- a large, deliberately high bar since this is cumulative, not a short window
   max_spread_pct: 2.0
   min_dollar_volume: 500_000
   armed_score_threshold: 70.0

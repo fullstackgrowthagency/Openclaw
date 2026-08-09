@@ -449,12 +449,10 @@ factors can be analyzed later. Nothing about the formula is assumed
 correct -- it exists to be replaced once backtest/paper data says otherwise.
 
 `metrics/rolling.py`'s `compute_metrics` tracks more raw windowed data
-than the current score formula consumes -- `volume_1m/5m/15m`,
-`dollar_volume_1m/5m/15m`, `dollar_volume_accel_1m_3m`, and
-`relative_volume_1m/5m` -- deliberately ahead of a v2 score formula that
-will actually weight them, kept modular (pure functions in
-`metrics/calculations.py`, plain fields on `MomentumMetrics`) specifically
-so that formula work doesn't require touching this module again.
+than the score formula consumes -- `volume_1m/5m/15m` and
+`dollar_volume_1m/5m/15m` remain unused -- kept modular (pure functions in
+`metrics/calculations.py`, plain fields on `MomentumMetrics`) so future
+formula work doesn't require touching this module again.
 `dollar_volume_1m/5m/15m` use `dollar_volume_from_avg_price`, which
 averages each window's own boundary prices rather than one current price
 across all windows -- this is what makes `dollar_volume_accel_1m_3m` a
@@ -466,6 +464,26 @@ per-symbol baseline (`typical_volume_1m/5m`) and fall back to a neutral
 1.0 when none is supplied, since no per-symbol intraday volume-distribution
 baseline exists yet to compare against -- same honest gap as
 `relative_volume`'s own `typical_volume_same_time`, not a new one.
+
+**v2 (2026-08-09): three previously-unused metrics wired into the score,
+plus a reweight towards current activity/"popularity."** `float_turnover`
+(today's cumulative float turnover), `relative_volume_5m` (windowed RVOL),
+and `dollar_volume_accel_1m_3m` were already computed above but never
+consumed by `compute_components` -- they now feed
+`float_turnover_score`/`short_term_relative_volume_score`/
+`dollar_volume_acceleration_score` respectively (see that function). At the
+same time, `weights.yaml`'s weights were rebalanced so components measuring
+real-time trading activity right now -- RVOL (both whole-session and
+windowed), float turnover (both cumulative and the 5m rate), and volume/
+dollar-volume acceleration -- carry more relative weight than the more
+static/structural components (float size, breakout proximity, VWAP trend
+quality). Since `dashboard/app.py`'s `/api/candidates` sorts by score
+descending, this reweighting directly controls what surfaces at the top of
+the live candidates list: a name already seeing heavy real volume now
+outranks one that merely looks structurally attractive (tight spread,
+near a breakout level) but isn't actually trading heavily yet. See
+`weights.yaml`'s own v2 comment for the exact before/after weights --
+still first-pass, unvalidated numbers, same as v1.
 
 ## Data collection
 

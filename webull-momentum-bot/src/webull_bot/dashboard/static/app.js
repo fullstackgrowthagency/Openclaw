@@ -21,16 +21,19 @@ const COLUMN_INFO = {
   score: {
     title: "Score",
     body:
-      "The Momentum Ignition Score (MIS), 0-100 -- a weighted blend of 8 components recomputed on every tick:\n\n" +
+      "The Momentum Ignition Score (MIS), 0-100 -- a weighted blend of 11 components recomputed on every tick, weighted so current real-time activity (how \"popular\" a name already is) outranks names that only look structurally attractive:\n\n" +
       "• Float score -- lower free float scores higher\n" +
       "• Float velocity -- % of float traded in the last 5 minutes\n" +
+      "• Float turnover -- % of float already traded today (cumulative)\n" +
       "• Relative volume -- today's volume vs. typical for this time of day\n" +
+      "• Short-term relative volume -- same idea, windowed to the last 5 minutes for a fresher read\n" +
       "• Volume acceleration -- is volume ramping up, not just high\n" +
+      "• Dollar-volume acceleration -- same idea in dollar terms, which also captures price moving between windows\n" +
       "• Price acceleration -- how fast price itself is moving\n" +
       "• Breakout proximity -- distance to resistance / high of day\n" +
       "• Trend quality -- position relative to VWAP\n" +
       "• Liquidity -- spread tightness + dollar volume\n\n" +
-      "Crossing 40 promotes WATCHING → HEATING_UP; crossing 70 promotes to ARMED. The weights are unvalidated starting values, not backtested.",
+      "Crossing 40 promotes WATCHING → HEATING_UP; crossing 70 promotes to ARMED. The candidates table is sorted by this score, so the reweighting directly controls what shows up at the top. The weights are unvalidated starting values, not backtested.",
   },
   price: {
     title: "Price",

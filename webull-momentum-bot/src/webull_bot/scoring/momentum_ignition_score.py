@@ -80,6 +80,23 @@ def compute_components(
     volume_acceleration_score = _scale(metrics.volume_accel_1m_3m, 1.0, 3.0)
     price_acceleration_score = _scale(metrics.price_acceleration, 0.0, 5.0)
 
+    # -- v2 additions: already-computed-but-previously-unused metrics -------
+    # today's cumulative float turnover -- distinct from float_velocity_5m
+    # (a 5-minute rate): this is "how much of the float has changed hands
+    # so far today," a strong signal a name is already a crowd favorite
+    # rather than just starting to get hot.
+    float_turnover_score = _scale(metrics.float_turnover, 0.0, th["min_float_turnover_for_notable"] * 2)
+    # Windowed (5m) RVOL, more responsive to a fresh surge than the
+    # whole-session relative_volume above -- reuses the same
+    # min_relative_volume_for_armed bar since it's the same underlying
+    # "notable RVOL" concept, just measured over a shorter, fresher window.
+    short_term_relative_volume_score = _scale(metrics.relative_volume_5m, 1.0, th["min_relative_volume_for_armed"] * 1.5)
+    # Dollar-volume analog of volume_acceleration_score -- genuinely
+    # distinct, not a rescaled duplicate, since dollar_volume_accel_1m_3m
+    # also reflects price movement between windows (see MomentumMetrics'
+    # docstring for dollar_volume_accel_1m_3m).
+    dollar_volume_acceleration_score = _scale(metrics.dollar_volume_accel_1m_3m, 1.0, 3.0)
+
     # Breakout proximity: closer to (or through) resistance/HOD scores higher.
     proximity_inputs = [
         d for d in (metrics.distance_from_resistance_pct, metrics.distance_from_hod_pct) if d is not None
@@ -107,6 +124,9 @@ def compute_components(
         breakout_proximity_score=breakout_proximity_score,
         trend_quality_score=trend_quality_score,
         liquidity_score=liquidity_score,
+        float_turnover_score=float_turnover_score,
+        short_term_relative_volume_score=short_term_relative_volume_score,
+        dollar_volume_acceleration_score=dollar_volume_acceleration_score,
     )
 
 
