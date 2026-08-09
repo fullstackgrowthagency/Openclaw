@@ -121,17 +121,17 @@ def test_multi_source_dedupes_across_sources():
     assert len(symbols) == len(set(symbols))
 
 
-def test_multi_source_interleaves_round_robin_not_source_order():
-    """A symbol from source 2 should appear before exhausting source 1's
-    full list -- this is what prevents downstream truncation from favoring
-    whichever source happens to be listed first."""
+def test_multi_source_preserves_source_order_with_no_truncation_downstream():
+    """Nothing downstream truncates this list anymore, so source order no
+    longer needs interleaving to protect against one source dominating --
+    plain source-by-source order (deduped) is fine since every symbol gets
+    scanned regardless of position."""
     provider = MultiSourceUniverseProvider([
         _ListProvider(["A1", "A2", "A3", "A4"]),
         _ListProvider(["B1", "B2"]),
     ])
     symbols = provider.get_symbols()
-    # Round-robin: A1, B1, A2, B2, A3, A4
-    assert symbols == ["A1", "B1", "A2", "B2", "A3", "A4"]
+    assert symbols == ["A1", "A2", "A3", "A4", "B1", "B2"]
 
 
 def test_multi_source_isolates_failing_source():

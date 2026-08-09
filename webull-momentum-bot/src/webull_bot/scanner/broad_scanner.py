@@ -26,10 +26,12 @@ which is where concurrency actually still buys wall-clock time now.
 The average-volume filter (`_passes_average_volume_filter`) adds a second
 Webull-paced call (`get_daily_volumes`) for every symbol that clears the
 price/dollar-volume checks above it, which meaningfully adds to per-scan
-wall-clock time -- see runtime/trading_loop.py's TradingLoopConfig for how
-max_universe_size/universe_rescan_interval_seconds were re-measured after
-adding it. It's skipped for brokers without real daily-volume history
-(paper/backtest) rather than rejecting everything in those modes.
+wall-clock time -- see runtime/trading_loop.py's TradingLoopConfig for the
+measured per-symbol cost. There is no cap on how many universe symbols get
+scanned (see TradingLoop._rescan_universe), so total scan time scales with
+however many symbols the universe returns that cycle rather than a fixed
+number. This filter is skipped for brokers without real daily-volume
+history (paper/backtest) rather than rejecting everything in those modes.
 """
 from __future__ import annotations
 

@@ -54,42 +54,36 @@ class TradingLoopConfig:
     # Webull's sandbox enforces a real sustained rate limit paced globally
     # by webull_market_data_limiter (1.0s minimum interval) regardless of
     # BroadScanner's concurrency -- see brokers/webull/retry.py's module
-    # docstring for the live discovery process, which took several rounds
-    # to get right (a rate limiter that only paced the first attempt of
-    # each call, not retries, still produced hard failures under real
-    # concurrent load). A live end-to-end test after that fix -- 100 real
-    # symbols from MultiSourceUniverseProvider, 10 concurrent workers,
-    # get_snapshot against the actual sandbox -- completed with **zero**
-    # hard failures (some individual 429s, all recovered by the paced
-    # retry) but took 124.9s, i.e. ~1.25s/symbol, not the naive 1.0s the
-    # limiter's own interval would suggest -- occasional retries add real
-    # time on top.
+    # docstring for the live discovery process. Measured live: ~1.25s/symbol
+    # with just get_snapshot, ~2.86s/symbol once
+    # BroadScanner._passes_average_volume_filter added a second Webull call
+    # per symbol (scanner/broad_scanner.py) -- both above the limiter's bare
+    # interval since occasional retries add real time on top.
     #
-    # BroadScanner._passes_average_volume_filter (scanner/broad_scanner.py)
-    # later added a *second* Webull-paced call per symbol
-    # (get_daily_volumes), re-measured live at 60 symbols -> 171.9s, i.e.
-    # ~2.86s/symbol -- more than double the single-call figure above, not
-    # just 2x, since occasional retries apply per call. max_universe_size
-    # below was cut roughly in proportion (100 * 1.25/2.86 ~= 44, rounded to
-    # 45) to keep the same rescan cadence rather than letting scans stretch
-    # to 4-5 minutes -- for a momentum bot, missing a fast mover for that
-    # long defeats the point of frequent rescanning, so breadth was traded
-    # down in favor of keeping cadence tight. 190s leaves ~45% margin over
-    # 45 symbols' measured ~129s (45 * 2.86s), consistent with the margin
-    # used before this filter existed, rather than sizing to a best case.
-    universe_rescan_interval_seconds: float = 190.0
+    # There is deliberately no cap on how many symbols get scanned per
+    # cycle -- see TradingLoop._rescan_universe and data/universe.py's
+    # MultiSourceUniverseProvider. Every symbol the multi-source universe
+    # returns gets checked, so a real mover can never be silently dropped
+    # just because it fell past some truncation point (an earlier version
+    # of this config had max_universe_size for exactly that purpose; it was
+    # removed rather than set to some very large number, since keeping a
+    # cap at all reintroduces the risk it existed to prevent).
+    #
+    # The real cost: full scan duration now scales with how many symbols
+    # the 3 sources return that cycle instead of being bounded by a fixed
+    # number. A live check right now (2026-08-09) found 149 unique symbols
+    # in the combined universe; at the measured ~2.86s/symbol that's
+    # roughly 7 minutes for a full pass, not the ~2 minutes a 45-symbol cap
+    # took. This interval is therefore a floor ("don't start a new scan
+    # sooner than this after the last one *started*"), not a target
+    # duration -- in practice a scan will usually run longer than this
+    # interval, so TradingLoop.run_once ends up starting the next scan
+    # immediately after the previous one finishes, back-to-back, rather
+    # than waiting out an idle gap. 60s (the original pre-rate-limiting
+    # default) is kept as that floor since it no longer does any real
+    # throttling work on its own.
+    universe_rescan_interval_seconds: float = 60.0
     cooldown_seconds: float = 900.0  # 15 min before a cooled-down candidate can be watched again
-    # Raised from the original 50 now that BroadScanner checks symbols
-    # concurrently (see scanner/broad_scanner.py) and the 3-source universe
-    # can return ~150-250 unique symbols before this cap is applied. Cut
-    # back down from 100 to 45 once the average-volume filter added a
-    # second per-symbol Webull call -- see universe_rescan_interval_seconds
-    # above for the measured numbers behind that. Going higher (e.g. 100+)
-    # would extrapolate past what's actually been measured live rather
-    # than build on it, and would force stretching the rescan interval even
-    # further, delaying candidate management (which runs right after the
-    # rescan in the same run_once() call) on every cycle.
-    max_universe_size: int = 45
 
 
 class TradingLoop:
@@ -155,7 +149,7 @@ class TradingLoop:
 
     def _rescan_universe(self, now: datetime) -> None:
         try:
-            symbols = self.universe_provider.get_symbols()[: self.config.max_universe_size]
+            symbols = self.universe_provider.get_symbols()
         except Exception:
             logger.exception("Universe scan failed; keeping existing candidates this cycle.")
             return

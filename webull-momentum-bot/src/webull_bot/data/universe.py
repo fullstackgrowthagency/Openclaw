@@ -10,7 +10,9 @@ Multiple independent sources are combined via MultiSourceUniverseProvider
 (a plain union, not a priority-ordered fallback chain) so a ticker only
 needs to show up on ONE list to reach BroadScanner -- which is what
 actually vets it (price/dollar-volume/free-float), independent of which
-list(s) surfaced it.
+list(s) surfaced it. TradingLoop scans every symbol this returns -- there
+is no cap that could cause a ticker to be silently dropped before
+BroadScanner ever sees it.
 """
 from __future__ import annotations
 
@@ -164,34 +166,28 @@ class MultiSourceUniverseProvider(SymbolUniverseProvider):
     aborting the whole scan, so a single broken/rate-limited source doesn't
     starve the others.
 
-    Results are interleaved round-robin across sources (one symbol from
-    each list in turn) rather than concatenated source-by-source. This
-    matters because the caller (TradingLoop._rescan_universe) truncates the
-    combined list to a fixed size -- concatenating would let the first
-    source in `providers` fill the entire cap before the others ever
-    contributed a single symbol, which defeats the point of having
-    independent sources at all."""
+    Symbols are deduplicated but otherwise left in source order (source 1's
+    symbols, then source 2's new symbols, etc.) -- TradingLoop._rescan_universe
+    no longer truncates the combined list, so every symbol from every
+    source gets scanned regardless of order. An earlier version of this
+    class interleaved results round-robin across sources specifically to
+    stop truncation from favoring whichever source came first; now that
+    nothing truncates this list, that interleaving had nothing left to
+    protect against, so it was simplified away."""
 
     def __init__(self, providers: list[SymbolUniverseProvider]):
         self.providers = providers
 
     def get_symbols(self) -> list[str]:
-        per_source: list[list[str]] = []
-        for provider in self.providers:
-            try:
-                per_source.append(provider.get_symbols())
-            except Exception:
-                logger.exception("Universe source %s failed; skipping it this cycle.", type(provider).__name__)
-                per_source.append([])
-
         seen: set[str] = set()
         combined: list[str] = []
-        max_len = max((len(s) for s in per_source), default=0)
-        for i in range(max_len):
-            for symbols in per_source:
-                if i >= len(symbols):
-                    continue
-                symbol = symbols[i]
+        for provider in self.providers:
+            try:
+                symbols = provider.get_symbols()
+            except Exception:
+                logger.exception("Universe source %s failed; skipping it this cycle.", type(provider).__name__)
+                continue
+            for symbol in symbols:
                 if symbol not in seen:
                     seen.add(symbol)
                     combined.append(symbol)

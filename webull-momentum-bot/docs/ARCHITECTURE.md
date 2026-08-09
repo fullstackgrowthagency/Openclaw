@@ -85,16 +85,18 @@ Webull screener sources, combined by `MultiSourceUniverseProvider`:
 
 `MultiSourceUniverseProvider` is a plain union (every source queried every
 cycle, not a priority fallback chain) with per-source failure isolation --
-one source raising is logged and skipped rather than aborting the scan.
-Critically, it **interleaves results round-robin** across sources rather
-than concatenating them: `TradingLoop._rescan_universe` truncates the
-combined list to `max_universe_size` before scanning, and concatenation
-would let whichever source is listed first fill that entire cap before the
-others contributed a single symbol -- exactly the "one list dominates"
-outcome three independent sources are meant to avoid. A symbol only needs
-to appear on one list to reach `BroadScanner`, which vets every symbol
-identically (price, dollar volume, real free float via FMP) regardless of
-which list(s) surfaced it.
+one source raising is logged and skipped rather than aborting the scan. A
+symbol only needs to appear on one list to reach `BroadScanner`, which
+vets every symbol identically (price, dollar volume, average volume, real
+free float via FMP) regardless of which list(s) surfaced it.
+`TradingLoop._rescan_universe` scans **every** symbol this returns --
+there is deliberately no truncation, so a mover can never be silently
+dropped for appearing past some cutoff. (An earlier version of this class
+interleaved results round-robin across sources specifically to stop
+whichever source came first from filling a truncated cap before the
+others contributed anything; once truncation was removed, that
+interleaving had nothing left to protect against and was simplified away
+-- see `data/universe.py`'s `MultiSourceUniverseProvider` docstring.)
 
 **Webull's sandbox has a real sustained rate limit, confirmed live
 (2026-08-08) across several rounds of testing, each round correcting the
@@ -125,14 +127,19 @@ last:**
    recovered by the now-paced retry), completing in 124.9s (~1.25s/symbol
    including retry overhead, vs. the limiter's own 1.0s interval).
 
-This pacing is why `max_universe_size` was capped at 100 (measured:
-`BroadScanner` issues one paced Webull call per universe symbol, so
-scanning N symbols takes roughly `N * 1.25s` of Webull-bound time no
-matter how many worker threads are checking symbols concurrently -- more
-workers only let FMP float lookups overlap with that, they can't make
-Webull itself go faster) -- **before** `_passes_average_volume_filter`
-(added later, see below) introduced a *second* per-symbol Webull call and
-changed that math again.
+`BroadScanner` issues one paced Webull call per universe symbol (two once
+`_passes_average_volume_filter` below is involved), so scanning N symbols
+takes roughly `N * (per-symbol cost)` of Webull-bound time no matter how
+many worker threads are checking symbols concurrently -- more workers only
+let FMP float lookups overlap with that, they can't make Webull itself go
+faster. There is no cap on N (see `TradingLoop._rescan_universe` above):
+every symbol the multi-source universe returns gets scanned, so full-scan
+duration scales with however large that universe is on a given cycle
+(measured at 149 unique symbols on 2026-08-09) rather than being bounded
+by a fixed number. `TradingLoopConfig.universe_rescan_interval_seconds`
+is sized as a floor between scan *starts*, not a target duration, given
+that a full scan now routinely takes longer than any reasonable interval
+-- see that config's comments for the measured numbers.
 
 **Average-volume filter** (`BroadScanner._passes_average_volume_filter`):
 excludes a symbol trading under `min_average_volume` (1,000,000) shares/day
@@ -164,14 +171,13 @@ Two live findings from that verification are worth flagging:
 - **This filter roughly doubled Webull-bound scan time, not exactly 2x**:
   a live 60-symbol re-measurement came back at 171.9s (~2.86s/symbol) vs.
   the single-call figure of ~1.25s/symbol -- more than double, since
-  occasional retries apply per call, not per symbol. `max_universe_size`
-  was cut from 100 to 45 (roughly `100 * 1.25/2.86`) to preserve the same
-  rescan cadence rather than let scans stretch to 4-5 minutes; for a
-  momentum bot, missing a fast mover for that long defeats the point of
-  frequent rescanning, so breadth was traded down in favor of cadence.
-  `universe_rescan_interval_seconds` is 190s -- ~45% margin over 45
-  symbols' measured ~129s, consistent with the margin used before this
-  filter existed rather than sizing to a best case.
+  occasional retries apply per call, not per symbol. Combined with there
+  being no cap on universe size, a full scan of the 149 symbols measured
+  live on 2026-08-09 works out to roughly 7 minutes, not the ~2 minutes a
+  fixed 100-symbol cap took previously. That's an explicit tradeoff: full
+  coverage of every list, at the cost of a much longer gap between when a
+  given symbol gets (re-)checked -- see `TradingLoopConfig`'s
+  `universe_rescan_interval_seconds` comments for how that's handled.
 
 Separately (found during this same live testing, unrelated to the filter
 itself): the configured FMP API key was returning `429 Limit Reach` on
