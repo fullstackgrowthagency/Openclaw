@@ -190,14 +190,21 @@ def test_scan_records_dollar_volume_today_on_the_candidate():
 class _DailyVolumeAwareBroker(_SlowFakeBroker):
     """Adds get_daily_volumes -- a capability real WebullBrokerClient has
     but _SlowFakeBroker (standing in for paper/backtest) does not, since
-    _compute_average_volume_info is meant to be a no-op without it."""
+    _compute_average_volume_info is meant to be a no-op without it.
+    cumulative_volumes optionally overrides the default 200,000 per-symbol
+    current-day volume from _snapshot(), for exercising
+    _fails_volume_floor's third (current-day) exemption."""
 
-    def __init__(self, daily_volumes: dict[str, list[float]]):
+    def __init__(self, daily_volumes: dict[str, list[float]], cumulative_volumes: dict[str, float] | None = None):
         super().__init__(delay_seconds=0.0, prices={})
         self.daily_volumes = daily_volumes
+        self.cumulative_volumes = cumulative_volumes or {}
 
     def get_daily_volumes(self, symbol, lookback_days):
         return self.daily_volumes[symbol]
+
+    def get_snapshot(self, symbol):
+        return _snapshot(symbol, cumulative_volume=self.cumulative_volumes.get(symbol, 200_000))
 
 
 def test_scan_keeps_candidate_exactly_at_average_volume_floor():
@@ -212,13 +219,18 @@ def test_scan_keeps_candidate_exactly_at_average_volume_floor():
     assert candidates[0].previous_day_volume == 500_000
 
 
-# -- volume floor (min_average_daily_volume / min_previous_day_volume) ------
+# -- volume floor (min_average_daily_volume / min_previous_day_volume /
+# min_current_day_volume) ----------------------------------------------------
 #
-# Rejects only when BOTH are missed -- clearing either alone is enough to
-# survive (see broad_scanner.py's module docstring/BroadScannerConfig).
+# Rejects only when ALL THREE are missed -- clearing any single one alone
+# is enough to survive (see broad_scanner.py's module docstring/
+# BroadScannerConfig). _DailyVolumeAwareBroker defaults current-day volume
+# (cumulative_volume) to 200,000, below the 500,000 floor, in every test
+# below unless a test explicitly overrides it -- so tests written before
+# the current-day exemption existed still exercise "all three below."
 
-def test_scan_rejects_when_both_volume_floors_are_missed():
-    broker = _DailyVolumeAwareBroker({"DEAD": [400_000] * 10})
+def test_scan_rejects_when_all_three_volume_floors_are_missed():
+    broker = _DailyVolumeAwareBroker({"DEAD": [400_000] * 10})  # current-day defaults to 200,000
     scanner = BroadScanner(broker, _FakeFloatProvider())
     assert scanner.scan(["DEAD"]) == []
 
@@ -256,10 +268,36 @@ def test_scan_keeps_candidate_exactly_at_previous_day_volume_floor():
     assert [c.symbol for c in scanner.scan(["EDGE"])] == ["EDGE"]
 
 
+def test_scan_keeps_candidate_when_only_current_day_volume_clears_its_floor():
+    # average_daily_volume (400,000) and previous_day_volume (400,000) both
+    # miss their floors, but current_day_volume (600,000) clears
+    # min_current_day_volume (500,000) -- surviving on that bar alone.
+    broker = _DailyVolumeAwareBroker({"HOT": [400_000] * 10}, cumulative_volumes={"HOT": 600_000})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert [c.symbol for c in scanner.scan(["HOT"])] == ["HOT"]
+
+
+def test_scan_keeps_candidate_exactly_at_current_day_volume_floor():
+    # 500,000 is the default min_current_day_volume floor -- AT it, not
+    # below it, so this alone is enough to survive despite average/
+    # previous-day volume both missing their own floors.
+    broker = _DailyVolumeAwareBroker({"EDGE": [400_000] * 10}, cumulative_volumes={"EDGE": 500_000})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert [c.symbol for c in scanner.scan(["EDGE"])] == ["EDGE"]
+
+
+def test_scan_rejects_when_current_day_volume_is_just_below_its_floor():
+    broker = _DailyVolumeAwareBroker({"DEAD": [400_000] * 10}, cumulative_volumes={"DEAD": 499_999})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert scanner.scan(["DEAD"]) == []
+
+
 def test_scan_does_not_reject_symbol_when_volume_data_is_missing_on_one_side():
     # A missing/failed lookup means (None, None) from _compute_average_volume_info
     # (see the daily-volume-lookup-failure and no-get_daily_volumes tests
-    # below) -- can't prove both floors were missed, so this must not reject.
+    # below) -- a None can't be proven to miss its floor, so "all three
+    # fail" becomes impossible regardless of current_day_volume, and this
+    # must not reject.
     broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ANY": 5.0})  # no get_daily_volumes at all
     scanner = BroadScanner(broker, _FakeFloatProvider())
     assert [c.symbol for c in scanner.scan(["ANY"])] == ["ANY"]

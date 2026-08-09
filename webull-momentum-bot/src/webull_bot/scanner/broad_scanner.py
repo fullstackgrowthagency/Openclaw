@@ -6,19 +6,25 @@ closely. Structural gates here -- price range, free float, and a volume
 floor -- are all checked cheaply before a candidate is fully built out.
 
 Dollar volume (Candidate.dollar_volume_today) is still deliberately NOT a
-gate: it's still just informational/scoring context. Average daily volume
-and previous-day volume, however, ARE a gate again as of 2026-08-09 (a
-prior pass through this file had made both purely informational -- see
-git history/ARCHITECTURE.md for that reasoning -- but per explicit user
-request they're back to rejecting, with new, looser thresholds and an
-either-or exemption): a symbol is rejected only when BOTH
-average_daily_volume is below BroadScannerConfig.min_average_daily_volume
-AND previous_day_volume is below min_previous_day_volume -- clearing
-either bar alone is enough to survive. Missing data on either side (paper/
-backtest brokers, or a failed lookup) can't prove both bars were missed,
-so it does NOT reject -- same fail-soft spirit as the free-float check
+gate: it's still just informational/scoring context. Average daily volume,
+previous-day volume, and today's current volume-so-far, however, ARE a
+gate again as of 2026-08-09 (a prior pass through this file had made
+average/previous-day volume purely informational -- see git history/
+ARCHITECTURE.md for that reasoning -- but per explicit user request
+they're back to rejecting, with new, looser thresholds and a three-way
+either-or exemption): a symbol is rejected only when ALL THREE of
+average_daily_volume, previous_day_volume, AND today's current_day_volume
+(snapshot.cumulative_volume -- already fetched for the price check above,
+no extra round-trip) miss their respective BroadScannerConfig floors --
+clearing any single one of the three alone is enough to survive. A missing
+average_volume or previous_day_volume (None -- paper/backtest brokers, or
+a failed lookup) can't be proven to miss its floor, so it's treated as NOT
+failing -- meaning a broker with no daily-volume history at all can never
+trigger this rejection regardless of current_day_volume, since "all three
+fail" is then impossible. See _fails_volume_floor. This never rejects a
+candidate for missing data, same fail-soft spirit as the free-float check
 failing soft on a lookup error, just applied to a value comparison instead
-of an exception. See _fails_volume_floor.
+of an exception.
 
 Expensive per-tick metric work happens in CandidateWatcher, not here.
 
@@ -76,12 +82,14 @@ class BroadScannerConfig:
     max_price: float = 25.00
     max_free_float_shares: float = 20_000_000
     # Volume floor (see module docstring and _fails_volume_floor): a symbol
-    # is rejected only when its average_daily_volume is below this AND its
-    # previous_day_volume is below min_previous_day_volume -- clearing
-    # either one alone is enough to survive. Unvalidated starting values
-    # per explicit user request (2026-08-09), not backtested.
+    # is rejected only when its average_daily_volume, previous_day_volume,
+    # AND current_day_volume (today's volume-so-far) are ALL below their
+    # respective floors below -- clearing any single one alone is enough to
+    # survive. Unvalidated starting values per explicit user request
+    # (2026-08-09), not backtested.
     min_average_daily_volume: float = 500_000
     min_previous_day_volume: float = 750_000
+    min_current_day_volume: float = 500_000
     # How many days of daily-volume history to fetch for average_daily_volume
     # / previous_day_volume above. Matches the relative_volume_10d convention
     # used elsewhere (universe.py, MIS scoring).
@@ -138,7 +146,7 @@ class BroadScanner:
         # expensive) resistance network call below so a symbol disqualified
         # here never pays for that extra round-trip (see module docstring).
         average_volume, previous_day_volume = self._compute_average_volume_info(symbol)
-        if self._fails_volume_floor(average_volume, previous_day_volume):
+        if self._fails_volume_floor(average_volume, previous_day_volume, snapshot.cumulative_volume):
             return None
 
         candidate = new_candidate(symbol, now=snapshot.timestamp)
@@ -150,21 +158,28 @@ class BroadScanner:
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate
 
-    def _fails_volume_floor(self, average_volume: Optional[float], previous_day_volume: Optional[float]) -> bool:
-        """True only when BOTH volume floors are missed -- clearing either
-        min_average_daily_volume or min_previous_day_volume alone is enough
-        to survive (see module docstring/BroadScannerConfig). Missing data
-        on either side (None) can't prove both bars were missed, so this
-        returns False rather than rejecting -- same fail-soft spirit as
-        _compute_average_volume_info returning (None, None) on a lookup
-        failure below: a candidate is never punished for data we don't
-        have."""
-        if average_volume is None or previous_day_volume is None:
-            return False
-        return (
-            average_volume < self.config.min_average_daily_volume
-            and previous_day_volume < self.config.min_previous_day_volume
+    def _fails_volume_floor(
+        self, average_volume: Optional[float], previous_day_volume: Optional[float], current_day_volume: float
+    ) -> bool:
+        """True only when ALL THREE volume floors are missed -- clearing
+        any single one of min_average_daily_volume, min_previous_day_volume,
+        or min_current_day_volume is enough to survive (see module
+        docstring/BroadScannerConfig). current_day_volume is
+        snapshot.cumulative_volume -- always available (the caller already
+        has the snapshot by this point) -- while average_volume/
+        previous_day_volume can be None (paper/backtest brokers, or a
+        failed lookup). A None value can't be proven to miss its floor, so
+        it's treated as NOT failing rather than rejecting on missing data:
+        this means a broker with no daily-volume history at all (average_volume
+        and previous_day_volume always None) never rejects here regardless
+        of current_day_volume, same fail-soft guarantee the two-floor
+        version of this check always had."""
+        avg_fails = average_volume is not None and average_volume < self.config.min_average_daily_volume
+        previous_day_fails = (
+            previous_day_volume is not None and previous_day_volume < self.config.min_previous_day_volume
         )
+        current_day_fails = current_day_volume < self.config.min_current_day_volume
+        return avg_fails and previous_day_fails and current_day_fails
 
     def _compute_average_volume_info(self, symbol: str) -> tuple[Optional[float], Optional[float]]:
         """Returns (average_daily_volume, previous_day_volume), the two

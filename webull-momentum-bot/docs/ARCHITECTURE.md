@@ -4,9 +4,9 @@
 
 ```
 BroadScanner            (structural gates: price range, float ceiling, and a
-      |                   volume floor -- either avg-daily or previous-day
-      |                   volume clearing its bar is enough; dollar volume
-      |                   remains informational, not a gate)
+      |                   volume floor -- any ONE of avg-daily, previous-day,
+      |                   or current-day volume clearing its bar is enough;
+      |                   dollar volume remains informational, not a gate)
       v  Candidate(DISCOVERED -> WATCHING)
 CandidateWatcher         (recomputes MomentumMetrics + Momentum Ignition
       |                   Score on every snapshot; drives WATCHING ->
@@ -229,26 +229,36 @@ they predate the wider price range, pagination, and 4th source, so they
 understate current scan time).
 
 **Volume floor** (`BroadScanner._fails_volume_floor`, fed by
-`_compute_average_volume_info`): a symbol is rejected only when BOTH
-`average_daily_volume` is below `BroadScannerConfig.min_average_daily_volume`
-(500,000 by default) AND `previous_day_volume` is below
-`min_previous_day_volume` (750,000 by default) -- clearing either bar
-alone is enough to survive. This is a re-introduction: an earlier pass
-through this file (documented just above, in spirit) had made both purely
-informational, reasoning that a previously-quiet float suddenly seeing
-abnormal volume is exactly the pattern this bot targets. Per explicit user
-request (2026-08-09) the gate is back, but looser (the original hard
-rejection was ≥1,000,000 shares/day with no exemption) and with an
-either-or exemption instead of an all-or-nothing bar, which keeps most of
-that original reasoning intact: a stock that's been quiet on average but
-just had one real volume day still survives on `previous_day_volume`
-alone. Missing data on either side (a failed lookup, or a broker with no
-real daily-volume history at all -- paper/backtest mode) can't prove both
-bars were missed, so it does NOT reject; see `_fails_volume_floor`'s
-docstring. Dollar volume remains purely informational either way:
-`Candidate.dollar_volume_today` is populated but never gates discovery
-(see `scanner/broad_scanner.py`'s module docstring). Unvalidated starting
-thresholds, not backtested -- same framing as `scoring/weights.yaml`.
+`_compute_average_volume_info` plus the snapshot already in hand): a
+symbol is rejected only when ALL THREE of `average_daily_volume` (below
+`BroadScannerConfig.min_average_daily_volume`, 500,000 by default),
+`previous_day_volume` (below `min_previous_day_volume`, 750,000 by
+default), and `current_day_volume` (today's volume-so-far --
+`snapshot.cumulative_volume`, below `min_current_day_volume`, 500,000 by
+default) are missed -- clearing any single one of the three alone is
+enough to survive. This is a re-introduction: an earlier pass through
+this file (documented just above, in spirit) had made average/previous-
+day volume purely informational, reasoning that a previously-quiet float
+suddenly seeing abnormal volume is exactly the pattern this bot targets.
+Per explicit user request (2026-08-09) the gate is back, but looser (the
+original hard rejection was ≥1,000,000 shares/day with no exemption) and
+with a three-way either-or exemption instead of an all-or-nothing bar --
+first added as a two-way (average/previous-day) exemption, then widened
+same-day to add current-day volume as a third escape hatch, again per
+explicit user request. This keeps most of the original informational-only
+reasoning intact: a stock that's been quiet on average and on the prior
+day, but is trading heavily *right now*, still survives on
+`current_day_volume` alone -- exactly the "waking up" pattern this bot is
+meant to catch. A `None` `average_volume`/`previous_day_volume` (a failed
+lookup, or a broker with no real daily-volume history at all -- paper/
+backtest mode) can't be proven to miss its floor, so it's treated as NOT
+failing; since rejection requires all three to fail, this makes rejection
+impossible whenever either of those two is missing, regardless of
+`current_day_volume` -- see `_fails_volume_floor`'s docstring. Dollar
+volume remains purely informational either way: `Candidate.dollar_volume_today`
+is populated but never gates discovery (see `scanner/broad_scanner.py`'s
+module docstring). Unvalidated starting thresholds, not backtested --
+same framing as `scoring/weights.yaml`.
 
 The average-volume lookup is backed by `WebullBrokerClient.get_daily_volumes`,
 which deliberately does **not** reuse `get_bars()`/`_snapshots_from_bars()`:
@@ -274,8 +284,8 @@ production data. It's also exactly why the volume floor's either-or
 exemption matters in practice, not just in principle: a genuinely active
 low-float name whose sandbox `average_daily_volume` gets dragged toward
 zero by 9 fake-looking days still survives the gate on
-`previous_day_volume` alone, so this known data-quality gap shouldn't
-cause real misses even before it's fixed.
+`previous_day_volume` or `current_day_volume` alone, so this known
+data-quality gap shouldn't cause real misses even before it's fixed.
 
 Separately (found during this same live testing, unrelated to the
 average-volume work itself): the configured FMP API key was returning
@@ -449,15 +459,16 @@ The same "temporary, not permanent" philosophy still applies to dollar
 volume at `BroadScanner`'s discovery-time checks: it's a `Candidate` field
 for scoring context, not a pass/fail gate, since a stock waking up from
 quiet is the target, not a disqualifier. The volume floor (average-daily/
-previous-day volume, see "Volume floor" above) is the one exception to
-that philosophy in `BroadScanner` -- it IS a structural, permanent gate
+previous-day/current-day volume, see "Volume floor" above) is the one
+exception to that philosophy in `BroadScanner` -- it IS a structural, permanent gate
 again (a symbol that misses it is never even discovered, not marked
 temporarily untradeable), per explicit user request. Its either-or design
 is what keeps it from re-introducing the exact problem the original
-all-or-nothing version had: a name only needs ONE of the two figures to
-clear its bar to survive, so a previously-quiet float seeing a single real
-volume day isn't excluded just because its longer-run average hasn't
-caught up yet.
+all-or-nothing version had: a name only needs ONE of the three figures
+(average-daily, previous-day, or current-day-so-far volume) to clear its
+bar to survive, so a previously-quiet float seeing a single real volume
+day -- or trading heavily *today* even with a quiet history -- isn't
+excluded just because the other two haven't caught up yet.
 
 ## Momentum Ignition Score
 

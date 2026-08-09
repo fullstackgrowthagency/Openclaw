@@ -70,11 +70,12 @@ What's implemented and tested:
   per-symbol timing this implies (noting those numbers predate this wider
   price range/pagination/4th source and now understate real scan time).
   Dollar volume is an informational `Candidate` field, not a discovery
-  gate. Average-daily and previous-day volume, however, ARE a structural
-  gate again (`BroadScannerConfig.min_average_daily_volume`/
-  `min_previous_day_volume`, 500,000/750,000 by default) -- a symbol is
-  rejected only when it misses BOTH, so clearing either bar alone is
-  enough to survive. See `docs/ARCHITECTURE.md`'s "Volume floor" and
+  gate. Average-daily, previous-day, and current-day (today's
+  volume-so-far) volume, however, ARE a structural gate again
+  (`BroadScannerConfig.min_average_daily_volume`/`min_previous_day_volume`/
+  `min_current_day_volume`, 500,000/750,000/500,000 by default) -- a
+  symbol is rejected only when it misses ALL THREE, so clearing any one
+  bar alone is enough to survive. See `docs/ARCHITECTURE.md`'s "Volume floor" and
   "Structural vs. temporary disqualification" sections for the full
   reasoning, and for the same temporary-not-permanent distinction still
   applied to `CandidateWatcher`'s spread/liquidity checks
