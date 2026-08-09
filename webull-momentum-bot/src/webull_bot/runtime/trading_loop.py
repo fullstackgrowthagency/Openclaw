@@ -23,10 +23,30 @@ objects on every call, so re-fetching each tick would silently discard that
 running state. Instead, a local Position is seeded once (from the broker,
 for an accurate avg_entry_price) right when an entry fill is confirmed, and
 this loop's own dict is the source of truth for it until the position closes.
+
+Concurrency model (run_forever only -- run_once() stays single-threaded,
+see below): universe rescanning is slow (see TradingLoopConfig's docstring
+for measured per-symbol timing) and used to run inline in the main loop,
+which meant a candidate/position tick -- including live stop-loss/exit
+management -- could be blocked behind a full rescan for its entire
+duration. run_forever() now runs the rescan on its own background daemon
+thread (_universe_rescan_loop) while the main thread runs
+_process_all_candidates() back-to-back on its own tight
+poll_interval_seconds cadence, so exit management is never stuck waiting
+on a scan. Both threads touch self.candidates (the rescan thread inserts
+newly discovered candidates; the main thread iterates and mutates existing
+ones), so all access to it goes through self._candidates_lock -- see
+_snapshot_candidates/get_candidates (read) and _rescan_universe (write).
+The lock is only ever held briefly to copy/insert into the dict itself,
+never across a network call or a full candidate-processing pass.
+run_once() is unchanged and still does the rescan inline on its own
+thread, synchronously, for backward compatibility with callers (mainly
+tests) that call it directly and expect a single deterministic pass.
 """
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -143,6 +163,10 @@ class TradingLoop:
         self.momentum_event_tracker = momentum_event_tracker
 
         self.candidates: dict[str, Candidate] = {}
+        # Guards structural access (insert/copy) to self.candidates only --
+        # see this module's docstring's "Concurrency model" section. Held
+        # only briefly, never across a network call or a full processing pass.
+        self._candidates_lock = threading.Lock()
         self._entry_signals: dict[str, Signal] = {}       # symbol -> signal that triggered a pending entry
         self._pending_entry_orders: dict[str, Order] = {}  # symbol -> submitted-but-not-yet-filled entry order
         self._pending_exit_orders: dict[str, tuple[Order, Signal]] = {}  # symbol -> (order, exit signal)
@@ -165,9 +189,17 @@ class TradingLoop:
             logger.exception("BroadScanner.scan failed.")
             return
 
-        for candidate in discovered:
-            if candidate.symbol not in self.candidates:
-                self.candidates[candidate.symbol] = candidate
+        with self._candidates_lock:
+            for candidate in discovered:
+                if candidate.symbol not in self.candidates:
+                    self.candidates[candidate.symbol] = candidate
+
+    def _snapshot_candidates(self) -> list[Candidate]:
+        """Lock-protected copy of the tracked candidates' values, safe to
+        iterate while _rescan_universe concurrently inserts into the dict
+        on the background rescan thread (see this module's docstring)."""
+        with self._candidates_lock:
+            return list(self.candidates.values())
 
     # -- per-candidate processing ---------------------------------------------
 
@@ -448,9 +480,10 @@ class TradingLoop:
 
     def get_candidates(self) -> dict[str, Candidate]:
         """Shallow copy of the tracked candidates dict -- safe to iterate
-        without racing a concurrent run_once() mutating it (e.g. from a
-        dashboard reading this loop's state from another thread)."""
-        return dict(self.candidates)
+        without racing a concurrent rescan/run_once() mutating it (e.g. from
+        a dashboard reading this loop's state from another thread)."""
+        with self._candidates_lock:
+            return dict(self.candidates)
 
     def get_open_positions(self) -> dict[str, Position]:
         return dict(self._positions)
@@ -458,6 +491,12 @@ class TradingLoop:
     # -- main loop -------------------------------------------------------------
 
     def run_once(self, now: Optional[datetime] = None) -> None:
+        """Single-threaded, synchronous pass: rescan (if due) then process
+        every candidate, all on the caller's thread. Kept exactly as it
+        always behaved for callers (mainly tests) that call it directly and
+        expect one deterministic pass -- run_forever() does NOT call this;
+        it runs the rescan on a separate background thread instead (see this
+        module's docstring's "Concurrency model" section)."""
         now = now or datetime.utcnow()
         if (
             self._last_universe_scan is None
@@ -466,14 +505,40 @@ class TradingLoop:
             self._rescan_universe(now)
             self._last_universe_scan = now
 
-        for candidate in list(self.candidates.values()):
+        self._process_all_candidates(now)
+
+    def _process_all_candidates(self, now: datetime) -> None:
+        for candidate in self._snapshot_candidates():
             try:
                 self._process_candidate(candidate, now)
             except Exception:
                 logger.exception("Unhandled error processing candidate %s; continuing loop.", candidate.symbol)
 
-    def run_forever(self, stop_flag: Optional[Callable[[], bool]] = None) -> None:
-        """Runs run_once() on a timer until stop_flag() returns True (if provided)."""
+    def _universe_rescan_loop(self, stop_flag: Optional[Callable[[], bool]]) -> None:
+        """Runs on a background daemon thread from run_forever(): repeatedly
+        rescans the universe back-to-back (the configured interval is a
+        floor, not an idle wait -- see TradingLoopConfig's docstring), so
+        the main thread's candidate/position processing never blocks on it."""
         while stop_flag is None or not stop_flag():
-            self.run_once()
+            now = datetime.utcnow()
+            self._rescan_universe(now)
+            self._last_universe_scan = now
+            elapsed = (datetime.utcnow() - now).total_seconds()
+            remaining = self.config.universe_rescan_interval_seconds - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+
+    def run_forever(self, stop_flag: Optional[Callable[[], bool]] = None) -> None:
+        """Runs candidate/position processing back-to-back on
+        poll_interval_seconds, with universe rescanning decoupled onto its
+        own background thread so a slow rescan can never delay exit/stop-
+        loss management -- see this module's docstring's "Concurrency
+        model" section. Runs until stop_flag() returns True (if provided)."""
+        rescan_thread = threading.Thread(
+            target=self._universe_rescan_loop, args=(stop_flag,), daemon=True, name="universe-rescan",
+        )
+        rescan_thread.start()
+        while stop_flag is None or not stop_flag():
+            now = datetime.utcnow()
+            self._process_all_candidates(now)
             time.sleep(self.config.poll_interval_seconds)

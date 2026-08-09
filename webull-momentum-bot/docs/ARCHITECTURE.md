@@ -47,6 +47,31 @@ ticks, and periodically re-runs `BroadScanner.scan()` against a
 `SymbolUniverseProvider` to discover new candidates
 (`universe_rescan_interval_seconds`).
 
+**Concurrency: rescanning runs on its own background thread, decoupled from
+candidate/position processing.** A full universe rescan now routinely takes
+many minutes (see "Universe size is no longer bounded" below) -- long enough
+that running it inline on the same loop as candidate/position processing
+would starve everything else waiting behind it, including live stop-loss/
+exit management on open positions, for the rescan's entire duration. That
+used to be exactly how this worked and was a real gap, not a hypothetical
+one, for a bot that can be holding an open position while a scan is running.
+`run_forever()` fixes this by spawning `_universe_rescan_loop` on a daemon
+thread (repeating the rescan back-to-back, since
+`universe_rescan_interval_seconds` is a floor, not an idle wait -- a scan
+almost always takes longer than the configured interval) while the main
+thread runs `_process_all_candidates()` back-to-back on its own tight
+`poll_interval_seconds` cadence, completely independent of how long the
+current rescan is taking. Both threads touch the shared `self.candidates`
+dict (the rescan thread inserts newly discovered candidates; the main
+thread iterates and mutates existing ones), so all access goes through
+`self._candidates_lock`, held only briefly to copy or insert into the dict
+itself -- never across a network call or a full candidate-processing pass.
+`run_once()` itself is unchanged: it still rescans inline, synchronously,
+on the caller's own thread, for backward compatibility with callers
+(mainly tests) that call it directly and expect one deterministic pass --
+`run_forever()` does not call `run_once()` at all anymore, it calls
+`_process_all_candidates()` and the rescan loop separately.
+
 The one thing this loop has to handle that the backtest engine doesn't:
 **`WebullBrokerClient.place_order` returns `status=SUBMITTED`, not
 `FILLED`** (confirmed live -- a 2xx response means Webull accepted the
@@ -467,7 +492,12 @@ Two different data paths, deliberately:
   reflect the current process's actual in-memory state, not a snapshot that
   might be stale or never got persisted. `get_candidates()`/`get_open_positions()`
   return shallow copies specifically so a dashboard request from another
-  thread can't race a concurrent `run_once()` mutating the underlying dicts.
+  thread can't race a concurrent rescan or candidate-processing pass
+  mutating the underlying dicts -- `get_candidates()` takes
+  `_candidates_lock` for this (see "Concurrency: rescanning runs on its own
+  background thread" above); `get_open_positions()` doesn't need a lock
+  since `_positions` is only ever touched from the single candidate-
+  processing thread, never from the background rescan thread.
 - **Historical panels** (trade history, performance/win-rate) read from the
   database via `db/repository.py`.
 

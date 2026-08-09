@@ -12,6 +12,8 @@ Two styles here, deliberately:
     returns SUBMITTED first (confirmed live), so that path needs its own
     coverage independent of a real network connection.
 """
+import threading
+import time as time_module
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
@@ -423,3 +425,120 @@ def test_momentum_event_not_marked_traded_when_risk_engine_rejects():
 
     event = recorder.get(1)
     assert event.was_traded is False
+
+
+# -- background rescan / candidate-processing decoupling (run_forever) ------
+#
+# Regression coverage for: universe rescanning used to run inline inside
+# run_once()/run_forever(), blocking candidate/position processing --
+# including live stop-loss/exit management -- for the rescan's entire
+# duration (which can be many minutes with a wide universe, see
+# TradingLoopConfig's docstring). run_forever() now runs the rescan on its
+# own background thread so candidate processing keeps ticking on its own
+# tight poll_interval_seconds cadence regardless of rescan duration. See
+# trading_loop.py's module docstring's "Concurrency model" section.
+
+
+def test_run_once_stays_single_threaded_and_synchronous():
+    # run_once() must keep its original, backward-compatible contract for
+    # callers (mainly tests) that call it directly and expect one
+    # deterministic pass on their own thread -- it must NOT spawn the
+    # background rescan thread that run_forever() now uses.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    threads_before = threading.active_count()
+    loop.run_once(now=datetime.utcnow())
+    assert threading.active_count() == threads_before
+
+
+def test_run_forever_processes_candidates_while_rescan_is_still_in_flight():
+    broker = PaperBrokerClient()
+    broker.connect()
+
+    class _SlowUniverseProvider:
+        def get_symbols(self):
+            time_module.sleep(0.3)
+            return []
+
+    float_provider = _SingleSymbolFloatProvider("TEST", 3_000_000)
+    broad_scanner = BroadScanner(broker, float_provider)
+    watcher = CandidateWatcher()
+    from webull_bot.scanner.trigger_engine import TriggerEngine
+
+    risk_engine = RiskEngine()
+    order_manager = OrderManager(broker, risk_engine, get_settings())
+    loop = TradingLoop(
+        broker, _SlowUniverseProvider(), broad_scanner, watcher,
+        TriggerEngine([MomentumBreakoutStrategy()]), order_manager, PositionManager(), risk_engine,
+        config=TradingLoopConfig(poll_interval_seconds=0.02, universe_rescan_interval_seconds=0.02),
+    )
+
+    process_call_count = 0
+    count_lock = threading.Lock()
+    original_process_all = loop._process_all_candidates
+
+    def _counting_process_all_candidates(now):
+        nonlocal process_call_count
+        with count_lock:
+            process_call_count += 1
+        original_process_all(now)
+
+    loop._process_all_candidates = _counting_process_all_candidates
+
+    stop_event = threading.Event()
+    runner = threading.Thread(target=loop.run_forever, kwargs={"stop_flag": stop_event.is_set})
+    runner.start()
+    try:
+        # The background rescan thread is still asleep inside its first
+        # get_symbols() call for this whole window -- if processing were
+        # still blocked behind the rescan (the old bug), process_call_count
+        # would still be 0 at this point.
+        time_module.sleep(0.35)
+    finally:
+        stop_event.set()
+        runner.join(timeout=2.0)
+
+    assert not runner.is_alive()
+    assert process_call_count >= 5
+
+
+def test_candidates_dict_is_thread_safe_under_concurrent_rescan_and_reads():
+    # Regression for a dict-mutated-during-iteration race: the rescan thread
+    # inserts into self.candidates while readers (e.g. the dashboard, or the
+    # main loop's own processing pass) iterate/copy it concurrently.
+    from webull_bot.state_machine import new_candidate
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    loop.broad_scanner.scan = lambda symbols: [new_candidate(s) for s in symbols]
+    loop.universe_provider.get_symbols = lambda: [f"SYM{i}" for i in range(50)]
+
+    errors: list[Exception] = []
+
+    def _rescan_repeatedly():
+        for _ in range(50):
+            try:
+                loop._rescan_universe(datetime.utcnow())
+            except Exception as exc:  # pragma: no cover - failure path under test
+                errors.append(exc)
+
+    def _read_repeatedly():
+        for _ in range(200):
+            try:
+                loop.get_candidates()
+                loop._snapshot_candidates()
+            except Exception as exc:  # pragma: no cover - failure path under test
+                errors.append(exc)
+
+    writer = threading.Thread(target=_rescan_repeatedly)
+    reader = threading.Thread(target=_read_repeatedly)
+    writer.start()
+    reader.start()
+    writer.join(timeout=5.0)
+    reader.join(timeout=5.0)
+
+    assert not writer.is_alive() and not reader.is_alive()
+    assert errors == []
+    assert len(loop.candidates) == 50
