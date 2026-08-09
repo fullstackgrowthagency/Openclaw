@@ -614,7 +614,7 @@ bug. Fixed by finalizing before that last `update()` call; see
 `tests/test_event_recorder.py::test_final_update_call_includes_the_finalized_outcome_label`,
 which fails without the fix.
 
-## Free-float data (FMP)
+## Free-float data (FMP + yfinance fallback)
 
 `data/float_providers/fmp.py` is a real, network-verified integration
 against Financial Modeling Prep's `stable` API namespace (`/stable/shares-float`
@@ -628,6 +628,37 @@ remains as an alternate skeleton, unused unless FMP is unconfigured.
 `FMPFloatProvider` takes an injectable `http_get` callable specifically so
 `tests/test_fmp_float_provider.py` can run hermetically against canned
 responses shaped like the real API, without a network call or API key.
+
+**yfinance fallback (2026-08-09):** FMP's free tier has already hit real
+429s during this project's own live testing (see the average-volume
+section above), so `get_float_provider` also wraps whichever primary it
+picked in `FallbackFloatProvider` (`data/float_providers/fallback.py`)
+with `YFinanceFloatProvider` (`data/float_providers/yfinance_provider.py`)
+as the sole fallback, controlled by `Settings.enable_yfinance_fallback`
+(default on). `FallbackFloatProvider` tries `primary` first for every
+symbol and only falls through to `fallbacks` (tried in order) once the
+primary has already raised for that symbol -- `get_float_data_bulk` does
+the equivalent per-symbol reconciliation, calling each fallback only with
+whatever the previous provider(s) left missing. This matters because
+`BroadScanner._check_symbol` treats any `get_float_data` exception as a
+hard structural rejection (`except Exception: return None`) -- without a
+fallback, a single rate-limited FMP call silently drops a symbol from
+discovery entirely for that cycle.
+
+`YFinanceFloatProvider` is deliberately never used as a standalone/primary
+provider -- it goes through the unofficial, scraped `yfinance` package
+(Yahoo publishes no supported API for this), and Yahoo is known to
+throttle traffic from datacenter/cloud IP ranges, which is exactly what a
+VPS deployment looks like to them. Wiring it in strictly as a fallback
+means a Yahoo block just means "no fallback available today," not a new
+failure mode layered on top of a working FMP integration. Its
+`get_info()`-derived `floatShares` field is why it's worth using over
+other free tiers (Finnhub, Polygon, Alpha Vantage all give shares
+outstanding, not actual free float) -- see that module's docstring. Like
+`FMPFloatProvider`, it takes an injectable `info_fetcher` callable so
+`tests/test_yfinance_float_provider.py` runs hermetically with no real
+Yahoo call and no dependency on the `yfinance` package actually being
+importable in the test environment.
 
 ## Webull integration
 

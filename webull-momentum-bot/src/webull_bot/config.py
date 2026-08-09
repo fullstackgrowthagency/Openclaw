@@ -137,6 +137,18 @@ class Settings:
         default_factory=lambda: PROJECT_ROOT / "data" / "float_cache"
     )
     float_cache_ttl_hours: int = field(default_factory=lambda: _env_int("FLOAT_CACHE_TTL_HOURS", 24))
+    # Wraps whichever primary float provider is configured (FMP/Massive)
+    # with data/float_providers/yfinance_provider.py as a free, best-effort
+    # secondary -- see get_float_provider() and fallback.py. Yahoo Finance
+    # via yfinance is unofficial/scraped and known to throttle datacenter
+    # IPs (exactly what a VPS deployment looks like to them), so this only
+    # ever helps when it helps; a Yahoo block just means no fallback that
+    # day, not a new failure mode, since it's never the sole provider.
+    # Default on since it's strictly additive; set false to skip the extra
+    # network round-trip entirely once a symbol's primary lookup fails.
+    enable_yfinance_fallback: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_YFINANCE_FALLBACK", True)
+    )
 
     def is_live_trading_authorized(self) -> bool:
         """

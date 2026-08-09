@@ -25,7 +25,19 @@ What's implemented and tested:
   verified** Financial Modeling Prep (FMP) integration
   (`data/float_providers/fmp.py`, selected automatically by
   `get_float_provider()` when `FMP_API_KEY` is set). Massive remains an
-  alternate skeleton if you switch providers later.
+  alternate skeleton if you switch providers later. Whichever primary is
+  selected is automatically paired with a free Yahoo Finance fallback
+  (`data/float_providers/yfinance_provider.py`, via the unofficial
+  `yfinance` package -- no API key needed) through
+  `FallbackFloatProvider` (`data/float_providers/fallback.py`): if the
+  primary fails or rate-limits for a symbol, Yahoo's `floatShares` field
+  (real float, not a shares-outstanding approximation) is tried before
+  giving up on that symbol. On by default (`ENABLE_YFINANCE_FALLBACK=true`);
+  set it to `false` to skip the extra round-trip. Since Yahoo's endpoint is
+  unofficial/scraped and known to throttle datacenter IPs (which most VPS
+  deployments look like), it's wired in strictly as a secondary -- a Yahoo
+  block just means no fallback that day, not a new failure mode, since it's
+  never the sole source.
 - Momentum metrics (float turnover/velocity, RVOL, volume/price
   acceleration, VWAP, spread, dollar volume, etc.)
 - Momentum Ignition Score with YAML-configurable weights/thresholds
@@ -195,7 +207,10 @@ pytest -q
 
 `FMP_API_KEY` (Financial Modeling Prep) is required for real free-float
 data; without it, `get_float_provider()` raises rather than silently
-falling back to fake data. Get a key at financialmodelingprep.com.
+falling back to fake data. Get a key at financialmodelingprep.com. A free
+Yahoo Finance fallback (via `yfinance`, no key needed) is wired in
+automatically behind FMP -- see `ENABLE_YFINANCE_FALLBACK` in
+`.env.example` if you want to turn it off.
 
 Create the database schema once you have a Postgres/Supabase connection
 string in `DATABASE_URL`:
