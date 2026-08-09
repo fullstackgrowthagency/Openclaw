@@ -85,6 +85,14 @@ def test_status_reflects_kill_switch(loop, client):
     assert resp.json()["kill_switch_active"] is True
 
 
+def test_responses_disable_caching(client):
+    # Regression for a real bug: a browser kept a stale cached app.js after
+    # a deploy added a table column, silently shifting every value after it
+    # under the wrong header with no visible error (see _NoCacheMiddleware).
+    resp = client.get("/api/status")
+    assert resp.headers["cache-control"] == "no-store"
+
+
 def test_candidates_reflects_live_loop_state(loop, client):
     candidate = new_candidate("TEST")
     transition(candidate, CandidateState.WATCHING)

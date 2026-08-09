@@ -15,11 +15,32 @@ from typing import Callable
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..db.repository import get_performance_summary, get_recent_trades
 from ..runtime.trading_loop import TradingLoop
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+
+class _NoCacheMiddleware(BaseHTTPMiddleware):
+    """Without this, a phone/mobile browser can end up running a stale
+    cached app.js against a freshly-deployed index.html -- confirmed live
+    2026-08-09: after adding a Price column, a user's browser kept an old
+    cached app.js that only built 6 <td> cells per row against the new
+    7-<th> header, silently shifting every column from Price onward left
+    by one (Resistance's value appeared under the Price header, the reason
+    text under Resistance, the timestamp under Reason, and no data at all
+    under Updated) -- with no error, just data quietly under the wrong
+    label. This is a small internal dev dashboard, not a high-traffic
+    site, so unconditionally disabling caching on every response is a
+    simpler and more robust fix than cache-busting query strings or
+    fine-grained per-asset cache policy."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 def _last_transition_reason(notes: str) -> str | None:
@@ -37,6 +58,7 @@ def _last_transition_reason(notes: str) -> str | None:
 
 def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session], trading_mode: str) -> FastAPI:
     app = FastAPI(title="Webull Momentum Bot Dashboard")
+    app.add_middleware(_NoCacheMiddleware)
 
     @app.get("/api/status")
     def get_status():
