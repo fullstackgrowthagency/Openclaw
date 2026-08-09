@@ -67,6 +67,7 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
                 "symbol": candidate.symbol,
                 "state": candidate.state.value,
                 "score": candidate.latest_score.score if candidate.latest_score else None,
+                "price": candidate.last_price,
                 "resistance_level": candidate.resistance_level,
                 "discovered_at": candidate.discovered_at.isoformat(),
                 "last_updated_at": candidate.last_updated_at.isoformat(),

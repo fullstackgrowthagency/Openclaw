@@ -4,13 +4,16 @@ intraday high with static (volume-profile-derived) resistance levels --
 see scanner/candidate_watcher.py's docstring for the "nearest untested
 ceiling" rationale. update()'s score/state-transition behavior has
 integration coverage via test_trading_loop.py/test_backtest_engine.py;
-this file is specifically about the resistance-merge logic that changed.
+this file is specifically about the resistance-merge logic that changed,
+plus update()'s candidate.last_price bookkeeping (dashboard/app.py's
+Price column reads that field).
 """
 from datetime import datetime
 
+from webull_bot.enums import CandidateState
 from webull_bot.models import Candidate
 from webull_bot.scanner.candidate_watcher import CandidateWatcher
-from webull_bot.state_machine import new_candidate
+from webull_bot.state_machine import new_candidate, transition
 
 
 def _snapshot(high_of_day: float):
@@ -69,3 +72,21 @@ def test_update_resistance_static_level_wins_over_stale_running_high():
     candidate = _candidate(static_resistance_levels=[15.0], resistance_level=12.0)
     watcher.update_resistance(candidate, _snapshot(11.0))
     assert candidate.resistance_level == 15.0
+
+
+def test_update_records_the_latest_price():
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    transition(candidate, CandidateState.WATCHING)
+    watcher.update(candidate, _snapshot(6.5))
+    assert candidate.last_price == 6.5
+
+
+def test_update_does_not_touch_last_price_once_rejected():
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    transition(candidate, CandidateState.WATCHING)
+    candidate.last_price = 4.0
+    transition(candidate, CandidateState.REJECTED, reason="test")
+    watcher.update(candidate, _snapshot(9.0))
+    assert candidate.last_price == 4.0  # update() returns early for REJECTED, nothing should change

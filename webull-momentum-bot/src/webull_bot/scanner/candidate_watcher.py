@@ -47,6 +47,7 @@ class CandidateWatcher:
         if candidate.state == CandidateState.REJECTED:
             return candidate
 
+        candidate.last_price = snapshot.last_price
         history = self._push_history(candidate.symbol, snapshot)
 
         free_float = candidate.float_data.free_float_shares if candidate.float_data else None

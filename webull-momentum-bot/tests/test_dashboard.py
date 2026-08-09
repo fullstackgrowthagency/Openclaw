@@ -97,6 +97,17 @@ def test_candidates_reflects_live_loop_state(loop, client):
     assert rows[0]["symbol"] == "TEST"
     assert rows[0]["state"] == "watching"
     assert rows[0]["reason"] is None  # no transition reason was given above
+    assert rows[0]["price"] is None  # CandidateWatcher.update() hasn't ticked yet
+
+
+def test_candidates_exposes_the_latest_price(loop, client):
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    candidate.last_price = 7.42
+    loop.candidates["TEST"] = candidate
+
+    rows = client.get("/api/candidates").json()
+    assert rows[0]["price"] == 7.42
 
 
 def test_candidates_exposes_the_reason_for_the_current_state(loop, client):

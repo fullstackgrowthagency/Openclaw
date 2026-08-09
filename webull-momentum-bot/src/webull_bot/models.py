@@ -116,6 +116,7 @@ class Candidate:
     float_data: Optional[FloatData] = None
     latest_metrics: Optional[MomentumMetrics] = None
     latest_score: Optional[MomentumScore] = None
+    last_price: Optional[float] = None  # set from the latest snapshot seen by CandidateWatcher.update(); None until its first tick
     resistance_level: Optional[float] = None
     # Static levels from volume-profile analysis at discovery time (see
     # scanner/broad_scanner.py's _compute_static_resistance_levels and
