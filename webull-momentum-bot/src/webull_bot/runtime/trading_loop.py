@@ -51,9 +51,36 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TradingLoopConfig:
     poll_interval_seconds: float = 5.0
-    universe_rescan_interval_seconds: float = 60.0
+    # Webull's sandbox enforces a real sustained rate limit paced globally
+    # by webull_market_data_limiter (1.0s minimum interval) regardless of
+    # BroadScanner's concurrency -- see brokers/webull/retry.py's module
+    # docstring for the live discovery process, which took several rounds
+    # to get right (a rate limiter that only paced the first attempt of
+    # each call, not retries, still produced hard failures under real
+    # concurrent load). A live end-to-end test after that fix -- 100 real
+    # symbols from MultiSourceUniverseProvider, 10 concurrent workers,
+    # get_snapshot against the actual sandbox -- completed with **zero**
+    # hard failures (some individual 429s, all recovered by the paced
+    # retry) but took 124.9s, i.e. ~1.25s/symbol, not the naive 1.0s the
+    # limiter's own interval would suggest -- occasional retries add real
+    # time on top. With max_universe_size=100 below, that's the exact
+    # scenario just measured; 180s leaves ~45% margin over that measured
+    # 125s so a scan reliably finishes before the next one is due, rather
+    # than sizing the interval to a best-case number that live testing
+    # already showed doesn't hold.
+    universe_rescan_interval_seconds: float = 180.0
     cooldown_seconds: float = 900.0  # 15 min before a cooled-down candidate can be watched again
-    max_universe_size: int = 50
+    # Raised from the original 50 now that BroadScanner checks symbols
+    # concurrently (see scanner/broad_scanner.py) and the 3-source universe
+    # can return ~150-250 unique symbols before this cap is applied. Capped
+    # at 100 -- not higher -- specifically because 100 is what was actually
+    # verified live end-to-end (see universe_rescan_interval_seconds above)
+    # to complete with zero hard failures in a realistic time budget; going
+    # higher (e.g. 150-200) would extrapolate past that measurement rather
+    # than build on it, and would force stretching the rescan interval even
+    # further, delaying candidate management (which runs right after the
+    # rescan in the same run_once() call) on every cycle.
+    max_universe_size: int = 100
 
 
 class TradingLoop:

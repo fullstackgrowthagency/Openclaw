@@ -64,7 +64,7 @@ class WebullUniverseConfig:
     # names than RELATIVE_VOLUME_10D, since it's directly analogous to the
     # float_turnover metric the Momentum Ignition Score already computes.
     rank_type: str = "RELATIVE_VOLUME_10D"
-    page_size: int = 50
+    page_size: int = 100  # confirmed live 2026-08-08 that this endpoint accepts page_size=100
     min_price: float = 1.0
     max_price: float = 20.0
     max_market_value: Optional[float] = 2_000_000_000  # cheap prefilter; free float is checked properly later via FMP
@@ -88,12 +88,14 @@ class WebullUniverseProvider(SymbolUniverseProvider):
     def get_symbols(self) -> list[str]:
         from webull.data.common.category import Category
 
-        response = self._data_client.screener.get_most_active(
+        from ..brokers.webull.retry import call_with_retry
+
+        response = call_with_retry(lambda: self._data_client.screener.get_most_active(
             Category.US_STOCK.name,
             rank_type=self.config.rank_type,
             sort_by="DESC",
             page_size=str(self.config.page_size),
-        )
+        ))
         response.raise_for_status()
         rows = response.json().get("data", [])
         return _filter_screener_rows(
@@ -111,7 +113,7 @@ class WebullGainersLosersConfig:
     rank_type: str = "DAY_1"
     sort_by: str = "CHANGE_RATIO"   # rank by % price change, not volume/turnover/etc.
     direction: str = "DESC"         # DESC = gainers, ASC = losers
-    page_size: int = 50
+    page_size: int = 100
     min_price: float = 1.0
     max_price: float = 20.0
     max_market_value: Optional[float] = 2_000_000_000
@@ -136,13 +138,15 @@ class WebullGainersLosersUniverseProvider(SymbolUniverseProvider):
     def get_symbols(self) -> list[str]:
         from webull.data.common.category import Category
 
-        response = self._data_client.screener.get_gainers_losers(
+        from ..brokers.webull.retry import call_with_retry
+
+        response = call_with_retry(lambda: self._data_client.screener.get_gainers_losers(
             rank_type=self.config.rank_type,
             category=Category.US_STOCK.name,
             sort_by=self.config.sort_by,
             direction=self.config.direction,
             page_size=str(self.config.page_size),
-        )
+        ))
         response.raise_for_status()
         rows = response.json().get("data", [])
         return _filter_screener_rows(

@@ -96,6 +96,48 @@ to appear on one list to reach `BroadScanner`, which vets every symbol
 identically (price, dollar volume, real free float via FMP) regardless of
 which list(s) surfaced it.
 
+**Webull's sandbox has a real sustained rate limit, confirmed live
+(2026-08-08) across several rounds of testing, each round correcting the
+last:**
+1. A burst test (10 concurrent `get_snapshot` calls) only tripped 2 429s
+   and looked like a non-issue.
+2. A follow-up sustained-interval test showed the real ceiling is close to
+   a flat **~1 request/second regardless of concurrency** (0.5s spacing =
+   0/20 errors, 0.3s spacing = 6/20 errors).
+3. A real 149-symbol scan using reactive retry alone (no pacing) hit 101
+   rate-limit errors and didn't finish inside a 60s timeout -- retry-with-
+   backoff can't paper over sustained overload once retries themselves add
+   load back into an already-saturated window.
+4. A first `RateLimiter` fix paced only the *first* attempt of each call
+   (call sites did `limiter.wait()` once, then `call_with_retry(fn)`). At
+   both 0.6s and 1.0s spacing with 10 concurrent workers (`BroadScanner`'s
+   real config), 9 of 60 calls still failed outright -- raising the
+   interval made no difference, because retries triggered inside
+   `call_with_retry` ran on their own backoff timer, entirely outside the
+   pacer, and could still stack up across threads and re-trigger each
+   other's 429s.
+5. The actual fix: `call_with_retry` now calls the shared
+   `webull_market_data_limiter` before *every* attempt, not just the
+   first, so a retry queues on the same global pacer as any other call.
+   Re-verified live end-to-end afterward: 100 real symbols from
+   `MultiSourceUniverseProvider`, 10 concurrent workers, against the actual
+   sandbox -- **zero hard failures** (a handful of individual 429s, all
+   recovered by the now-paced retry), completing in 124.9s (~1.25s/symbol
+   including retry overhead, vs. the limiter's own 1.0s interval).
+
+This pacing is why `max_universe_size` is capped at 100, not higher, even
+though the three-source universe can return 200+ unique symbols before
+truncation: `BroadScanner` issues one paced Webull call per universe
+symbol, so scanning N symbols takes roughly `N * 1.25s` of Webull-bound
+time (the measured figure above, not the limiter's bare 1.0s interval) no
+matter how many worker threads are checking symbols concurrently -- more
+workers only let FMP float lookups overlap with that, they can't make
+Webull itself go faster. 100 is what was actually verified live
+end-to-end with zero hard failures, rather than an extrapolation past
+that measurement. `universe_rescan_interval_seconds` was raised from 60s
+to 180s alongside it -- real margin (~45%) over the measured 125s so a
+scan reliably finishes before the next one is due.
+
 `PaperBrokerClient` has no live screener of its own, so paper mode falls
 back to `StaticUniverseProvider` with a placeholder watchlist -- paper mode
 is for exercising the pipeline against manually-fed snapshots, not

@@ -41,6 +41,21 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     documented (data-api.webull.com) but no sandbox equivalent was found or
     confirmed live. Wire this up once that host is confirmed, rather than
     guessing it.
+  - Rate limiting: firing 10 truly concurrent get_snapshot calls at the
+    sandbox tripped a 429 TOO_MANY_REQUESTS on 2 of them (2026-08-08), with
+    no data corruption or cross-request mixups -- the SDK itself is safe to
+    call from multiple threads. But that understated the real constraint:
+    the sandbox enforces something close to a flat ~1 request/second
+    sustained ceiling regardless of concurrency, and even a rate-limiter-
+    paced retry loop can fail under concurrency if only the *first* attempt
+    of each call is paced (retries firing on their own backoff schedule can
+    still stack up across threads and re-trigger each other's 429s). Both
+    get_snapshot and get_bars go through retry.call_with_retry, which now
+    paces every attempt -- including retries -- through the shared
+    retry.webull_market_data_limiter (see that module's docstring for the
+    full discovery writeup, since it was a multi-step process to find the
+    actual failure mode). This matters because BroadScanner calls
+    get_snapshot concurrently across many symbols at once.
 
 Safety (unchanged from the skeleton this replaces):
   - `WebullBrokerClient.is_live` reflects the *configured* trading mode.
@@ -68,6 +83,7 @@ from ...config import Settings, TradingMode
 from ...enums import OrderSide, OrderStatus, OrderType, TimeInForce
 from ...interfaces.broker import BrokerClient
 from ...models import Fill, MarketSnapshot, Order, Position
+from .retry import call_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +250,9 @@ class WebullBrokerClient(BrokerClient):
         )
 
     def get_snapshot(self, symbol: str) -> MarketSnapshot:
-        response = self._require_data_client().market_data.get_snapshot([symbol], Category.US_STOCK.name)
+        response = call_with_retry(
+            lambda: self._require_data_client().market_data.get_snapshot([symbol], Category.US_STOCK.name)
+        )
         response.raise_for_status()
         rows = response.json()
         if not rows:
@@ -292,8 +310,10 @@ class WebullBrokerClient(BrokerClient):
         timespan = _INTERVAL_TO_TIMESPAN.get(interval)
         if timespan is None:
             raise ValueError(f"Unsupported interval {interval!r}; supported: {sorted(_INTERVAL_TO_TIMESPAN)}")
-        response = self._require_data_client().market_data.get_history_bar(
-            symbol, Category.US_STOCK.name, timespan, count=str(lookback)
+        response = call_with_retry(
+            lambda: self._require_data_client().market_data.get_history_bar(
+                symbol, Category.US_STOCK.name, timespan, count=str(lookback)
+            )
         )
         response.raise_for_status()
         return self._snapshots_from_bars(symbol, response.json())

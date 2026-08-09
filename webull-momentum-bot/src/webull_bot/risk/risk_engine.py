@@ -38,7 +38,6 @@ class _DailyState:
     realized_pnl: float = 0.0
     trade_count: int = 0
     trades_per_ticker: dict[str, int] = field(default_factory=dict)
-    last_loss_at: dict[str, datetime] = field(default_factory=dict)
 
 
 class RiskEngine:
@@ -46,6 +45,14 @@ class RiskEngine:
         self.config = config or RiskConfig()
         self.kill_switch_active: bool = False
         self._daily = _DailyState(day=datetime.utcnow().date())
+        # Cooldown is a rolling time window (cooldown_minutes_after_loss),
+        # not a calendar-day concept -- unlike _DailyState's counters, it
+        # must survive _roll_day_if_needed. Keeping it inside _DailyState
+        # previously meant a loss recorded shortly before UTC midnight had
+        # its cooldown silently wiped by the very next evaluate() call that
+        # crossed into the new day, defeating the cooldown exactly when a
+        # trade was recent enough to still need it.
+        self._last_loss_at: dict[str, datetime] = {}
         self.events: list[RiskEvent] = []
 
     # -- bookkeeping -----------------------------------------------------
@@ -59,7 +66,7 @@ class RiskEngine:
         self._roll_day_if_needed(now)
         self._daily.realized_pnl += pnl
         if pnl < 0:
-            self._daily.last_loss_at[symbol] = now
+            self._last_loss_at[symbol] = now
 
     def engage_kill_switch(self, reason: str, now: Optional[datetime] = None) -> None:
         self.kill_switch_active = True
@@ -105,7 +112,7 @@ class RiskEngine:
         if ticker_trades >= self.config.max_trades_per_ticker_per_day:
             return reject(RiskEventType.MAX_TRADES_PER_TICKER_HIT, "Max trades for this ticker today reached.")
 
-        last_loss = self._daily.last_loss_at.get(signal.symbol)
+        last_loss = self._last_loss_at.get(signal.symbol)
         if last_loss is not None:
             cooldown_until = last_loss + timedelta(minutes=self.config.cooldown_minutes_after_loss)
             if now < cooldown_until:
