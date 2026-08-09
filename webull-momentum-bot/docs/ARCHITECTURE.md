@@ -125,18 +125,62 @@ last:**
    recovered by the now-paced retry), completing in 124.9s (~1.25s/symbol
    including retry overhead, vs. the limiter's own 1.0s interval).
 
-This pacing is why `max_universe_size` is capped at 100, not higher, even
-though the three-source universe can return 200+ unique symbols before
-truncation: `BroadScanner` issues one paced Webull call per universe
-symbol, so scanning N symbols takes roughly `N * 1.25s` of Webull-bound
-time (the measured figure above, not the limiter's bare 1.0s interval) no
+This pacing is why `max_universe_size` was capped at 100 (measured:
+`BroadScanner` issues one paced Webull call per universe symbol, so
+scanning N symbols takes roughly `N * 1.25s` of Webull-bound time no
 matter how many worker threads are checking symbols concurrently -- more
 workers only let FMP float lookups overlap with that, they can't make
-Webull itself go faster. 100 is what was actually verified live
-end-to-end with zero hard failures, rather than an extrapolation past
-that measurement. `universe_rescan_interval_seconds` was raised from 60s
-to 180s alongside it -- real margin (~45%) over the measured 125s so a
-scan reliably finishes before the next one is due.
+Webull itself go faster) -- **before** `_passes_average_volume_filter`
+(added later, see below) introduced a *second* per-symbol Webull call and
+changed that math again.
+
+**Average-volume filter** (`BroadScanner._passes_average_volume_filter`):
+excludes a symbol trading under `min_average_volume` (1,000,000) shares/day
+on average, unless its previous trading day alone already cleared that bar
+-- a previously-quiet float that just had one big volume day is exactly
+the pattern this bot targets, and shouldn't be excluded just because a
+longer average hasn't caught up to it. Backed by
+`WebullBrokerClient.get_daily_volumes`, which deliberately does **not**
+reuse `get_bars()`/`_snapshots_from_bars()`: that method accumulates
+volume across every fetched bar for intraday VWAP, which is correct for
+minute bars within one session but wrong for daily bars spanning multiple
+days (it would sum several days' volume together instead of reporting
+each day's own total). Confirmed live (2026-08-09) against raw daily bars
+that each day's `volume` field is already a clean, distinct per-day total,
+most-recent-first.
+
+Two live findings from that verification are worth flagging:
+- **Sandbox historical data quality varies by symbol liquidity.** Mega-caps
+  (AAPL, TSLA, NVDA) returned consistent, plausible volume across all 10
+  days requested. Every low-float/micro-cap symbol tested (the bot's actual
+  target universe) returned a real-looking value for only the *most
+  recent* day, with the other 9 showing near-zero placeholder-looking
+  figures. This means the "average" side of the filter is not meaningfully
+  exercised in sandbox testing for this bot's real target names -- it
+  effectively falls back to the previous-day-volume exception path almost
+  always. This appears to be a sandbox data-population limitation, not a
+  code bug, and should be re-verified once trading against real production
+  data.
+- **This filter roughly doubled Webull-bound scan time, not exactly 2x**:
+  a live 60-symbol re-measurement came back at 171.9s (~2.86s/symbol) vs.
+  the single-call figure of ~1.25s/symbol -- more than double, since
+  occasional retries apply per call, not per symbol. `max_universe_size`
+  was cut from 100 to 45 (roughly `100 * 1.25/2.86`) to preserve the same
+  rescan cadence rather than let scans stretch to 4-5 minutes; for a
+  momentum bot, missing a fast mover for that long defeats the point of
+  frequent rescanning, so breadth was traded down in favor of cadence.
+  `universe_rescan_interval_seconds` is 190s -- ~45% margin over 45
+  symbols' measured ~129s, consistent with the margin used before this
+  filter existed rather than sizing to a best case.
+
+Separately (found during this same live testing, unrelated to the filter
+itself): the configured FMP API key was returning `429 Limit Reach` on
+every endpoint tested, meaning `FloatDataProvider.get_float_data` fails
+for every symbol and `BroadScanner` silently rejects everything at that
+step (`_check_symbol`'s `except Exception: return None`) regardless of any
+other filter. Until that plan/quota issue is resolved, **no candidates
+will be discovered at all**, independent of price, volume, or float
+settings.
 
 `PaperBrokerClient` has no live screener of its own, so paper mode falls
 back to `StaticUniverseProvider` with a placeholder watchlist -- paper mode

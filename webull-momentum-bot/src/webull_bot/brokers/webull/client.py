@@ -318,6 +318,30 @@ class WebullBrokerClient(BrokerClient):
         response.raise_for_status()
         return self._snapshots_from_bars(symbol, response.json())
 
+    def get_daily_volumes(self, symbol: str, lookback_days: int) -> list[float]:
+        """Each entry is that day's OWN volume (not a running total), most
+        recent trading day first. Confirmed live (2026-08-09): raw daily
+        bars from market_data.get_history_bar(..., Timespan.D) come back
+        most-recent-first with each bar's own `volume` field already
+        distinct per day -- e.g. a real 5-day AAPL pull returned
+        34.4M/46.1M/49.4M/68.0M/75.1M, one full day's volume per entry, not
+        a cumulative sum. This deliberately bypasses get_bars() /
+        _snapshots_from_bars() above: that method accumulates volume across
+        every fetched bar for intraday VWAP, which is correct for minute
+        bars within one session but wrong here -- it would sum multiple
+        days' volume together instead of reporting each day's own total.
+        Not part of the BrokerClient interface (see interfaces/broker.py):
+        this is a Webull-specific capability with no real backing data in
+        paper/backtest mode, so callers (BroadScanner) check for it with
+        getattr rather than requiring every broker to implement it."""
+        response = call_with_retry(
+            lambda: self._require_data_client().market_data.get_history_bar(
+                symbol, Category.US_STOCK.name, Timespan.D.name, count=str(lookback_days)
+            )
+        )
+        response.raise_for_status()
+        return [float(row["volume"]) for row in response.json()]
+
     def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
         raise NotImplementedError(
             "Streaming (DataStreamingClient, MQTT-based) is not wired up: its "

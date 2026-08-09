@@ -22,6 +22,14 @@ raising max_workers doesn't let this scanner exceed Webull's ceiling --
 threads just queue on the limiter -- but it does let the FMP float lookup
 for one symbol overlap with another symbol's (paced) Webull snapshot call,
 which is where concurrency actually still buys wall-clock time now.
+
+The average-volume filter (`_passes_average_volume_filter`) adds a second
+Webull-paced call (`get_daily_volumes`) for every symbol that clears the
+price/dollar-volume checks above it, which meaningfully adds to per-scan
+wall-clock time -- see runtime/trading_loop.py's TradingLoopConfig for how
+max_universe_size/universe_rescan_interval_seconds were re-measured after
+adding it. It's skipped for brokers without real daily-volume history
+(paper/backtest) rather than rejecting everything in those modes.
 """
 from __future__ import annotations
 
@@ -41,6 +49,14 @@ class BroadScannerConfig:
     max_price: float = 20.0
     max_free_float_shares: float = 20_000_000
     min_dollar_volume: float = 200_000
+    # A stock averaging under this many shares/day is normally too illiquid
+    # for this strategy -- unless its previous trading day alone already
+    # cleared the bar (see _passes_average_volume_filter), which is exactly
+    # the "quiet float just woke up" pattern this bot targets. min_dollar_volume
+    # above is today's-volume-so-far * price and doesn't capture either of
+    # these on its own.
+    min_average_volume: float = 1_000_000
+    avg_volume_lookback_days: int = 10  # matches the relative_volume_10d convention used elsewhere (universe.py, MIS scoring)
     # Webull's own throughput ceiling is enforced globally by webull_market_data_limiter
     # (brokers/webull/retry.py), not by this value -- see module docstring. 10 just gives
     # enough overlap for FMP float lookups without spinning up needless idle threads.
@@ -66,6 +82,9 @@ class BroadScanner:
         if dollar_volume < self.config.min_dollar_volume:
             return None
 
+        if not self._passes_average_volume_filter(symbol):
+            return None
+
         try:
             float_data = self.float_provider.get_float_data(symbol)
         except Exception:
@@ -78,6 +97,32 @@ class BroadScanner:
         candidate.float_data = float_data
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate
+
+    def _passes_average_volume_filter(self, symbol: str) -> bool:
+        """Reject a stock trading under min_average_volume shares/day on
+        average, UNLESS the previous trading day alone already cleared that
+        bar -- a previously-quiet float that just had one big volume day is
+        exactly the pattern this bot targets, and shouldn't be excluded
+        just because a longer average hasn't caught up to it yet.
+
+        Skipped (returns True -- doesn't filter anything out) for brokers
+        with no real daily-volume history: paper/backtest mode has nothing
+        to check this against, so this uses getattr rather than requiring
+        every BrokerClient implementation to support it -- see
+        WebullBrokerClient.get_daily_volumes's docstring for why this isn't
+        part of the BrokerClient interface."""
+        get_daily_volumes = getattr(self.broker, "get_daily_volumes", None)
+        if get_daily_volumes is None:
+            return True
+        try:
+            volumes = get_daily_volumes(symbol, self.config.avg_volume_lookback_days)
+        except Exception:
+            return False  # consistent with get_snapshot/float_provider above: a failed lookup rejects, it doesn't pass through
+        if not volumes:
+            return True
+        average_volume = sum(volumes) / len(volumes)
+        previous_day_volume = volumes[0]  # most-recent-first, per get_daily_volumes' contract
+        return average_volume >= self.config.min_average_volume or previous_day_volume > self.config.min_average_volume
 
     def scan(self, symbol_universe: list[str]) -> list[Candidate]:
         if not symbol_universe:

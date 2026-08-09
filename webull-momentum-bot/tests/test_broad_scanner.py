@@ -135,3 +135,59 @@ def test_scan_min_dollar_volume_filter():
     scanner = BroadScanner(_VolumeAwareBroker(0.0, {}), _FakeFloatProvider(), BroadScannerConfig(min_dollar_volume=200_000))
     candidates = scanner.scan(["LOWVOL", "HIGHVOL"])
     assert [c.symbol for c in candidates] == ["HIGHVOL"]
+
+
+class _DailyVolumeAwareBroker(_SlowFakeBroker):
+    """Adds get_daily_volumes -- a capability real WebullBrokerClient has
+    but _SlowFakeBroker (standing in for paper/backtest) does not, since
+    _passes_average_volume_filter is meant to be a no-op without it."""
+
+    def __init__(self, daily_volumes: dict[str, list[float]]):
+        super().__init__(delay_seconds=0.0, prices={})
+        self.daily_volumes = daily_volumes
+
+    def get_daily_volumes(self, symbol, lookback_days):
+        return self.daily_volumes[symbol]
+
+
+def test_scan_rejects_low_average_volume_symbol():
+    broker = _DailyVolumeAwareBroker({"QUIET": [500_000] * 10})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert scanner.scan(["QUIET"]) == []
+
+
+def test_scan_keeps_low_average_volume_symbol_with_a_big_previous_day():
+    # Average is well under the 1M bar, but the most recent (index 0,
+    # most-recent-first) day alone cleared it -- the "quiet float just woke
+    # up" exception the filter exists for.
+    broker = _DailyVolumeAwareBroker({"WOKEUP": [1_500_000] + [200_000] * 9})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["WOKEUP"])
+    assert [c.symbol for c in candidates] == ["WOKEUP"]
+
+
+def test_scan_keeps_symbol_with_healthy_average_volume():
+    broker = _DailyVolumeAwareBroker({"LIQUID": [2_000_000] * 10})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["LIQUID"])
+    assert [c.symbol for c in candidates] == ["LIQUID"]
+
+
+def test_scan_rejects_symbol_on_daily_volume_lookup_failure():
+    class _FlakyDailyVolumeBroker(_DailyVolumeAwareBroker):
+        def get_daily_volumes(self, symbol, lookback_days):
+            raise RuntimeError("simulated Webull failure")
+
+    broker = _FlakyDailyVolumeBroker({})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    assert scanner.scan(["ANY"]) == []
+
+
+def test_scan_average_volume_filter_is_a_no_op_without_get_daily_volumes():
+    # _SlowFakeBroker has no get_daily_volumes at all -- representative of
+    # PaperBrokerClient, which has no real daily-volume history to check
+    # against. The filter must not reject anything in that case.
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    assert [c.symbol for c in candidates] == ["ANY"]
