@@ -22,6 +22,19 @@ from ..runtime.trading_loop import TradingLoop
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _last_transition_reason(notes: str) -> str | None:
+    """Candidate.notes accumulates one line per transition, formatted by
+    state_machine.py's transition() as "[iso timestamp] -> state: reason".
+    Only the most recent line explains the candidate's *current* state (e.g.
+    why it's REJECTED) -- the State/Updated columns already show the state
+    and timestamp, so this strips the "[ts] -> state:" prefix rather than
+    duplicating them in the dashboard's Reason column."""
+    if not notes:
+        return None
+    last_line = notes.rsplit("\n", 1)[-1]
+    return last_line.split(": ", 1)[-1] if ": " in last_line else last_line
+
+
 def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session], trading_mode: str) -> FastAPI:
     app = FastAPI(title="Webull Momentum Bot Dashboard")
 
@@ -49,6 +62,7 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
     def get_candidates():
         rows = []
         for candidate in trading_loop.get_candidates().values():
+            last_reason = _last_transition_reason(candidate.notes)
             rows.append({
                 "symbol": candidate.symbol,
                 "state": candidate.state.value,
@@ -56,6 +70,7 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
                 "resistance_level": candidate.resistance_level,
                 "discovered_at": candidate.discovered_at.isoformat(),
                 "last_updated_at": candidate.last_updated_at.isoformat(),
+                "reason": last_reason,
             })
         rows.sort(key=lambda r: r["score"] or 0, reverse=True)
         return rows

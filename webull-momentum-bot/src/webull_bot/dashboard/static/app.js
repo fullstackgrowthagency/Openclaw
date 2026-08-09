@@ -63,11 +63,12 @@ async function refreshCandidates() {
           <td><span class="state-pill state-${c.state}">${c.state.replace("_", " ")}</span></td>
           <td>${fmtNum(c.score, 1)}</td>
           <td>${fmtNum(c.resistance_level)}</td>
+          <td class="muted">${c.reason || "--"}</td>
           <td class="muted">${fmtTime(c.last_updated_at)}</td>
         </tr>`).join("")
-      : emptyRow(5, "No candidates tracked yet");
+      : emptyRow(6, "No candidates tracked yet");
   } catch (e) {
-    body.innerHTML = emptyRow(5, `Failed to load: ${e.message}`);
+    body.innerHTML = emptyRow(6, `Failed to load: ${e.message}`);
   }
 }
 

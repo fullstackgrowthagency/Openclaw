@@ -96,6 +96,21 @@ def test_candidates_reflects_live_loop_state(loop, client):
     assert len(rows) == 1
     assert rows[0]["symbol"] == "TEST"
     assert rows[0]["state"] == "watching"
+    assert rows[0]["reason"] is None  # no transition reason was given above
+
+
+def test_candidates_exposes_the_reason_for_the_current_state(loop, client):
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING, reason="passed broad scanner filters")
+    transition(candidate, CandidateState.REJECTED, reason="failed liquidity/spread check")
+    loop.candidates["TEST"] = candidate
+
+    rows = client.get("/api/candidates").json()
+    assert rows[0]["state"] == "rejected"
+    # Only the reason for the *current* (most recent) transition should show,
+    # not the full multi-line history, and without the redundant
+    # "[timestamp] -> rejected:" prefix already covered by other columns.
+    assert rows[0]["reason"] == "failed liquidity/spread check"
 
 
 def test_positions_includes_unrealized_pnl_from_live_snapshot(loop, client):
