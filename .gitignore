@@ -31,3 +31,7 @@ exports/
 backups/
 *.tar.gz
 *.tgz
+
+# Webull SDK writes a log file (with rotated date-suffixed variants) to
+# whatever directory a script using it happens to run from
+webull_trade_sdk.log*

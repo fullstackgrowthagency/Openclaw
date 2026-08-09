@@ -56,9 +56,25 @@ What's implemented and tested:
   volume), `get_most_active(rank_type="TURNOVER_RATE")` (% of float traded
   today -- directly analogous to the float_turnover metric the MIS already
   computes), and `get_gainers_losers(rank_type="DAY_1")` (today's top %
-  price movers). Results are interleaved round-robin across sources before
-  the per-cycle size cap is applied, so the cap doesn't let one source
-  crowd out the others.
+  price movers). There is no cap on how many symbols get scanned per cycle
+  -- every symbol every source returns gets checked, so full-scan duration
+  scales with universe size (measured live at ~150 symbols) rather than
+  being bounded by a fixed number; see `docs/ARCHITECTURE.md` for the
+  measured per-symbol timing this implies.
+- **Resistance detection via volume profile** (`metrics/volume_profile.py`):
+  resistance is no longer just the running high of day. At discovery,
+  `BroadScanner` fetches recent intraday bars and builds a volume-at-price
+  histogram, keeping the biggest clusters ("high volume nodes") as static
+  resistance levels -- a more general stand-in for hand-picked levels like
+  prior-day-high or round numbers, since those usually show up as volume
+  clusters anyway, plus this gives a real strength signal a flat list of
+  price points can't. `CandidateWatcher` merges the nearest still-untested
+  static level with the running high on every tick. See
+  `docs/ARCHITECTURE.md`'s "Resistance detection" section for the full
+  design and an important data-shape caveat (Webull's raw bars reach back
+  as far as needed to find real data for illiquid names, which this
+  deliberately bounds to a recent calendar window before building the
+  profile).
 - **Dashboard** (`dashboard/app.py` + `scripts/run_dashboard.py`): a FastAPI
   backend + self-contained HTML/JS frontend, run with
   `python scripts/run_dashboard.py`. Live panels (candidates, open
@@ -98,7 +114,6 @@ What's still a skeleton or unverified (explicitly, not silently):
 - `data/float_providers/massive.py` -- unused now that FMP is wired up; kept
   only as an alternate skeleton
 - RVOL's historical intraday-volume-by-time-of-day baseline
-- Real resistance/support level detection (currently just running HOD)
 - Level 2 / order-flow features
 - Alembic migrations (use `scripts/init_db.py` for now)
 - `market_observations` (raw-ish sampled quote features, distinct from the

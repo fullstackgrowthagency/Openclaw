@@ -191,3 +191,56 @@ def test_scan_average_volume_filter_is_a_no_op_without_get_daily_volumes():
     scanner = BroadScanner(broker, _FakeFloatProvider())
     candidates = scanner.scan(["ANY"])
     assert [c.symbol for c in candidates] == ["ANY"]
+
+
+class _RawBarsAwareBroker(_SlowFakeBroker):
+    """Adds get_raw_bars -- a capability real WebullBrokerClient has but
+    _SlowFakeBroker (standing in for paper/backtest) does not, since
+    _compute_static_resistance_levels is meant to be a no-op without it."""
+
+    def __init__(self, raw_bars: dict[str, list[dict]], prices: dict[str, float] = None):
+        super().__init__(delay_seconds=0.0, prices=prices or {})
+        self.raw_bars = raw_bars
+
+    def get_raw_bars(self, symbol, interval, count):
+        return self.raw_bars[symbol]
+
+
+def _bar(low, high, volume, time="2026-08-01T12:00:00.000+0000"):
+    return {"time": time, "low": str(low), "high": str(high), "volume": str(volume)}
+
+
+def test_scan_populates_static_resistance_levels_from_volume_profile():
+    # A clear volume cluster around 8-9 (out of a broader 5-10 range) should
+    # surface as a high-volume node in the candidate's static levels.
+    bars = [_bar(5, 10, 100), _bar(8, 9, 5000), _bar(8, 9, 5000)]
+    broker = _RawBarsAwareBroker({"CLUSTERED": bars}, prices={"CLUSTERED": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["CLUSTERED"])
+    assert len(candidates) == 1
+    assert candidates[0].static_resistance_levels
+    assert any(8 <= level <= 9 for level in candidates[0].static_resistance_levels)
+
+
+def test_scan_leaves_static_resistance_levels_empty_on_raw_bars_failure():
+    class _FlakyRawBarsBroker(_RawBarsAwareBroker):
+        def get_raw_bars(self, symbol, interval, count):
+            raise RuntimeError("simulated Webull failure")
+
+    broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    # Unlike the average-volume filter, a failed lookup here must NOT
+    # reject the candidate -- it's an enrichment, not a discovery gate.
+    assert len(candidates) == 1
+    assert candidates[0].static_resistance_levels == []
+
+
+def test_scan_leaves_static_resistance_levels_empty_without_get_raw_bars():
+    # _SlowFakeBroker has no get_raw_bars at all -- representative of
+    # PaperBrokerClient.
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    assert len(candidates) == 1
+    assert candidates[0].static_resistance_levels == []

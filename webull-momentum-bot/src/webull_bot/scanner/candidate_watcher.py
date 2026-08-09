@@ -80,13 +80,27 @@ class CandidateWatcher:
         return candidate
 
     def update_resistance(self, candidate: Candidate, snapshot: MarketSnapshot) -> None:
-        """Roll this bar's high into the resistance level for future bars.
-        Callers must invoke this AFTER the trigger engine has evaluated the
-        current snapshot against `candidate.resistance_level`, not before --
-        see the note in `update()`.
+        """Roll this bar's high into the running high for future bars, then
+        merge in any static resistance levels from volume-profile analysis
+        (candidate.static_resistance_levels, set once at discovery -- see
+        BroadScanner._compute_static_resistance_levels and
+        metrics/volume_profile.py). Callers must invoke this AFTER the
+        trigger engine has evaluated the current snapshot against
+        `candidate.resistance_level`, not before -- see the note in
+        `update()`.
 
-        Resistance tracking here is intentionally simple: the running high
-        of day. Swap in real level detection (prior consolidation, premarket
-        high, round numbers, etc.) without changing this call site.
-        """
-        candidate.resistance_level = max(candidate.resistance_level or 0.0, snapshot.high_of_day) or None
+        The merge picks the *nearest* static level still above the running
+        high, not the highest one available: once intraday price trades
+        through a static level, it's no longer resistance (it may even act
+        as support going forward), so re-picking the closest remaining
+        ceiling each time keeps resistance_level meaning "the next real
+        obstacle," not "the biggest one on record." Falls back to the
+        plain running high (this method's entire behavior before static
+        levels existed) when no static level remains above it, or when
+        static_resistance_levels is empty -- e.g. paper/backtest mode, or a
+        broker/lookup that couldn't supply them (see
+        BroadScanner._compute_static_resistance_levels: that failure mode
+        is intentionally silent, not an error)."""
+        running_high = max(candidate.resistance_level or 0.0, snapshot.high_of_day)
+        levels_above = [level for level in candidate.static_resistance_levels if level > running_high]
+        candidate.resistance_level = min(levels_above) if levels_above else (running_high or None)

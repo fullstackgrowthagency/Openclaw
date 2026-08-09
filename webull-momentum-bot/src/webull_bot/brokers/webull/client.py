@@ -318,29 +318,51 @@ class WebullBrokerClient(BrokerClient):
         response.raise_for_status()
         return self._snapshots_from_bars(symbol, response.json())
 
-    def get_daily_volumes(self, symbol: str, lookback_days: int) -> list[float]:
-        """Each entry is that day's OWN volume (not a running total), most
-        recent trading day first. Confirmed live (2026-08-09): raw daily
-        bars from market_data.get_history_bar(..., Timespan.D) come back
-        most-recent-first with each bar's own `volume` field already
-        distinct per day -- e.g. a real 5-day AAPL pull returned
-        34.4M/46.1M/49.4M/68.0M/75.1M, one full day's volume per entry, not
-        a cumulative sum. This deliberately bypasses get_bars() /
-        _snapshots_from_bars() above: that method accumulates volume across
-        every fetched bar for intraday VWAP, which is correct for minute
-        bars within one session but wrong here -- it would sum multiple
-        days' volume together instead of reporting each day's own total.
+    def get_raw_bars(self, symbol: str, interval: str, count: int) -> list[dict]:
+        """Each entry is that bar's OWN {time, open, high, low, close, volume}
+        (not a running total), most-recent-first -- Webull's native response
+        shape and order, completely unprocessed. This deliberately bypasses
+        get_bars()/_snapshots_from_bars() above: that method accumulates
+        volume across every fetched bar for intraday VWAP, which is correct
+        for minute bars within one session but wrong for anything spanning
+        multiple sessions/days (it would sum them together instead of
+        reporting each bar's own total). Use this whenever a caller needs
+        each bar's own numbers -- daily volume-per-day, a multi-day volume
+        profile, etc.
+
+        Confirmed live (2026-08-09): for a low-float/illiquid symbol,
+        Webull returns the last `count` bars that actually have data, not
+        the last `count` calendar time-slots -- e.g. requesting 100 5-minute
+        bars for a liquid mega-cap (AAPL) spans about 1 day, while the same
+        request for an illiquid mover (MB) reaches back ~25 calendar days to
+        find 100 real (non-empty) bars. Callers that care about a bounded
+        calendar lookback (not just "N most recent real bars") must filter
+        the `time` field themselves -- this method does not.
+
         Not part of the BrokerClient interface (see interfaces/broker.py):
         this is a Webull-specific capability with no real backing data in
         paper/backtest mode, so callers (BroadScanner) check for it with
         getattr rather than requiring every broker to implement it."""
+        timespan = _INTERVAL_TO_TIMESPAN.get(interval)
+        if timespan is None:
+            raise ValueError(f"Unsupported interval {interval!r}; supported: {sorted(_INTERVAL_TO_TIMESPAN)}")
         response = call_with_retry(
             lambda: self._require_data_client().market_data.get_history_bar(
-                symbol, Category.US_STOCK.name, Timespan.D.name, count=str(lookback_days)
+                symbol, Category.US_STOCK.name, timespan, count=str(count)
             )
         )
         response.raise_for_status()
-        return [float(row["volume"]) for row in response.json()]
+        return response.json()
+
+    def get_daily_volumes(self, symbol: str, lookback_days: int) -> list[float]:
+        """Each entry is that day's OWN volume (not a running total), most
+        recent trading day first. Confirmed live (2026-08-09): raw daily
+        bars come back most-recent-first with each bar's own `volume` field
+        already distinct per day -- e.g. a real 5-day AAPL pull returned
+        34.4M/46.1M/49.4M/68.0M/75.1M, one full day's volume per entry, not
+        a cumulative sum. See get_raw_bars above for why this doesn't reuse
+        get_bars()/_snapshots_from_bars()."""
+        return [float(row["volume"]) for row in self.get_raw_bars(symbol, "1d", lookback_days)]
 
     def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
         raise NotImplementedError(

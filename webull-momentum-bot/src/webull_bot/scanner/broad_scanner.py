@@ -32,6 +32,14 @@ scanned (see TradingLoop._rescan_universe), so total scan time scales with
 however many symbols the universe returns that cycle rather than a fixed
 number. This filter is skipped for brokers without real daily-volume
 history (paper/backtest) rather than rejecting everything in those modes.
+
+`_compute_static_resistance_levels` adds a *third* Webull-paced call
+(`get_raw_bars`, fetching intraday bars for volume-profile analysis --
+see metrics/volume_profile.py) for every symbol that passes the filters
+above and gets an actual Candidate built. Unlike the filters above, a
+failure or missing capability here does not reject the candidate -- it
+just falls back to plain running-high-of-day resistance tracking, since
+this only enriches how resistance is tracked, it isn't a discovery gate.
 """
 from __future__ import annotations
 
@@ -41,6 +49,7 @@ from typing import Optional
 
 from ..interfaces.broker import BrokerClient
 from ..interfaces.float_provider import FloatDataProvider
+from ..metrics.volume_profile import compute_volume_profile, filter_bars_by_lookback, high_volume_node_levels
 from ..models import Candidate
 from ..state_machine import CandidateState, new_candidate, transition
 
@@ -59,6 +68,22 @@ class BroadScannerConfig:
     # these on its own.
     min_average_volume: float = 1_000_000
     avg_volume_lookback_days: int = 10  # matches the relative_volume_10d convention used elsewhere (universe.py, MIS scoring)
+    # Volume-profile resistance detection (metrics/volume_profile.py). 780
+    # 5-minute bars is ~10 trading days of continuous coverage for a liquid
+    # name; for an illiquid one, Webull returns however far back it has to
+    # reach to find 780 bars with real data (confirmed live 2026-08-09 this
+    # can be months) -- volume_profile_lookback_days then trims that back
+    # down to a bounded, *recent* calendar window before the profile is
+    # built, so ancient price action doesn't define today's resistance.
+    volume_profile_bar_interval: str = "5m"
+    volume_profile_bar_count: int = 780
+    volume_profile_lookback_days: int = 20
+    volume_profile_num_buckets: int = 50
+    volume_profile_top_n_nodes: int = 5
+    # Fraction of the single largest volume cluster's volume a bucket needs
+    # to count as a real high-volume node rather than background noise --
+    # unvalidated starting point, same spirit as scoring/weights.yaml.
+    volume_profile_min_node_pct: float = 0.3
     # Webull's own throughput ceiling is enforced globally by webull_market_data_limiter
     # (brokers/webull/retry.py), not by this value -- see module docstring. 10 just gives
     # enough overlap for FMP float lookups without spinning up needless idle threads.
@@ -97,6 +122,7 @@ class BroadScanner:
 
         candidate = new_candidate(symbol, now=snapshot.timestamp)
         candidate.float_data = float_data
+        candidate.static_resistance_levels = self._compute_static_resistance_levels(symbol)
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate
 
@@ -125,6 +151,34 @@ class BroadScanner:
         average_volume = sum(volumes) / len(volumes)
         previous_day_volume = volumes[0]  # most-recent-first, per get_daily_volumes' contract
         return average_volume >= self.config.min_average_volume or previous_day_volume > self.config.min_average_volume
+
+    def _compute_static_resistance_levels(self, symbol: str) -> list[float]:
+        """High-volume-node price levels from recent volume-profile
+        analysis (see metrics/volume_profile.py's module docstring for why
+        this is preferred over hand-picked special levels). Computed once
+        at discovery, not refreshed on every tick -- like float_data above,
+        this is a one-time enrichment of the candidate, not a per-snapshot
+        recomputation.
+
+        Unlike _passes_average_volume_filter, a failure or missing
+        capability here returns an empty list rather than failing the
+        candidate: this only affects how CandidateWatcher.update_resistance
+        merges in static levels on top of the running high of day, it
+        isn't a pass/fail discovery gate, so there's nothing to reject."""
+        get_raw_bars = getattr(self.broker, "get_raw_bars", None)
+        if get_raw_bars is None:
+            return []
+        try:
+            bars = get_raw_bars(symbol, self.config.volume_profile_bar_interval, self.config.volume_profile_bar_count)
+        except Exception:
+            return []
+        recent_bars = filter_bars_by_lookback(bars, lookback_days=self.config.volume_profile_lookback_days)
+        nodes = compute_volume_profile(recent_bars, num_buckets=self.config.volume_profile_num_buckets)
+        return high_volume_node_levels(
+            nodes,
+            top_n=self.config.volume_profile_top_n_nodes,
+            min_volume_pct_of_max=self.config.volume_profile_min_node_pct,
+        )
 
     def scan(self, symbol_universe: list[str]) -> list[Candidate]:
         if not symbol_universe:

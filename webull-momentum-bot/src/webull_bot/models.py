@@ -117,6 +117,15 @@ class Candidate:
     latest_metrics: Optional[MomentumMetrics] = None
     latest_score: Optional[MomentumScore] = None
     resistance_level: Optional[float] = None
+    # Static levels from volume-profile analysis at discovery time (see
+    # scanner/broad_scanner.py's _compute_static_resistance_levels and
+    # metrics/volume_profile.py) -- high-volume-node price levels that
+    # existed before this candidate started being tracked. Merged with the
+    # running intraday high in candidate_watcher.py's update_resistance:
+    # the nearest one of these still above the running high becomes the
+    # active resistance_level, rather than resistance_level being purely
+    # the running high of day.
+    static_resistance_levels: list[float] = field(default_factory=list)
     breakout_price: Optional[float] = None      # price at which the initial breakout occurred
     pullback_low: Optional[float] = None        # for breakout-pullback strategy tracking
     state_history: list[tuple[CandidateState, datetime]] = field(default_factory=list)

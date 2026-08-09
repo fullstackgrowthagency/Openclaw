@@ -223,6 +223,92 @@ watcher.update_resistance(candidate, snapshot)
 
 `backtest/engine.py` follows this order; any new live run-loop must too.
 
+## Resistance detection: volume profile, not hand-picked levels
+
+`resistance_level` used to be purely the running high of day. It's now a
+merge of that running high with **static levels from volume-profile
+analysis** (`metrics/volume_profile.py`), computed once per candidate at
+discovery time (`BroadScanner._compute_static_resistance_levels`) and
+stored on `candidate.static_resistance_levels`.
+
+**Why volume profile instead of a list of special levels** (prior day
+high, premarket high, round numbers, ...): those special levels usually
+show up as high-volume clusters anyway, since psychologically notable
+prices attract more trading, and a consolidation/base *is* a volume
+cluster by definition. Building a histogram of volume-traded-per-price
+over a lookback window and taking the biggest clusters ("high volume
+nodes") is a more general mechanism that tends to surface the same levels
+without hand-picking them, plus it gives a real strength signal (a node
+with 3x the volume of another is a materially stronger wall) that a flat
+list of price points can't provide.
+
+**How it's built**: `WebullBrokerClient.get_raw_bars(symbol, interval,
+count)` fetches raw per-bar OHLCV, deliberately bypassing
+`get_bars()`/`_snapshots_from_bars()` -- that method accumulates volume
+across every fetched bar for intraday VWAP, which is wrong for a profile
+that needs each bar's own volume independently (it would sum multiple
+bars/sessions together instead of reporting each one's own total; see
+`get_daily_volumes`, which has the same requirement and now shares this
+helper). `compute_volume_profile` then spreads each bar's volume evenly
+across every price bucket its `[low, high]` range touches, and
+`high_volume_node_levels` keeps the top N buckets that clear a
+significance threshold (a fraction of the single largest bucket's volume,
+to separate a real cluster from background noise).
+
+**A real data-shape finding worth knowing**: `get_raw_bars` returns the
+last `count` bars that actually have data, not the last `count` calendar
+time-slots. Confirmed live (2026-08-09): 100 5-minute bars for a liquid
+mega-cap (AAPL) spanned about 1 day, while the same request for an
+illiquid low-float mover (MB) reached back ~25 calendar days to find 100
+real bars -- and a 780-bar request for that same symbol reached back
+about 5.5 months. This is a legitimate consequence of thin trading (an
+illiquid stock just doesn't have a bar in every 5-minute window), not bad
+data -- but it means a profile built directly on "the last N bars" could
+be dominated by months-old, no-longer-relevant price action for an
+illiquid name. `filter_bars_by_lookback` trims the fetched bars back down
+to a bounded, recent calendar window (`volume_profile_lookback_days`,
+default 20) before the profile is computed, accepting that the resulting
+profile may end up sparse or even empty for a name that genuinely hasn't
+traded much recently -- that's an accurate reflection of "not much recent
+history to draw on," not a bug to work around.
+
+**The merge rule** (`CandidateWatcher.update_resistance`) picks the
+*nearest* static level still above the running high, not the highest one
+available: once intraday price trades through a static level it's no
+longer resistance (it may even flip to acting as support), so re-picking
+the closest remaining ceiling each tick keeps `resistance_level` meaning
+"the next real obstacle," not "the biggest one on record." Falls back to
+the plain running high -- this whole mechanism's entire prior behavior --
+when no static level remains above it, or when `static_resistance_levels`
+is empty (paper/backtest mode, or a failed/unsupported lookup; see below).
+
+**Cost and failure handling, deliberately different from the
+average-volume filter**: `_compute_static_resistance_levels` is a third
+Webull-paced call, but only for symbols that already cleared every
+earlier filter and became an actual `Candidate` -- its cost scales with
+how many candidates get discovered per scan, not with universe size, unlike
+the price/dollar-volume/average-volume checks that run against every
+universe symbol. A failure or an unsupported broker (`getattr`, same
+pattern as `_passes_average_volume_filter`) returns an empty list rather
+than rejecting the candidate: this only changes how resistance is
+*tracked*, it isn't a discovery gate, so there's nothing to fail closed on.
+
+**Verification status**: `get_raw_bars`'s data-sparsity behavior above was
+confirmed live. The full merge pipeline's own unit tests
+(`tests/test_volume_profile.py`, `tests/test_candidate_watcher.py`,
+`tests/test_broad_scanner.py`) all pass, but a live end-to-end run of
+`_compute_static_resistance_levels` against the sandbox could not be
+completed on 2026-08-09 -- by that point in the session, cumulative
+testing had exhausted whatever request quota the sandbox enforces, and
+every further request (even a single one, from a freshly-started process)
+came back `429 TOO_MANY_REQUESTS` through all 4 retry attempts. This is
+distinct from the earlier-diagnosed sustained ~1 req/s pacing limit: that
+one resets by simply waiting between requests within a process, while this
+one persisted across brand-new processes, suggesting the sandbox also
+enforces some rolling quota tracked server-side, independent of any local
+pacing. Re-verify the full pipeline live once quota recovers (or during
+real market hours on the VPS) before trusting its output blindly.
+
 ## Momentum Ignition Score
 
 `scoring/weights.yaml` holds component weights and normalization
