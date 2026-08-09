@@ -8,6 +8,8 @@ from sqlalchemy.pool import StaticPool
 from webull_bot.db.models import Base, MomentumEventRecord, MomentumScoreRecord, OrderRecord, ScannerEvent, TradeRecord
 from webull_bot.db.repository import (
     DBBackedEventRecorder,
+    get_momentum_score_component_summary,
+    get_momentum_scores,
     get_performance_summary,
     get_recent_trades,
     record_momentum_event,
@@ -148,6 +150,77 @@ def test_record_momentum_score_persists_components_as_json(session):
     assert len(rows) == 1
     assert rows[0].score == 72.5
     assert rows[0].components["float_score"] == 80
+
+
+# -- historical score reads (sanity-checking weights.yaml) -------------------
+
+def test_get_momentum_scores_filters_by_symbol_and_orders_newest_first(session):
+    record_momentum_score(session, _score(symbol="AAA", timestamp=datetime(2026, 1, 1, 9, 30)))
+    record_momentum_score(session, _score(symbol="AAA", timestamp=datetime(2026, 1, 1, 9, 31)))
+    record_momentum_score(session, _score(symbol="BBB", timestamp=datetime(2026, 1, 1, 9, 32)))
+    session.commit()
+
+    rows = get_momentum_scores(session, symbol="AAA")
+    assert [r.timestamp for r in rows] == [datetime(2026, 1, 1, 9, 31), datetime(2026, 1, 1, 9, 30)]
+
+
+def test_get_momentum_scores_without_symbol_returns_everything(session):
+    record_momentum_score(session, _score(symbol="AAA"))
+    record_momentum_score(session, _score(symbol="BBB"))
+    session.commit()
+
+    assert len(get_momentum_scores(session)) == 2
+
+
+def test_component_summary_averages_and_weights_only_the_latest_version(session):
+    from webull_bot.scoring.momentum_ignition_score import MISConfig
+
+    # An older-version row (fewer components, different formula) must not
+    # get mixed into the average -- see get_momentum_score_component_summary's
+    # docstring for why that would be meaningless.
+    record_momentum_score(session, _score(
+        weights_version="v1-old", timestamp=datetime(2026, 1, 1, 9, 30), components=MomentumScoreComponents(
+            float_score=10, float_velocity_score=10, relative_volume_score=10, volume_acceleration_score=10,
+            price_acceleration_score=10, breakout_proximity_score=10, trend_quality_score=10, liquidity_score=10,
+            float_turnover_score=10, short_term_relative_volume_score=10, dollar_volume_acceleration_score=10,
+        )))
+    record_momentum_score(session, _score(
+        weights_version="v2-current", timestamp=datetime(2026, 1, 1, 9, 31), components=MomentumScoreComponents(
+            float_score=20, float_velocity_score=20, relative_volume_score=80, volume_acceleration_score=20,
+            price_acceleration_score=20, breakout_proximity_score=20, trend_quality_score=20, liquidity_score=20,
+            float_turnover_score=60, short_term_relative_volume_score=90, dollar_volume_acceleration_score=20,
+        )))
+    record_momentum_score(session, _score(
+        weights_version="v2-current", timestamp=datetime(2026, 1, 1, 9, 32), components=MomentumScoreComponents(
+            float_score=20, float_velocity_score=20, relative_volume_score=80, volume_acceleration_score=20,
+            price_acceleration_score=20, breakout_proximity_score=20, trend_quality_score=20, liquidity_score=20,
+            float_turnover_score=60, short_term_relative_volume_score=90, dollar_volume_acceleration_score=20,
+        )))
+    session.commit()
+
+    config = MISConfig.load()
+    summary = get_momentum_score_component_summary(session, mis_config=config)
+
+    assert summary["weights_version"] == "v2-current"
+    assert summary["sample_size"] == 2  # the v1-old row is excluded
+
+    by_name = {c["name"]: c for c in summary["components"]}
+    assert by_name["relative_volume_score"]["avg_raw_score"] == pytest.approx(80.0)
+    assert by_name["relative_volume_score"]["sample_size"] == 2
+    # short_term_relative_volume_score has both a high raw score AND a high
+    # configured weight (see weights.yaml's v2 reweight) so it should come
+    # out on top of the sorted list -- the whole point of this endpoint.
+    assert summary["components"][0]["name"] == "short_term_relative_volume_score"
+
+
+def test_component_summary_with_no_data_returns_empty():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as empty_session:
+        summary = get_momentum_score_component_summary(empty_session)
+    assert summary["weights_version"] is None
+    assert summary["sample_size"] == 0
+    assert summary["components"] == []
 
 
 def _metrics() -> MomentumMetrics:

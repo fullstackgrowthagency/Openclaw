@@ -53,6 +53,17 @@ const COLUMN_INFO = {
     body:
       "Why this candidate is in its current state -- the reason logged the last time it changed state. For example, \"failed liquidity/spread check\" for a REJECTED candidate, or \"MIS 45.2 crossed heating-up threshold\" for one that just started heating up.",
   },
+  "score-breakdown": {
+    title: "Score Weighting Breakdown",
+    body:
+      "A sanity check for the MIS weights (scoring/weights.yaml): each component's raw 0-100 sub-score, averaged over recent history, multiplied by its current normalized weight. Sorted by \"Avg Weighted Contribution\" descending -- this is what's actually driving scores up in practice, not just what the weights were intended to emphasize.\n\n" +
+      "Only rows from the most recent weights_version are averaged together, since older/newer formula versions have different components and mixing them would be meaningless. If a component you expect to matter (e.g. after a reweight) isn't near the top here, that's a sign the weights or thresholds need another pass.",
+  },
+  "score-history": {
+    title: "Score History Lookup",
+    body:
+      "Look up a specific symbol's recorded Momentum Ignition Score history -- one row per tick it was scored, most recent first, with its top 3 highest-contributing raw sub-scores that tick. Use this to spot-check that a real mover you remember actually scored the way you'd expect under the current weights (e.g. a low-float stock trading heavy volume should show high relative-volume/float-turnover sub-scores).",
+  },
 };
 
 function initInfoModal() {
@@ -242,6 +253,75 @@ async function refreshTrades() {
   }
 }
 
+function componentLabel(name) {
+  // "float_turnover_score" -> "Float Turnover"
+  return name.replace(/_score$/, "").split("_").map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
+}
+
+async function refreshScoreBreakdown() {
+  const meta = document.getElementById("score-breakdown-meta");
+  const body = document.getElementById("score-breakdown-body");
+  try {
+    const data = await fetchJSON("/api/score-breakdown");
+    meta.innerHTML = `
+      <div class="stat"><span class="label">Weights Version</span><span class="value">${data.weights_version || "--"}</span></div>
+      <div class="stat"><span class="label">Sample Size</span><span class="value">${data.sample_size}</span></div>
+    `;
+    body.innerHTML = data.components.length
+      ? data.components.map(c => `
+        <tr>
+          <td>${componentLabel(c.name)}</td>
+          <td>${fmtNum(c.weight, 2)}</td>
+          <td>${fmtNum(c.avg_raw_score, 1)}</td>
+          <td>${fmtNum(c.avg_weighted_contribution, 2)}</td>
+          <td>${fmtNum(c.pct_of_avg_score, 1)}%</td>
+          <td class="muted">${c.sample_size}</td>
+        </tr>`).join("")
+      : emptyRow(6, "No momentum scores recorded yet -- this fills in once candidates start being watched.");
+  } catch (e) {
+    body.innerHTML = emptyRow(6, `Failed to load: ${e.message}`);
+  }
+}
+
+function topComponents(components, n = 3) {
+  return Object.entries(components)
+    .filter(([name]) => name.endsWith("_score"))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([name, value]) => `${componentLabel(name)}: ${fmtNum(value, 1)}`)
+    .join(", ");
+}
+
+async function loadScoreHistory(symbol) {
+  const body = document.getElementById("score-history-body");
+  if (!symbol) return;
+  body.innerHTML = emptyRow(4, "Loading...");
+  try {
+    const rows = await fetchJSON(`/api/score-history?symbol=${encodeURIComponent(symbol)}&limit=50`);
+    body.innerHTML = rows.length
+      ? rows.map(r => `
+        <tr>
+          <td class="muted">${fmtTime(r.timestamp)}</td>
+          <td>${fmtNum(r.score, 1)}</td>
+          <td class="muted">${r.weights_version}</td>
+          <td class="muted">${topComponents(r.components)}</td>
+        </tr>`).join("")
+      : emptyRow(4, `No score history recorded yet for ${symbol.toUpperCase()}`);
+  } catch (e) {
+    body.innerHTML = emptyRow(4, `Failed to load: ${e.message}`);
+  }
+}
+
+function initScoreHistoryForm() {
+  const form = document.getElementById("score-history-form");
+  const input = document.getElementById("score-history-symbol");
+  if (!form) return;
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    loadScoreHistory(input.value.trim());
+  });
+}
+
 async function refreshAll() {
   await Promise.all([
     refreshStatus(),
@@ -250,9 +330,11 @@ async function refreshAll() {
     refreshRiskEvents(),
     refreshPerformance(),
     refreshTrades(),
+    refreshScoreBreakdown(),
   ]);
 }
 
 initInfoModal();
+initScoreHistoryForm();
 refreshAll();
 setInterval(refreshAll, REFRESH_MS);

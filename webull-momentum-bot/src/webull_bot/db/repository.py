@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from ..collection.event_recorder import EventRecorder
 from ..enums import CandidateState
 from ..models import MomentumEvent, MomentumScore, Order, Trade
+from ..scoring.momentum_ignition_score import MISConfig
 from .models import MomentumEventRecord, MomentumScoreRecord, OrderRecord, ScannerEvent, TradeRecord
 
 
@@ -131,6 +132,83 @@ def record_momentum_score(session: Session, score: MomentumScore) -> MomentumSco
     session.add(record)
     session.flush()
     return record
+
+
+def get_momentum_scores(
+    session: Session, *, symbol: Optional[str] = None, limit: int = 200
+) -> list[MomentumScoreRecord]:
+    """Most-recent-first raw history, optionally filtered to one symbol --
+    for inspecting a specific candidate's score/component trajectory over
+    time (e.g. dashboard/app.py's /api/score-history)."""
+    query = session.query(MomentumScoreRecord)
+    if symbol is not None:
+        query = query.filter(MomentumScoreRecord.symbol == symbol)
+    return query.order_by(MomentumScoreRecord.timestamp.desc()).limit(limit).all()
+
+
+def get_momentum_score_component_summary(
+    session: Session, *, weights_version: Optional[str] = None, limit: int = 500, mis_config: Optional[MISConfig] = None
+) -> dict:
+    """Sanity-check aid for tuning weights.yaml: averages each component's
+    raw (0-100) sub-score across recent MomentumScoreRecord rows and
+    multiplies by that component's current normalized weight, so you can
+    see which components are actually driving scores up in practice rather
+    than just which ones you *intended* to emphasize -- e.g. after
+    reweighting towards "popularity" components (see weights.yaml's v2
+    comment), this is how you'd confirm relative_volume_score/
+    float_turnover_score etc. are actually the top contributors, not just
+    the ones with the biggest configured weight.
+
+    Deliberately scoped to a single weights_version (the most recent one
+    seen, unless one is passed explicitly): components differ between
+    versions (v1 had 8, v2 added 3 more -- see MomentumScoreComponents),
+    so averaging across versions would silently mix incomparable formulas.
+    Rows from any other version are excluded from the average, not zero-filled.
+    """
+    config = mis_config or MISConfig.load()
+
+    if weights_version is None:
+        latest = (
+            session.query(MomentumScoreRecord.weights_version)
+            .order_by(MomentumScoreRecord.timestamp.desc())
+            .first()
+        )
+        weights_version = latest[0] if latest else None
+
+    rows = (
+        session.query(MomentumScoreRecord)
+        .filter(MomentumScoreRecord.weights_version == weights_version)
+        .order_by(MomentumScoreRecord.timestamp.desc())
+        .limit(limit)
+        .all()
+        if weights_version is not None
+        else []
+    )
+
+    components = []
+    for name, weight in config.weights.items():
+        values = [r.components[name] for r in rows if name in r.components]
+        if not values:
+            continue
+        avg_raw_score = sum(values) / len(values)
+        components.append({
+            "name": name,
+            "weight": weight,
+            "sample_size": len(values),
+            "avg_raw_score": avg_raw_score,
+            "avg_weighted_contribution": avg_raw_score * weight,
+        })
+
+    total_contribution = sum(c["avg_weighted_contribution"] for c in components) or 1.0
+    for c in components:
+        c["pct_of_avg_score"] = c["avg_weighted_contribution"] / total_contribution * 100.0
+    components.sort(key=lambda c: c["avg_weighted_contribution"], reverse=True)
+
+    return {
+        "weights_version": weights_version,
+        "sample_size": len(rows),
+        "components": components,
+    }
 
 
 def _metrics_to_json(metrics) -> Optional[dict]:

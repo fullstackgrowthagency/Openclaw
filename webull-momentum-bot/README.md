@@ -95,7 +95,10 @@ What's implemented and tested:
   positions with unrealized P&L, risk events, kill-switch state) read
   directly off the running `TradingLoop`/`RiskEngine` in-process -- no DB
   round-trip, so they reflect the current process exactly. Historical
-  panels (trade history, win rate/P&L performance) read from the database.
+  panels (trade history, win rate/P&L performance, and a Momentum Ignition
+  Score weighting breakdown + per-symbol score history lookup for
+  sanity-checking `scoring/weights.yaml` against real data) read from the
+  database.
 - **Full DB persistence** (`db/repository.py`, wired through `TradingLoop`'s
   `on_trade_closed` / `on_order_update` / `on_state_transition` /
   `on_score_computed` hooks and an optional `momentum_event_tracker`

@@ -17,7 +17,12 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from ..db.repository import get_performance_summary, get_recent_trades
+from ..db.repository import (
+    get_momentum_score_component_summary,
+    get_momentum_scores,
+    get_performance_summary,
+    get_recent_trades,
+)
 from ..runtime.trading_loop import TradingLoop
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -163,6 +168,29 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
     def get_performance():
         with session_factory() as session:
             return get_performance_summary(session)
+
+    @app.get("/api/score-breakdown")
+    def get_score_breakdown():
+        """Sanity-check aid for the MIS weighting: which components are
+        actually driving scores up in practice, averaged over recent
+        history for the current weights_version -- see
+        db/repository.py's get_momentum_score_component_summary."""
+        with session_factory() as session:
+            return get_momentum_score_component_summary(session)
+
+    @app.get("/api/score-history")
+    def get_score_history(symbol: str, limit: int = 50):
+        with session_factory() as session:
+            rows = get_momentum_scores(session, symbol=symbol.upper(), limit=limit)
+            return [
+                {
+                    "timestamp": r.timestamp.isoformat(),
+                    "score": r.score,
+                    "weights_version": r.weights_version,
+                    "components": r.components,
+                }
+                for r in rows
+            ]
 
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")

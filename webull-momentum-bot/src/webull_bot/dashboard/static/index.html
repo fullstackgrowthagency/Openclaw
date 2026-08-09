@@ -78,6 +78,35 @@
     </div>
   </section>
 
+  <section class="panel full-width">
+    <h2>Score Weighting Breakdown <button class="info-btn" data-info="score-breakdown" aria-label="What is this?">i</button></h2>
+    <div class="status-bar" id="score-breakdown-meta"></div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Component</th><th>Weight</th><th>Avg Raw Score</th><th>Avg Weighted Contribution</th><th>% of Avg Score</th><th>Samples</th></tr>
+        </thead>
+        <tbody id="score-breakdown-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel full-width">
+    <h2>Score History Lookup <button class="info-btn" data-info="score-history" aria-label="What is this?">i</button></h2>
+    <form id="score-history-form" class="inline-form">
+      <input type="text" id="score-history-symbol" placeholder="Symbol (e.g. GME)" autocomplete="off">
+      <button type="submit">Load</button>
+    </form>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Score</th><th>Weights Version</th><th>Top Contributing Components (raw score)</th></tr>
+        </thead>
+        <tbody id="score-history-body"><tr class="empty-row"><td colspan="4">Enter a symbol above to load its score history</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
 </main>
 
 <footer>Auto-refreshes every 5s. Paper/sandbox mode uses fake money -- see the project README's safety model.</footer>

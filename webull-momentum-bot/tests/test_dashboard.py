@@ -18,11 +18,11 @@ from webull_bot.config import get_settings
 from webull_bot.dashboard.app import create_app
 from webull_bot.data.universe import StaticUniverseProvider
 from webull_bot.db.models import Base
-from webull_bot.db.repository import record_trade
+from webull_bot.db.repository import record_momentum_score, record_trade
 from webull_bot.enums import CandidateState, ExitReason, OrderSide
 from webull_bot.execution.order_manager import OrderManager
 from webull_bot.interfaces.float_provider import FloatDataProvider
-from webull_bot.models import FloatData, MarketSnapshot, Position, Trade
+from webull_bot.models import FloatData, MarketSnapshot, MomentumScore, MomentumScoreComponents, Position, Trade
 from webull_bot.position.position_manager import PositionManager
 from webull_bot.risk.risk_engine import RiskEngine
 from webull_bot.runtime.trading_loop import TradingLoop
@@ -185,6 +185,59 @@ def test_trades_and_performance_read_from_database(session_factory, client):
     assert perf["total_trades"] == 1
     assert perf["win_rate"] == 1.0
     assert perf["total_pnl"] == 50.0
+
+
+def _momentum_score(**overrides) -> MomentumScore:
+    base = dict(
+        symbol="TEST", timestamp=datetime.utcnow(), score=72.5, weights_version="v2-test",
+        components=MomentumScoreComponents(
+            float_score=50, float_velocity_score=50, relative_volume_score=90, volume_acceleration_score=50,
+            price_acceleration_score=50, breakout_proximity_score=50, trend_quality_score=50, liquidity_score=50,
+            float_turnover_score=50, short_term_relative_volume_score=50, dollar_volume_acceleration_score=50,
+        ),
+    )
+    base.update(overrides)
+    return MomentumScore(**base)
+
+
+def test_score_breakdown_reads_from_database(session_factory, client):
+    with session_factory() as session:
+        record_momentum_score(session, _momentum_score())
+        session.commit()
+
+    resp = client.get("/api/score-breakdown")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["weights_version"] == "v2-test"
+    assert body["sample_size"] == 1
+    names = [c["name"] for c in body["components"]]
+    assert "relative_volume_score" in names
+    # relative_volume_score had the highest raw sub-score in the fixture
+    # above and a non-trivial configured weight, so it should be at/near
+    # the top of the sorted-by-contribution list.
+    assert body["components"][0]["name"] == "relative_volume_score"
+
+
+def test_score_breakdown_with_no_data_is_empty(client):
+    resp = client.get("/api/score-breakdown")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sample_size"] == 0
+    assert body["components"] == []
+
+
+def test_score_history_filters_by_symbol_and_returns_components(session_factory, client):
+    with session_factory() as session:
+        record_momentum_score(session, _momentum_score(symbol="AAA"))
+        record_momentum_score(session, _momentum_score(symbol="BBB"))
+        session.commit()
+
+    resp = client.get("/api/score-history?symbol=aaa")  # lowercase -- endpoint should uppercase it
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["score"] == 72.5
+    assert rows[0]["components"]["relative_volume_score"] == 90
 
 
 def test_index_and_static_assets_are_served(client):
