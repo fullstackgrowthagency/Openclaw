@@ -112,6 +112,15 @@ function fmtNum(n, decimals = 2) {
   return Number(n).toFixed(decimals);
 }
 
+function fmtWeight(w) {
+  // Weights (scoring/weights.yaml) are fractions of 1.0 -- show as a
+  // percentage (e.g. 0.15 -> "15%") rather than the raw decimal, since
+  // that's what they actually mean and is easier to read/compare at a
+  // glance.
+  if (w === null || w === undefined) return "--";
+  return `${(Number(w) * 100).toFixed(1)}%`;
+}
+
 function fmtTime(iso) {
   if (!iso) return "--";
   const d = new Date(iso);
@@ -322,7 +331,7 @@ async function renderAggregateScoreBreakdown() {
       ? data.components.map(c => `
         <tr>
           <td>${componentLabel(c.name)}</td>
-          <td>${fmtNum(c.weight, 2)}</td>
+          <td>${fmtWeight(c.weight)}</td>
           <td>${fmtNum(c.avg_raw_score, 1)}</td>
           <td>${fmtNum(c.avg_weighted_contribution, 2)}</td>
           <td>${fmtNum(c.pct_of_avg_score, 1)}%</td>
@@ -374,7 +383,7 @@ async function renderCandidateScoreBreakdown(candidateRows) {
   body.innerHTML = rows.map(r => `
     <tr>
       <td>${componentLabel(r.name)}</td>
-      <td>${fmtNum(r.weight, 2)}</td>
+      <td>${fmtWeight(r.weight)}</td>
       <td>${fmtNum(r.value, 1)}</td>
       <td>${fmtNum(r.contribution, 2)}</td>
       <td>${fmtNum(r.contribution / totalContribution * 100, 1)}%</td>
