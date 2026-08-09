@@ -22,7 +22,15 @@
     <div class="table-scroll">
       <table>
         <thead>
-          <tr><th>Symbol</th><th>State</th><th>Score</th><th>Price</th><th>Resistance</th><th>Reason</th><th>Updated</th></tr>
+          <tr>
+            <th>Symbol</th>
+            <th>State <button class="info-btn" data-info="state" aria-label="What is State?">i</button></th>
+            <th>Score <button class="info-btn" data-info="score" aria-label="What is Score?">i</button></th>
+            <th>Price <button class="info-btn" data-info="price" aria-label="What is Price?">i</button></th>
+            <th>Resistance <button class="info-btn" data-info="resistance" aria-label="What is Resistance?">i</button></th>
+            <th>Reason <button class="info-btn" data-info="reason" aria-label="What is Reason?">i</button></th>
+            <th>Updated</th>
+          </tr>
         </thead>
         <tbody id="candidates-body"></tbody>
       </table>
@@ -73,6 +81,16 @@
 </main>
 
 <footer>Auto-refreshes every 5s. Paper/sandbox mode uses fake money -- see the project README's safety model.</footer>
+
+<div class="info-modal-overlay" id="info-modal-overlay">
+  <div class="info-modal-card" role="dialog" aria-modal="true">
+    <div class="info-modal-header">
+      <h3 id="info-modal-title"></h3>
+      <button class="info-modal-close" id="info-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <p id="info-modal-body"></p>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

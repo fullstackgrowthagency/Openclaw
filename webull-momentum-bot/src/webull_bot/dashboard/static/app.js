@@ -1,5 +1,92 @@
 const REFRESH_MS = 5000;
 
+// Column explanations for the little "i" buttons in the Candidates table
+// header. Keep these in sync with the actual logic they describe --
+// scanner/candidate_watcher.py (state/score/resistance/reason) and
+// dashboard/app.py's /api/candidates (price).
+const COLUMN_INFO = {
+  state: {
+    title: "State",
+    body:
+      "A candidate moves through a fixed lifecycle:\n" +
+      "DISCOVERED → WATCHING → HEATING_UP → ARMED → TRIGGERED → ENTERED → MANAGING → EXITED → COOLDOWN\n\n" +
+      "WATCHING: passed initial price/volume/float filters.\n" +
+      "HEATING_UP: Momentum Ignition Score crossed 40.\n" +
+      "ARMED: score crossed 70 -- handed to the trigger engine for real-time entry monitoring.\n" +
+      "TRIGGERED: a strategy's breakout confirmation fired and an entry order was submitted.\n" +
+      "ENTERED / MANAGING: order filled; position is open and being actively managed.\n" +
+      "EXITED / COOLDOWN: position closed; brief wait before this symbol can be watched again.\n\n" +
+      "REJECTED is terminal and can happen from almost any state (e.g. a bad spread/liquidity reading) -- see the Reason column for why. A high score never places a trade by itself -- ARMED only means \"watch closely.\"",
+  },
+  score: {
+    title: "Score",
+    body:
+      "The Momentum Ignition Score (MIS), 0-100 -- a weighted blend of 8 components recomputed on every tick:\n\n" +
+      "• Float score -- lower free float scores higher\n" +
+      "• Float velocity -- % of float traded in the last 5 minutes\n" +
+      "• Relative volume -- today's volume vs. typical for this time of day\n" +
+      "• Volume acceleration -- is volume ramping up, not just high\n" +
+      "• Price acceleration -- how fast price itself is moving\n" +
+      "• Breakout proximity -- distance to resistance / high of day\n" +
+      "• Trend quality -- position relative to VWAP\n" +
+      "• Liquidity -- spread tightness + dollar volume\n\n" +
+      "Crossing 40 promotes WATCHING → HEATING_UP; crossing 70 promotes to ARMED. The weights are unvalidated starting values, not backtested.",
+  },
+  price: {
+    title: "Price",
+    body:
+      "The candidate's last known price, from the most recent market snapshot the bot processed for this symbol. It updates once per poll cycle, not continuously -- see the Updated column for exactly when. Shows \"--\" until this candidate's first tick.",
+  },
+  resistance: {
+    title: "Resistance",
+    body:
+      "The nearest price level expected to act as resistance, combining two sources:\n\n" +
+      "1. The running high of day for this candidate (only ever moves up)\n" +
+      "2. Static levels from volume-profile analysis done at discovery -- price zones where a lot of historical volume traded (\"high-volume nodes\"), which tend to act as real support/resistance\n\n" +
+      "Whichever of these is the closest one still above the current price is shown. This is also the actual price a breakout strategy waits to see cleared before entering a trade once a candidate is ARMED.",
+  },
+  reason: {
+    title: "Reason",
+    body:
+      "Why this candidate is in its current state -- the reason logged the last time it changed state. For example, \"failed liquidity/spread check\" for a REJECTED candidate, or \"MIS 45.2 crossed heating-up threshold\" for one that just started heating up.",
+  },
+};
+
+function initInfoModal() {
+  const overlay = document.getElementById("info-modal-overlay");
+  const title = document.getElementById("info-modal-title");
+  const body = document.getElementById("info-modal-body");
+  const closeBtn = document.getElementById("info-modal-close");
+  if (!overlay) return;
+
+  function open(key) {
+    const info = COLUMN_INFO[key];
+    if (!info) return;
+    title.textContent = info.title;
+    body.textContent = info.body;
+    overlay.classList.add("open");
+  }
+
+  function close() {
+    overlay.classList.remove("open");
+  }
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".info-btn");
+    if (btn) {
+      open(btn.dataset.info);
+    }
+  });
+
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
+}
+
 function fmtMoney(n) {
   if (n === null || n === undefined) return "--";
   return n.toLocaleString(undefined, { style: "currency", currency: "USD" });
@@ -163,5 +250,6 @@ async function refreshAll() {
   ]);
 }
 
+initInfoModal();
 refreshAll();
 setInterval(refreshAll, REFRESH_MS);
