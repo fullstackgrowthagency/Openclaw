@@ -9,7 +9,7 @@ candidate.last_price bookkeeping (dashboard/app.py's Price column reads
 that field), and the temporary trade_eligible/block_reasons behavior that
 replaced permanent REJECTED-on-spread/liquidity (see module docstring).
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from webull_bot.enums import CandidateState, TradeBlockReason
 from webull_bot.models import Candidate
@@ -200,6 +200,54 @@ def test_update_uses_volume_baseline_for_relative_volume():
     watcher.update(candidate, snapshot)
 
     assert candidate.latest_metrics.relative_volume == 2.0  # 1000 / 500
+
+
+# -- seed_snapshots splicing (metrics/rolling.seed_history_from_bars) -- see
+# broad_scanner.py's _compute_seed_snapshots for where these get built ------
+
+def test_update_splices_seed_snapshots_into_empty_history_only_once():
+    from webull_bot.models import MarketSnapshot
+
+    def _seed(minutes_ago, cumulative_volume):
+        t = datetime(2026, 8, 10, 13, 30) - timedelta(minutes=minutes_ago)
+        return MarketSnapshot(
+            symbol="TEST", timestamp=t, last_price=1.0, bid=1.0, ask=1.0, bid_size=0, ask_size=0,
+            cumulative_volume=cumulative_volume, vwap=1.0, high_of_day=1.0, low_of_day=1.0, open_price=1.0,
+        )
+
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    candidate.seed_snapshots = [_seed(4, 400_000.0), _seed(2, 700_000.0)]
+
+    first_snapshot = _snapshot_with_conditions(price=10.0, spread_pct=0.1, cumulative_volume=1_000_000.0)
+    first_snapshot.timestamp = datetime(2026, 8, 10, 13, 30)
+    watcher.update(candidate, first_snapshot)
+
+    # First tick: history is [seed1, seed2, live] -- vol_5m sees the
+    # pre-discovery run-up (1,000,000 - 400,000), not 0.
+    assert candidate.latest_metrics.volume_5m == 600_000.0
+
+    second_snapshot = _snapshot_with_conditions(price=10.5, spread_pct=0.1, cumulative_volume=1_050_000.0)
+    second_snapshot.timestamp = datetime(2026, 8, 10, 13, 31)
+    watcher.update(candidate, second_snapshot)
+
+    # Second tick: seed_snapshots must NOT be re-spliced -- history should
+    # be exactly the 3 prior entries plus this one new live tick, not 6.
+    assert len(watcher._history["TEST"]) == 4
+
+
+def test_update_without_seed_snapshots_behaves_exactly_as_before():
+    # candidate.seed_snapshots defaults to [] -- must not change behavior
+    # for a candidate discovered via a broker with no get_raw_bars support.
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    assert candidate.seed_snapshots == []
+
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=0.1, cumulative_volume=1_000_000.0)
+    watcher.update(candidate, snapshot)
+
+    assert candidate.latest_metrics.volume_5m == 0.0
+    assert len(watcher._history["TEST"]) == 1
 
 
 def test_update_relative_volume_defaults_to_neutral_without_baseline():

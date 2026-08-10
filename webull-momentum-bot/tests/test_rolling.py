@@ -6,7 +6,7 @@ metrics that scoring/diagnostics lean on instead of a pass/fail cutoff.
 """
 from datetime import datetime, timedelta
 
-from webull_bot.metrics.rolling import compute_metrics
+from webull_bot.metrics.rolling import compute_metrics, seed_history_from_bars
 from webull_bot.models import MarketSnapshot
 
 
@@ -17,6 +17,10 @@ def _snap(minutes_ago, price, cumulative_volume, now):
         bid_size=100, ask_size=100, cumulative_volume=cumulative_volume, vwap=price,
         high_of_day=price, low_of_day=price, open_price=price,
     )
+
+
+def _bar(volume, close, time):
+    return {"time": time, "close": str(close), "volume": str(volume)}
 
 
 def test_compute_metrics_requires_at_least_one_snapshot():
@@ -86,3 +90,87 @@ def test_float_velocity_5m_is_5_minute_float_turnover():
     history = [_snap(5, 10.0, 0, now), _snap(0, 10.0, 300_000, now)]
     m = compute_metrics(free_float_shares=1_000_000, history=history)
     assert m.float_velocity_5m == 0.3  # 300_000 / 1_000_000
+
+
+# -- seed_history_from_bars (see its docstring for why this exists: discovery
+# structurally lags the move that caused it, so CandidateWatcher's rolling
+# window shouldn't start completely blind to what already happened) --------
+
+def test_seed_history_from_bars_empty_bars_returns_empty():
+    current = _snap(0, 10.0, 1000.0, datetime(2026, 8, 10, 13, 30))
+    assert seed_history_from_bars([], current=current) == []
+
+
+def test_seed_history_from_bars_excludes_bars_outside_lookback():
+    current = _snap(0, 10.0, 1000.0, datetime(2026, 8, 10, 13, 30))
+    # 30 minutes before current -- outside the default 20-minute lookback.
+    bars = [_bar(50, 9.0, "2026-08-10T13:00:00.000+0000")]
+    assert seed_history_from_bars(bars, current=current, lookback_minutes=20) == []
+
+
+def test_seed_history_from_bars_excludes_bars_at_or_after_current():
+    current = _snap(0, 10.0, 1000.0, datetime(2026, 8, 10, 13, 30))
+    bars = [_bar(50, 9.0, "2026-08-10T13:30:00.000+0000")]  # exactly at current's own timestamp
+    assert seed_history_from_bars(bars, current=current) == []
+
+
+def test_seed_history_from_bars_sorts_chronologically():
+    current = _snap(0, 10.0, 1000.0, datetime(2026, 8, 10, 13, 30))
+    bars = [
+        _bar(200, 9.8, "2026-08-10T13:25:00.000+0000"),
+        _bar(100, 9.5, "2026-08-10T13:20:00.000+0000"),
+    ]
+    seeded = seed_history_from_bars(bars, current=current)
+    assert [s.timestamp for s in seeded] == sorted(s.timestamp for s in seeded)
+    assert seeded[0].last_price == 9.5
+    assert seeded[1].last_price == 9.8
+
+
+def test_seed_history_from_bars_anchors_cumulative_volume_to_current():
+    # total_recent_volume = 100 + 200 = 300; running starts at 1000-300=700,
+    # then walks forward bar by bar.
+    current = _snap(0, 10.0, 1000.0, datetime(2026, 8, 10, 13, 30))
+    bars = [
+        _bar(100, 9.5, "2026-08-10T13:20:00.000+0000"),
+        _bar(200, 9.8, "2026-08-10T13:25:00.000+0000"),
+    ]
+    seeded = seed_history_from_bars(bars, current=current)
+    assert seeded[0].cumulative_volume == 800.0   # 700 + 100
+    assert seeded[1].cumulative_volume == 1000.0  # 800 + 200
+    # The critical invariant: the last seed snapshot must land exactly on
+    # current's real cumulative volume, so the live feed that follows is
+    # continuous with it -- no artificial jump/spike at the seam.
+    assert seeded[-1].cumulative_volume == current.cumulative_volume
+
+
+def test_seed_history_from_bars_clamps_running_volume_at_zero():
+    # A single bar's volume alone exceeds current's total -- a data
+    # inconsistency that must clamp to 0 rather than go negative.
+    current = _snap(0, 10.0, 50.0, datetime(2026, 8, 10, 13, 30))
+    bars = [_bar(1000, 9.5, "2026-08-10T13:25:00.000+0000")]
+    seeded = seed_history_from_bars(bars, current=current)
+    assert seeded[0].cumulative_volume == 1000.0  # max(0, 50-1000)=0, then +1000
+
+
+def test_seeded_history_lets_compute_metrics_see_pre_discovery_momentum():
+    # The actual bug this fixes: without seeding, a candidate discovered
+    # right after a huge pre-discovery move shows 0 for every window-diffed
+    # metric (volume/price acceleration, short-term RVOL) because its
+    # rolling history starts as a single snapshot. With the same bars
+    # BroadScanner already fetched spliced in ahead of that snapshot, the
+    # window sees the real run-up instead.
+    now = datetime(2026, 8, 10, 13, 30)
+    current = _snap(0, 2.0, 1_000_000.0, now)
+    bars = [
+        _bar(400_000, 1.0, "2026-08-10T13:26:00.000+0000"),
+        _bar(600_000, 1.5, "2026-08-10T13:28:00.000+0000"),
+    ]
+    seeded = seed_history_from_bars(bars, current=current)
+
+    without_seed = compute_metrics(5_000_000, [current])
+    with_seed = compute_metrics(5_000_000, seeded + [current])
+
+    assert without_seed.volume_5m == 0.0
+    assert without_seed.price_velocity_5m == 0.0
+    assert with_seed.volume_5m == 600_000.0
+    assert with_seed.price_velocity_5m == 100.0  # (2.0 - 1.0) / 1.0 * 100

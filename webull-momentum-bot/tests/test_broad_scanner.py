@@ -376,8 +376,13 @@ class _RawBarsAwareBroker(_SlowFakeBroker):
         return self.raw_bars[symbol]
 
 
-def _bar(low, high, volume, time="2026-08-01T12:00:00.000+0000"):
-    return {"time": time, "low": str(low), "high": str(high), "volume": str(volume)}
+def _bar(low, high, volume, time="2026-08-01T12:00:00.000+0000", close=None):
+    # close defaults to the midpoint of [low, high] -- only
+    # seed_history_from_bars (_compute_seed_snapshots) reads "close"; the
+    # resistance/opening-range/volume-baseline tests below never touch it,
+    # so an unspecified close just needs to be a plausible, present value.
+    resolved_close = close if close is not None else (low + high) / 2
+    return {"time": time, "low": str(low), "high": str(high), "close": str(resolved_close), "volume": str(volume)}
 
 
 def test_scan_populates_static_resistance_levels_from_volume_profile():
@@ -521,6 +526,62 @@ def test_scan_leaves_volume_baseline_none_on_raw_bars_failure():
     candidates = scanner.scan(["ANY"])
     assert len(candidates) == 1
     assert candidates[0].volume_baseline is None
+
+
+# -- seed_snapshots (also shares the same raw bars -- see
+# metrics/rolling.seed_history_from_bars and CandidateWatcher._push_history) --
+
+class _FixedTimestampBroker(_RawBarsAwareBroker):
+    """get_snapshot() normally stamps datetime.utcnow() (see _snapshot()
+    above), which seed_snapshots tests can't use deterministically -- this
+    pins the discovery snapshot to a controlled timestamp instead."""
+
+    def __init__(self, raw_bars, prices, snapshot_time):
+        super().__init__(raw_bars, prices)
+        self.snapshot_time = snapshot_time
+
+    def get_snapshot(self, symbol):
+        price = self.prices.get(symbol, 5.0)
+        return MarketSnapshot(
+            symbol=symbol, timestamp=self.snapshot_time, last_price=price, bid=price - 0.01,
+            ask=price + 0.01, bid_size=100, ask_size=100, cumulative_volume=1_000_000.0,
+            vwap=price, high_of_day=price, low_of_day=price, open_price=price,
+        )
+
+
+def test_scan_populates_seed_snapshots_from_raw_bars():
+    discovery_time = datetime(2026, 8, 10, 13, 30, 0)
+    bars = [
+        _bar(9, 10, 400_000, time="2026-08-10T13:26:00.000+0000", close=10.0),
+        _bar(9, 10, 600_000, time="2026-08-10T13:28:00.000+0000", close=10.0),
+    ]
+    broker = _FixedTimestampBroker({"SEED": bars}, prices={"SEED": 10.0}, snapshot_time=discovery_time)
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+
+    candidates = scanner.scan(["SEED"])
+
+    seeded = candidates[0].seed_snapshots
+    assert len(seeded) == 2
+    assert seeded[-1].cumulative_volume == 1_000_000.0  # anchored to the discovery snapshot's real total
+
+
+def test_scan_leaves_seed_snapshots_empty_without_get_raw_bars():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    assert candidates[0].seed_snapshots == []
+
+
+def test_scan_leaves_seed_snapshots_empty_on_raw_bars_failure():
+    class _FlakyRawBarsBroker(_RawBarsAwareBroker):
+        def get_raw_bars(self, symbol, interval, count):
+            raise RuntimeError("simulated Webull failure")
+
+    broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    assert len(candidates) == 1
+    assert candidates[0].seed_snapshots == []
 
 
 # -- resistance refresh on rescans (periodic re-computation for already-

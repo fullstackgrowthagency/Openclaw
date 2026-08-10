@@ -3,20 +3,23 @@ Turns a rolling window of MarketSnapshots (+ free float) into a
 MomentumMetrics record, using the pure functions in calculations.py.
 
 `typical_volume_same_time`/`typical_volume_1m`/`typical_volume_5m` (RVOL
-baselines) and `resistance_level` are not computed here on purpose -- RVOL
-needs a historical intraday volume profile per symbol (future work once
-enough MarketObservation history has been collected in the DB), and
-resistance is a candidate-level concept owned by the scanner. All three are
-accepted as optional inputs so callers can supply them once those pieces
-exist, without this module needing to change; until then they default to
-None and the corresponding relative-volume fields fall back to a neutral
-1.0 (see relative_volume()'s own safe-division default), same as the
-existing whole-session relative_volume already does.
+baselines) and `resistance_level` are not computed here on purpose:
+resistance is a candidate-level concept owned by the scanner, and the RVOL
+baselines are built once per candidate from Webull's own historical bars
+(see metrics/volume_baseline.py and BroadScanner._compute_volume_baseline)
+rather than accumulated from this bot's own observed history over time --
+a low-float mover is often a symbol never watched before, so a baseline
+that only builds up from this bot's own DB would have nothing to compare
+against on exactly the day it matters most. All three are accepted as
+optional inputs so callers can supply them without this module needing to
+change; until supplied they default to None and the corresponding
+relative-volume fields fall back to a neutral 1.0 (see relative_volume()'s
+own safe-division default).
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Sequence
 
 from ..models import MarketSnapshot, MomentumMetrics
 from .calculations import (
@@ -34,6 +37,101 @@ from .calculations import (
 
 # A rolling history should hold at least this much look-back to compute all windows.
 MAX_HISTORY_MINUTES = 20
+
+
+def _parse_bar_time(raw_time) -> datetime:
+    if isinstance(raw_time, str):
+        return datetime.strptime(raw_time, "%Y-%m-%dT%H:%M:%S.%f%z").replace(tzinfo=None)
+    return raw_time
+
+
+def seed_history_from_bars(
+    bars: Sequence[dict], *, current: MarketSnapshot, lookback_minutes: float = MAX_HISTORY_MINUTES
+) -> list[MarketSnapshot]:
+    """Reconstructs synthetic MarketSnapshots for the `lookback_minutes`
+    immediately before `current` from raw per-bar OHLCV (Webull's native
+    shape, same input as metrics/volume_profile.py's compute_volume_profile),
+    so CandidateWatcher's rolling window doesn't start completely blind to
+    whatever momentum already happened just before this candidate was
+    discovered.
+
+    THE PROBLEM THIS SOLVES: a low-float momentum bot's candidates are
+    discovered precisely BECAUSE they already made a move big enough to
+    surface on a screener -- discovery structurally lags the move, not the
+    other way around. Before this existed, CandidateWatcher._history started
+    as an empty list at discovery, so float_velocity_5m/volume_accel_1m_3m/
+    price_acceleration/relative_volume_5m/dollar_volume_accel_1m_3m (every
+    metric that diffs across a rolling window, as opposed to reading an
+    absolute cumulative total) read their cold-start neutral default for
+    several real minutes after discovery, completely blind to a move that
+    may have already happened minutes or hours earlier -- e.g. a name up
+    +100% in pre-market on huge volume would show 0 across every "is this
+    accelerating right now" component while its cumulative-total components
+    (relative_volume, float_turnover, breakout_proximity) correctly read
+    100, understating a candidate that's actually already extremely hot.
+
+    ANCHORING: seeded cumulative_volume is NOT a fresh count starting at 0 --
+    it's built backward from `current.cumulative_volume` (the real, true
+    total as of discovery) so the seeded series and the live snapshot feed
+    that starts arriving right after this share the exact same absolute
+    scale. Without this, splicing a locally-reconstructed volume count
+    (starting at 0) in front of the live feed's actual multi-million-share
+    total would produce one enormous, meaningless synthetic "volume spike"
+    at the seam between seed data and the first real tick. Concretely: the
+    seed window's total bar volume is subtracted from current.cumulative_volume
+    to get the running total AS OF the earliest seed bar, then each bar's own
+    volume is added back in walking forward -- so the last seed snapshot's
+    cumulative_volume lands just under current.cumulative_volume, and the
+    live snapshot that follows continues that same series with no jump.
+
+    Only `timestamp`/`cumulative_volume`/`last_price` are computed
+    meaningfully -- compute_metrics only reads those three fields from
+    non-latest history entries (see _window/_volume_since/price_velocity_pct
+    above); bid/ask/high/low/vwap/open_price on a seed snapshot are set to
+    last_price as an inert placeholder, never read for a historical entry.
+
+    Bars from a different calendar day, or bars at/after `current`'s own
+    timestamp, are excluded -- this seeds "recent run-up," not a multi-day
+    history the way volume_baseline.py deliberately wants. A rolling window
+    spanning the pre-market/regular-session boundary can still see one
+    self-healing artificially-flat reading right at that seam, same known
+    caveat as the ext_volume phase-reset handling in
+    WebullBrokerClient._snapshot_from_dict -- not specially handled here."""
+    if not bars:
+        return []
+
+    cutoff = current.timestamp - timedelta(minutes=lookback_minutes)
+    same_day_recent = sorted(
+        (bar for bar in bars if cutoff <= _parse_bar_time(bar["time"]) < current.timestamp),
+        key=lambda bar: _parse_bar_time(bar["time"]),
+    )
+    if not same_day_recent:
+        return []
+
+    total_recent_volume = sum(float(bar["volume"]) for bar in same_day_recent)
+    running = max(0.0, current.cumulative_volume - total_recent_volume)
+
+    seeded: list[MarketSnapshot] = []
+    for bar in same_day_recent:
+        running += float(bar["volume"])
+        price = float(bar["close"])
+        seeded.append(
+            MarketSnapshot(
+                symbol=current.symbol,
+                timestamp=_parse_bar_time(bar["time"]),
+                last_price=price,
+                bid=price,
+                ask=price,
+                bid_size=0.0,
+                ask_size=0.0,
+                cumulative_volume=running,
+                vwap=price,
+                high_of_day=price,
+                low_of_day=price,
+                open_price=price,
+            )
+        )
+    return seeded
 
 
 def _window(history: list[MarketSnapshot], now: datetime, minutes: float) -> list[MarketSnapshot]:

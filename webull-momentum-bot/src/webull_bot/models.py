@@ -240,6 +240,17 @@ class Candidate:
     # computing it once at discovery is sufficient.
     volume_baseline: Optional[VolumeBaseline] = None
 
+    # Synthetic pre-discovery snapshots (metrics/rolling.seed_history_from_bars),
+    # built once at discovery from the same raw bars as static_resistance_levels/
+    # volume_baseline above, so CandidateWatcher's rolling window isn't
+    # blind to a move that already happened before this candidate was
+    # found -- see that function's docstring for the full "discovery
+    # structurally lags the move" rationale and the cumulative-volume
+    # anchoring that keeps it continuous with the live snapshot feed.
+    # CandidateWatcher consumes this exactly once (only when its own
+    # per-symbol history is still empty) and never touches it again.
+    seed_snapshots: list[MarketSnapshot] = field(default_factory=list)
+
 
 @dataclass
 class Signal:

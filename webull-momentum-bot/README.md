@@ -198,6 +198,24 @@ What's implemented and tested:
   intraday, unlike resistance) since it only reflects days before today,
   which don't change once the day is over. See `docs/ARCHITECTURE.md`'s
   "RVOL historical baseline" section for the full design.
+- **Seeded rolling history at discovery** (`metrics/rolling.seed_history_from_bars`):
+  a low-float mover is discovered *because* it already made a move big
+  enough to surface on a screener -- the move structurally happens before
+  discovery, not after. `CandidateWatcher`'s rolling tick history used to
+  start empty at discovery, so every window-diffed metric (float velocity,
+  volume/dollar-volume acceleration, price acceleration, short-term
+  relative volume) read 0 for several real minutes after discovery, blind
+  to a move that may have already happened, while the cumulative-total
+  metrics (relative volume, float turnover, breakout proximity) correctly
+  showed the name already maxed out -- understating a candidate that's
+  actually already extremely hot (confirmed against a real case: a
+  low-float name already up over 100% in pre-market on heavy volume scored
+  only 40.4, just barely HEATING_UP). Now backfills that rolling history
+  from the SAME raw bars already fetched for resistance/the RVOL baseline
+  above (no extra network call), anchored so the seeded cumulative-volume
+  series lines up exactly with the live feed's real total -- no artificial
+  jump when live ticks start arriving. See `docs/ARCHITECTURE.md`'s
+  "Seeding rolling history at discovery" section for the full design.
 - **Dashboard** (`dashboard/app.py` + `scripts/run_dashboard.py`): a FastAPI
   backend + self-contained HTML/JS frontend, run with
   `python scripts/run_dashboard.py`. Live panels (candidates, open

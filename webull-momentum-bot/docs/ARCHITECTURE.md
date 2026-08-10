@@ -628,6 +628,83 @@ three, and `relative_volume`/`relative_volume_1m`/`relative_volume_5m`
 fall back to their pre-existing neutral default -- same fail-soft contract
 as `static_resistance_levels`.
 
+## Seeding rolling history at discovery (discovery lags the move)
+
+**The problem**: `CandidateWatcher._history[symbol]` -- the rolling tick
+history every *windowed* metric (`float_velocity_5m`, `volume_accel_1m_3m`,
+`price_acceleration`, `relative_volume_5m`, `dollar_volume_accel_1m_3m`;
+see `metrics/rolling.py`) is diffed across -- used to start as an empty
+list at discovery and only grow from live ticks going forward. For a
+low-float momentum bot, that's backwards: a candidate is discovered
+*because* it already made a move big enough to surface on a screener, so
+the move that caused discovery structurally already happened *before*
+discovery, not after. A name up +100% in pre-market on a huge volume
+surge would show 0 across every "is this accelerating right now"
+component for several real minutes after being found -- while its
+cumulative-total components (`relative_volume`, `float_turnover`,
+`breakout_proximity`) correctly read near-maxed -- silently understating a
+candidate that's actually already extremely hot. Confirmed against a real
+case (2026-08-10): a low-float name already up over 100% in pre-market on
+heavy volume scored 40.4 (just barely HEATING_UP) because every
+window-diffed component read exactly 0, even though the static components
+were already maxed.
+
+**The fix** (`metrics/rolling.seed_history_from_bars`): reconstructs
+synthetic `MarketSnapshot`s for the `MAX_HISTORY_MINUTES` (20) immediately
+before discovery from the same raw bars `BroadScanner` already fetches for
+`static_resistance_levels`/`opening_range_high`/`volume_baseline` above --
+no extra network call, this is the fourth consumer of that one fetch.
+`BroadScanner._compute_seed_snapshots` computes this once at discovery and
+stores it on `Candidate.seed_snapshots`; `CandidateWatcher._push_history`
+splices it into `_history[symbol]` the first time (and only the first
+time) that symbol's history is touched, ahead of the real live snapshot.
+
+**Cumulative-volume anchoring is the part that has to be exactly right**:
+the seeded series isn't a fresh count starting at 0 -- it's built
+*backward* from the discovery snapshot's own real `cumulative_volume`
+(`current`), so the seeded series and the live feed that starts arriving
+right after share the exact same absolute scale. Concretely: the seed
+window's total bar volume is subtracted from `current.cumulative_volume`
+to get the running total as of the earliest seed bar, then each bar's own
+volume is added back in walking forward chronologically -- so the *last*
+seed snapshot's `cumulative_volume` lands exactly on
+`current.cumulative_volume`, and the live snapshot that follows continues
+that same series with no jump. Without this anchoring, splicing a
+locally-reconstructed volume count (starting at 0) in front of the live
+feed's actual multi-million-share total would produce one enormous,
+meaningless synthetic "volume spike" at the seam between seed data and the
+first real tick -- worse than not seeding at all.
+
+Only `timestamp`/`cumulative_volume`/`last_price` are computed
+meaningfully on a seed snapshot -- `compute_metrics` only reads those
+three fields from non-latest history entries (see `_window`/
+`_volume_since`/`price_velocity_pct` in `metrics/rolling.py`);
+bid/ask/high/low/vwap/open_price are set to `last_price` as an inert
+placeholder, since a historical entry's values for those are never read.
+
+**Splice-once, not every tick** (`CandidateWatcher._push_history`): seeding
+only happens when that symbol's own `_history` is still empty, so a
+candidate that cools off, transitions through COOLDOWN, and later
+re-enters WATCHING doesn't get re-seeded on top of real accumulated ticks
+-- a fresh `Candidate` object from a later discovery gets its own fresh
+`seed_snapshots` computed from bars fetched at *that* (re-)discovery time,
+naturally superseding the old seed the moment `_history[symbol]` is
+non-empty. `Candidate.seed_snapshots` itself is never cleared after use --
+harmless, since the empty-history check means it's only ever consulted
+once regardless of how long it sits on the candidate.
+
+**Fail-soft, same contract as everything else built on this shared bars
+fetch**: no bars (paper/backtest mode, a failed/unsupported `get_raw_bars`
+lookup), or no bars falling in the `MAX_HISTORY_MINUTES` window immediately
+before discovery, simply means `seed_snapshots` stays an empty list --
+`CandidateWatcher`'s rolling window starts empty, exactly its pre-this-
+feature behavior. A rolling window spanning the pre-market/regular-session
+boundary can still see one self-healing artificially-flat reading right at
+that seam, same known caveat as the `ext_volume` phase-reset handling in
+`WebullBrokerClient._snapshot_from_dict` -- not specially handled here,
+same acceptable-edge-case philosophy already established for that boundary
+elsewhere in this file.
+
 ## Entry strategies
 
 Resistance-breakout alone doesn't fit every candidate this bot finds: for a

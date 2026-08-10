@@ -58,8 +58,23 @@ class CandidateWatcher:
         self.config = config or WatcherConfig()
         self._history: dict[str, list[MarketSnapshot]] = defaultdict(list)
 
-    def _push_history(self, symbol: str, snapshot: MarketSnapshot) -> list[MarketSnapshot]:
+    def _push_history(
+        self, symbol: str, snapshot: MarketSnapshot, seed_snapshots: list[MarketSnapshot]
+    ) -> list[MarketSnapshot]:
         history = self._history[symbol]
+        # Splice in the discovery-time seed exactly once -- only when this
+        # symbol's own history is still empty, so a candidate that cools
+        # off and re-enters WATCHING later doesn't get re-seeded on top of
+        # real accumulated ticks. See metrics/rolling.seed_history_from_bars
+        # for why this exists: without it, every window-diffed metric
+        # (float velocity, volume/dollar-volume acceleration, price
+        # acceleration, short-term relative volume) reads its cold-start
+        # neutral default for several real minutes after discovery, blind
+        # to a move that may have already happened well before this
+        # candidate was found -- exactly backwards for a bot whose
+        # candidates are discovered BECAUSE they already moved.
+        if not history and seed_snapshots:
+            history.extend(seed_snapshots)
         history.append(snapshot)
         cutoff = snapshot.timestamp - timedelta(minutes=MAX_HISTORY_MINUTES)
         while history and history[0].timestamp < cutoff:
@@ -71,7 +86,7 @@ class CandidateWatcher:
             return candidate
 
         candidate.last_price = snapshot.last_price
-        history = self._push_history(candidate.symbol, snapshot)
+        history = self._push_history(candidate.symbol, snapshot, candidate.seed_snapshots)
 
         free_float = candidate.float_data.free_float_shares if candidate.float_data else None
         # RVOL baseline lookup (metrics/volume_baseline.py) -- None for

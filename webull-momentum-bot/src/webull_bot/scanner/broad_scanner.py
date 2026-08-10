@@ -74,9 +74,10 @@ from typing import Callable, Optional
 from ..interfaces.broker import BrokerClient
 from ..interfaces.float_provider import FloatDataProvider
 from ..metrics.opening_range import compute_opening_range_high
+from ..metrics.rolling import MAX_HISTORY_MINUTES, seed_history_from_bars
 from ..metrics.volume_baseline import VolumeBaseline, compute_volume_baseline
 from ..metrics.volume_profile import compute_volume_profile, filter_bars_by_lookback, high_volume_node_levels
-from ..models import Candidate
+from ..models import Candidate, MarketSnapshot
 from ..state_machine import CandidateState, new_candidate, transition
 
 
@@ -225,9 +226,9 @@ class BroadScanner:
                 )
 
         # Fetched once and shared between static_resistance_levels,
-        # opening_range_high, and volume_baseline below -- all three are
-        # derived from the same raw bars, so there's no reason to pay for
-        # get_raw_bars more than once.
+        # opening_range_high, volume_baseline, and seed_snapshots below --
+        # all four are derived from the same raw bars, so there's no reason
+        # to pay for get_raw_bars more than once.
         bars = self._fetch_raw_bars(symbol)
 
         candidate = new_candidate(symbol, now=snapshot.timestamp)
@@ -239,6 +240,7 @@ class BroadScanner:
         candidate.opening_range_high = self._compute_opening_range_high(bars)
         candidate.resistance_last_refreshed_at = snapshot.timestamp
         candidate.volume_baseline = self._compute_volume_baseline(bars)
+        candidate.seed_snapshots = self._compute_seed_snapshots(bars, snapshot)
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate, None
 
@@ -401,6 +403,24 @@ class BroadScanner:
         return compute_volume_baseline(
             bars, bucket_minutes=self.config.volume_baseline_bucket_minutes, now=self.now_fn()
         )
+
+    def _compute_seed_snapshots(
+        self, bars: Optional[list[dict]], current_snapshot: MarketSnapshot
+    ) -> list[MarketSnapshot]:
+        """Backfills CandidateWatcher's rolling history for the
+        MAX_HISTORY_MINUTES immediately before discovery (metrics/rolling.
+        seed_history_from_bars), from the same bars as
+        _compute_static_resistance_levels/_compute_volume_baseline above --
+        no extra network call. See that function's docstring for why this
+        matters (discovery structurally lags the move that caused it) and
+        the cumulative-volume anchoring that keeps the seed continuous with
+        the live snapshot feed. Returns an empty list (not a discovery-gate
+        failure) on missing bars, same fail-soft contract as the rest of
+        this enrichment step -- CandidateWatcher's rolling window simply
+        starts empty, its pre-this-feature behavior."""
+        if not bars:
+            return []
+        return seed_history_from_bars(bars, current=current_snapshot, lookback_minutes=MAX_HISTORY_MINUTES)
 
     def scan(self, symbol_universe: list[str]) -> list[Candidate]:
         if not symbol_universe:
