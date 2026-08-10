@@ -176,6 +176,28 @@ What's implemented and tested:
   (Webull's raw bars reach back as far as needed to find real data for
   illiquid names, which this deliberately bounds to a recent calendar
   window before building the profile).
+- **RVOL historical baseline** (`metrics/volume_baseline.py`): relative
+  volume (`relative_volume`/`relative_volume_1m`/`relative_volume_5m`)
+  needs a "what's typical for this symbol at this point in the session"
+  reference to compare against; without one, it silently falls back to a
+  neutral default and its Momentum Ignition Score components always read a
+  flat 0 -- true before this existed, regardless of session. Built from the
+  SAME raw bars already fetched for the resistance volume profile above (no
+  extra network call), deliberately from Webull's own historical bars
+  rather than accumulated from this bot's own tick history over time: a
+  low-float mover is very often a symbol the bot has never watched before,
+  and a baseline that only builds up after weeks of running would have
+  nothing to compare against on exactly the day it matters most. Tracks
+  three independently-reset cumulative curves -- pre-market, regular
+  session, and after-hours -- since cumulative volume itself resets at
+  each of those boundaries (see "Extended-hours pricing and volume" above);
+  a live tick only ever compares against its own phase's curve, bucketed
+  in 5-minute increments and averaged across every historical day the
+  fetched bars cover, excluding today itself so a still-forming day never
+  leaks into its own baseline. Computed once at discovery (not refreshed
+  intraday, unlike resistance) since it only reflects days before today,
+  which don't change once the day is over. See `docs/ARCHITECTURE.md`'s
+  "RVOL historical baseline" section for the full design.
 - **Dashboard** (`dashboard/app.py` + `scripts/run_dashboard.py`): a FastAPI
   backend + self-contained HTML/JS frontend, run with
   `python scripts/run_dashboard.py`. Live panels (candidates, open
@@ -229,7 +251,6 @@ What's still a skeleton or unverified (explicitly, not silently):
   with an actual position open.
 - `data/float_providers/massive.py` -- unused now that FMP is wired up; kept
   only as an alternate skeleton
-- RVOL's historical intraday-volume-by-time-of-day baseline
 - Level 2 / order-flow features
 - Alembic migrations (use `scripts/init_db.py` for now)
 - `market_observations` (raw-ish sampled quote features, distinct from the

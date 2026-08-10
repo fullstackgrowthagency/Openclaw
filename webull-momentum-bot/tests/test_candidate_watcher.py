@@ -178,3 +178,38 @@ def test_update_still_runs_score_logic_while_trade_blocked():
     assert candidate.trade_eligible is False
     assert candidate.latest_score is not None  # score computation still happened
     assert candidate.latest_metrics is not None
+
+
+# -- RVOL baseline lookup (metrics/volume_baseline.py) -- see broad_scanner.py's
+# _compute_volume_baseline for where candidate.volume_baseline gets built ---
+
+def test_update_uses_volume_baseline_for_relative_volume():
+    from webull_bot.metrics.volume_baseline import VolumeBaseline
+
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    candidate.volume_baseline = VolumeBaseline(
+        bucket_minutes=5,
+        typical_cumulative={("RTH", 0): 500.0},
+        typical_bucket_volume={("RTH", 0): 500.0},
+    )
+    # 2026-08-05 13:30 UTC == 9:30am ET (EDT) -- RTH bucket 0.
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=0.1, cumulative_volume=1_000.0)
+    snapshot.timestamp = datetime(2026, 8, 5, 13, 30)
+
+    watcher.update(candidate, snapshot)
+
+    assert candidate.latest_metrics.relative_volume == 2.0  # 1000 / 500
+
+
+def test_update_relative_volume_defaults_to_neutral_without_baseline():
+    # candidate.volume_baseline is None (paper/backtest mode, or a failed
+    # discovery-time lookup) -- relative_volume must fall back to its
+    # existing neutral default rather than raising or misbehaving.
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=0.1, cumulative_volume=1_000.0)
+
+    watcher.update(candidate, snapshot)
+
+    assert candidate.latest_metrics.relative_volume == 1.0

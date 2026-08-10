@@ -74,6 +74,7 @@ from typing import Callable, Optional
 from ..interfaces.broker import BrokerClient
 from ..interfaces.float_provider import FloatDataProvider
 from ..metrics.opening_range import compute_opening_range_high
+from ..metrics.volume_baseline import VolumeBaseline, compute_volume_baseline
 from ..metrics.volume_profile import compute_volume_profile, filter_bars_by_lookback, high_volume_node_levels
 from ..models import Candidate
 from ..state_machine import CandidateState, new_candidate, transition
@@ -123,6 +124,14 @@ class BroadScannerConfig:
     # the SAME raw bars fetched for the volume profile above, no extra
     # network call. See strategy/opening_range_breakout.py.
     opening_range_minutes: int = 5
+    # RVOL historical baseline (metrics/volume_baseline.py) -- what
+    # relative_volume/relative_volume_1m/relative_volume_5m compare today's
+    # activity against. Built from the SAME raw bars as the volume profile
+    # above (same bar_interval/bar_count), just bucketed differently, so
+    # this adds no extra network call. Matches volume_profile_bar_interval's
+    # 5-minute granularity, since typical_volume_1m/5m are both derived
+    # from that same bucket size (see VolumeBaseline.lookup).
+    volume_baseline_bucket_minutes: int = 5
     # Webull's own throughput ceiling is enforced globally by webull_market_data_limiter
     # (brokers/webull/retry.py), not by this value -- see module docstring. 10 just gives
     # enough overlap for FMP float lookups without spinning up needless idle threads.
@@ -215,9 +224,10 @@ class BroadScanner:
                     f"min_current_day_volume={self.config.min_current_day_volume:,.0f})."
                 )
 
-        # Fetched once and shared between static_resistance_levels and
-        # opening_range_high below -- both are derived from the same raw
-        # bars, so there's no reason to pay for get_raw_bars twice.
+        # Fetched once and shared between static_resistance_levels,
+        # opening_range_high, and volume_baseline below -- all three are
+        # derived from the same raw bars, so there's no reason to pay for
+        # get_raw_bars more than once.
         bars = self._fetch_raw_bars(symbol)
 
         candidate = new_candidate(symbol, now=snapshot.timestamp)
@@ -228,6 +238,7 @@ class BroadScanner:
         candidate.static_resistance_levels = self._compute_static_resistance_levels(bars)
         candidate.opening_range_high = self._compute_opening_range_high(bars)
         candidate.resistance_last_refreshed_at = snapshot.timestamp
+        candidate.volume_baseline = self._compute_volume_baseline(bars)
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate, None
 
@@ -371,6 +382,25 @@ class BroadScanner:
         if not bars:
             return None
         return compute_opening_range_high(bars, opening_range_minutes=self.config.opening_range_minutes, now=self.now_fn())
+
+    def _compute_volume_baseline(self, bars: Optional[list[dict]]) -> Optional[VolumeBaseline]:
+        """Historical 'typical volume by this point in the session'
+        reference (metrics/volume_baseline.py), from the same bars as
+        _compute_static_resistance_levels/_compute_opening_range_high above
+        -- no extra network call. Unlike those two, this is NOT lookback-
+        trimmed via filter_bars_by_lookback first: more historical days
+        only make the baseline's per-bucket average more representative,
+        there's no equivalent risk of "stale, no-longer-relevant" data the
+        way an old resistance level would be, so the full fetched window is
+        used as-is. Returns None (not a discovery-gate failure) on missing
+        bars, same fail-soft contract as the rest of this enrichment step;
+        compute_metrics simply sees None typical_volume_* and
+        relative_volume falls back to its existing neutral default."""
+        if not bars:
+            return None
+        return compute_volume_baseline(
+            bars, bucket_minutes=self.config.volume_baseline_bucket_minutes, now=self.now_fn()
+        )
 
     def scan(self, symbol_universe: list[str]) -> list[Candidate]:
         if not symbol_universe:

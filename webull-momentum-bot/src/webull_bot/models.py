@@ -21,6 +21,7 @@ from .enums import (
     TimeInForce,
     TradeBlockReason,
 )
+from .metrics.volume_baseline import VolumeBaseline
 
 
 @dataclass
@@ -224,6 +225,20 @@ class Candidate:
     dollar_volume_today: Optional[float] = None
     average_daily_volume: Optional[float] = None   # N-day average shares/day, see BroadScannerConfig.avg_volume_lookback_days
     previous_day_volume: Optional[float] = None     # most recent complete trading day's volume
+
+    # Historical "typical volume by this point in the session" reference,
+    # built once at discovery from the same raw bars fetched for
+    # static_resistance_levels (see BroadScanner._compute_volume_baseline
+    # and metrics/volume_baseline.py) -- what relative_volume/
+    # relative_volume_1m/relative_volume_5m in metrics/rolling.py compare
+    # today's activity against. None for paper/backtest mode, a failed/
+    # unsupported lookup, or a symbol with no historical bars to build
+    # from -- compute_metrics' typical_volume_* parameters simply stay None
+    # in that case, same fail-soft contract as static_resistance_levels.
+    # Unlike resistance, this is NOT periodically refreshed: it reflects
+    # days before today, which don't change again once the day is over, so
+    # computing it once at discovery is sufficient.
+    volume_baseline: Optional[VolumeBaseline] = None
 
 
 @dataclass

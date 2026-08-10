@@ -482,6 +482,47 @@ def test_scan_fetches_raw_bars_only_once_per_symbol():
     assert broker.call_count == 1
 
 
+# -- volume_baseline (also shares the same raw bars -- see
+# metrics/volume_baseline.py and scanner/candidate_watcher.py's RVOL lookup) --
+
+def test_scan_populates_volume_baseline_from_raw_bars():
+    # 2026-08-03/04 are EDT (UTC-4) -- 9:30am ET == 13:30 UTC, RTH bucket 0.
+    # "Today" (now_fn) is 2026-08-05, so both are historical days the
+    # baseline should average over.
+    bars = [
+        _bar(5, 6, 100, time="2026-08-03T13:30:00.000+0000"),
+        _bar(5, 6, 300, time="2026-08-04T13:30:00.000+0000"),
+    ]
+    broker = _RawBarsAwareBroker({"BASE": bars}, prices={"BASE": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider(), now_fn=lambda: datetime(2026, 8, 5, 15, 0, 0))
+
+    candidates = scanner.scan(["BASE"])
+
+    assert candidates[0].volume_baseline is not None
+    typical_same_time, _, typical_5m = candidates[0].volume_baseline.lookup(datetime(2026, 8, 5, 13, 30))
+    assert typical_same_time == 200.0
+    assert typical_5m == 200.0
+
+
+def test_scan_leaves_volume_baseline_none_without_get_raw_bars():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    assert candidates[0].volume_baseline is None
+
+
+def test_scan_leaves_volume_baseline_none_on_raw_bars_failure():
+    class _FlakyRawBarsBroker(_RawBarsAwareBroker):
+        def get_raw_bars(self, symbol, interval, count):
+            raise RuntimeError("simulated Webull failure")
+
+    broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    assert len(candidates) == 1
+    assert candidates[0].volume_baseline is None
+
+
 # -- resistance refresh on rescans (periodic re-computation for already-
 # tracked, pre-entry candidates -- see TradingLoop._refresh_stale_resistance_levels) --
 

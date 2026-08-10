@@ -25,7 +25,7 @@ const COLUMN_INFO = {
       "• Float score -- lower free float scores higher\n" +
       "• Float velocity -- % of float traded in the last 5 minutes\n" +
       "• Float turnover -- % of float already traded today (cumulative)\n" +
-      "• Relative volume -- today's volume vs. typical for this time of day\n" +
+      "• Relative volume -- today's volume vs. this symbol's own historical typical volume at this exact point in the session (built from Webull's historical bars, separately for pre-market/regular/after-hours since volume resets at each boundary -- reads 0 if no historical bars were available at discovery, e.g. paper/backtest mode)\n" +
       "• Short-term relative volume -- same idea, windowed to the last 5 minutes for a fresher read\n" +
       "• Volume acceleration -- is volume ramping up, not just high\n" +
       "• Dollar-volume acceleration -- same idea in dollar terms, which also captures price moving between windows\n" +

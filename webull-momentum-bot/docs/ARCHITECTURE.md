@@ -538,6 +538,96 @@ reassignment is atomic under the GIL, so there's no torn read, only a
 possible one-tick-stale read on a genuine race, which the multi-minute
 throttle interval makes immaterial).
 
+## RVOL historical baseline
+
+`relative_volume`/`relative_volume_1m`/`relative_volume_5m`
+(`metrics/rolling.py`) need something to compare today's activity against
+-- "current volume vs. what's typical for this symbol at this point in the
+session." Without a baseline, `relative_volume()`'s safe-division default
+kicks in (a neutral `1.0`, meaning "exactly average"), and since the MIS
+scoring curve maps that neutral value to a `0` score
+(`relative_volume_score = _scale(metrics.relative_volume, 1.0, ...)` --
+`1.0` is the scale's own zero point), Relative Volume and Short-Term
+Relative Volume read a flat `0` in the dashboard's Score Weighting
+Breakdown regardless of session or real activity. This was true before
+`metrics/volume_baseline.py` existed, and is unrelated to
+`cumulative_volume` correctness -- it's purely the absence of a baseline to
+divide by.
+
+**Where the baseline data comes from, and why**: two options exist for
+building "what's typical for this symbol." (1) Accumulate it from this
+bot's own recorded ticks over time (`momentum_scores` in Postgres) --
+simple to build, but has a fatal flaw for this bot's actual target pattern:
+a low-float momentum mover is very often a symbol that's never been
+scanned before, and a baseline that only builds up after weeks of running
+would have zero data on exactly the day it matters most (a brand-new
+mover's first hot day). (2) Derive it from Webull's own historical
+intraday bars -- available from day one for any symbol, and free: it
+reuses the SAME ~780 bars `BroadScanner` already fetches for the
+resistance volume profile (`_fetch_raw_bars`), so building this costs zero
+extra Webull round-trips. Option 2 is what's implemented, specifically
+because of the "brand-new mover" case option 1 can't handle.
+
+**Cumulative volume is not one smooth curve across a trading day.** It
+resets at the pre-market/regular-session boundary and again at the
+regular/after-hours boundary -- this is the same discontinuity from
+`WebullBrokerClient._snapshot_from_dict`'s `ext_price`/`ext_volume`
+handling (see "Webull integration" below): `cumulative_volume` is sourced
+from Webull's regular-session `volume` field during RTH and from
+`ext_volume` outside it, and those are two different counters, not one
+continuously-accumulating number. A baseline built as a single "minutes
+since midnight" curve would therefore compare today's regular-session-only
+volume against a historical figure that also includes that day's
+pre-market, silently understating RVOL for the entire regular session.
+`compute_volume_baseline` instead tracks **three independently-reset
+curves** -- `PRE` (4:00am-9:30am ET), `RTH` (9:30am-4:00pm ET), and `ATH`
+(4:00pm-8:00pm ET) -- built by grouping bars by calendar day and phase,
+then computing a per-day running cumulative sum that resets at each
+phase's own start. A live lookup (`VolumeBaseline.lookup`) classifies the
+current tick into the same three phases and only ever compares against
+that phase's own curve, matching the live side's reset behavior exactly.
+The 4:00am/8:00pm phase boundaries are Webull's documented standard
+pre-market/after-hours window, not independently confirmed live for this
+account -- same "reasonable default, not verified" status as most of this
+project's other unvalidated starting points.
+
+**Bucketing and averaging**: bars are grouped into `bucket_minutes`
+increments (default 5, matching `volume_profile_bar_interval`) measured
+from each phase's own start. For each `(phase, bucket)` pair,
+`typical_cumulative` averages the running-cumulative-through-that-bucket
+across every historical day that had data there, and
+`typical_bucket_volume` averages that specific bucket's own (non-
+cumulative) volume the same way -- the latter feeds `typical_volume_5m`
+directly, and `typical_volume_1m` approximately, as
+`typical_bucket_volume / bucket_minutes` (a uniform-within-the-bucket
+assumption -- there's no way to recover a true historical 1-minute figure
+from 5-minute bars, so this is the best available estimate, not a precise
+historical rate). **Today itself is excluded** from every average (bars
+are filtered by calendar date in US/Eastern against `now`): a day still in
+progress would otherwise leak its own still-forming numbers into its own
+baseline, most visibly right at the PRE/RTH boundary, where "today's
+pre-market volume" would otherwise inflate "today's" own baseline entry
+using data that only exists because that activity already happened.
+
+**Wiring**: `BroadScanner._compute_volume_baseline` runs once at discovery
+(from the same `bars` already fetched for `static_resistance_levels`/
+`opening_range_high` -- see that section above) and stores the result on
+`Candidate.volume_baseline`. Unlike resistance, this is **not** part of the
+periodic refresh cycle (`refresh_resistance_levels`/
+`TradingLoopConfig.resistance_refresh_interval_seconds`): the baseline
+only reflects days *before* today, which don't change again once the day
+is over, so recomputing it once at discovery is sufficient --  there's no
+"today's data filling in" effect to chase the way there is for resistance.
+`CandidateWatcher.update()` looks up `candidate.volume_baseline` for the
+current snapshot's timestamp on every tick and passes the three resulting
+values into `compute_metrics`'s `typical_volume_same_time`/
+`typical_volume_1m`/`typical_volume_5m` parameters. A candidate with no
+baseline (paper/backtest mode, a failed/unsupported `get_raw_bars` lookup,
+or a bucket no historical day ever reached) simply passes `None` for all
+three, and `relative_volume`/`relative_volume_1m`/`relative_volume_5m`
+fall back to their pre-existing neutral default -- same fail-soft contract
+as `static_resistance_levels`.
+
 ## Entry strategies
 
 Resistance-breakout alone doesn't fit every candidate this bot finds: for a

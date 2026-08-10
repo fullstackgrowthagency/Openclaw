@@ -74,6 +74,14 @@ class CandidateWatcher:
         history = self._push_history(candidate.symbol, snapshot)
 
         free_float = candidate.float_data.free_float_shares if candidate.float_data else None
+        # RVOL baseline lookup (metrics/volume_baseline.py) -- None for
+        # paper/backtest mode or a candidate whose baseline failed to
+        # compute at discovery, in which case compute_metrics' relative_volume
+        # fields fall back to their existing neutral default, same as before
+        # this existed.
+        typical_same_time = typical_1m = typical_5m = None
+        if candidate.volume_baseline is not None:
+            typical_same_time, typical_1m, typical_5m = candidate.volume_baseline.lookup(snapshot.timestamp)
         # IMPORTANT: metrics/strategies must see the resistance level as it
         # stood *before* this snapshot -- a bar's high_of_day always includes
         # its own last_price, so folding it in before the breakout check
@@ -81,7 +89,14 @@ class CandidateWatcher:
         # breakout could ever trigger. `update_resistance` (called by the
         # caller *after* the trigger engine has looked at this bar) is what
         # rolls the current bar's high into resistance for the *next* bar.
-        metrics = compute_metrics(free_float, history, resistance_level=candidate.resistance_level)
+        metrics = compute_metrics(
+            free_float,
+            history,
+            resistance_level=candidate.resistance_level,
+            typical_volume_same_time=typical_same_time,
+            typical_volume_1m=typical_1m,
+            typical_volume_5m=typical_5m,
+        )
         candidate.latest_metrics = metrics
         candidate.latest_score = compute_score(metrics, candidate.float_data, self.mis_config)
 
