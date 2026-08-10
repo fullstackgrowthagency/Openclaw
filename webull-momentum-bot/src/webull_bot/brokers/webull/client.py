@@ -14,12 +14,21 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     webull.core.http.initializer.token.token_manager for the exact flow.
   - account_v2.get_account_balance(account_id) -> confirmed field names
     used below (total_net_liquidation_value, account_currency_assets[0].*).
-  - account_v2.get_account_position(account_id) -> confirmed shape is a
-    JSON list, but only verified EMPTY (no open positions existed during
-    verification). Field names in _position_from_dict are a best-effort
-    guess at Webull's snake_case convention (matches every other verified
-    endpoint) and MUST be re-checked against a real populated response
-    before being trusted -- see the TODO in _position_from_dict.
+  - account_v2.get_account_position(account_id) -> confirmed live on
+    2026-08-10 against a REAL populated response (3 open positions, a
+    separate production incident -- see scripts/list_and_close_positions.py).
+    Confirmed real row shape: {currency, quantity, cost, proportion,
+    position_id, symbol, instrument_type, cost_price, last_price,
+    market_value, unrealized_profit_loss, unrealized_profit_loss_rate,
+    day_profit_loss, day_realized_profit_loss}. `_position_from_dict`'s
+    guesses for `symbol`/`quantity`/`cost_price` were all correct. Two
+    guesses were NOT: there is no `side` field at all (so a short position
+    cannot actually be distinguished from a long by this response --
+    _position_from_dict's `side_raw = raw.get("side", "BUY")` will always
+    silently default to BUY; not fixed yet since every position observed so
+    far has been long, and there's no confirmed alternate field to key off
+    for direction) and no `open_time` field either (so `opened_at` is not
+    the real fill time, whatever `_epoch_ms_to_dt(None)` returns instead).
   - order_v3.place_order(account_id, [order_dict]) -> confirmed the request
     schema (instrument_type must be "EQUITY", not the SDK's internal
     InstrumentType.STOCK enum name -- that enum is not what this endpoint
@@ -242,16 +251,24 @@ class WebullBrokerClient(BrokerClient):
         return float(self._get_primary_currency_asset()["buying_power"])
 
     def _position_from_dict(self, raw: dict) -> Position:
-        # TODO: field names below are a best-effort guess following Webull's
-        # snake_case convention seen on every other verified endpoint --
-        # re-verify against a real populated get_account_position() response
-        # (none existed during integration; the sandbox account had zero
-        # positions) and correct any mismatches. `symbol` in particular is
-        # read with a plain `.get()` + a few plausible fallbacks rather than
-        # `raw["symbol"]` (this used to be a bare KeyError on a first
-        # mismatch) precisely BECAUSE it's unverified -- see get_positions'
-        # docstring for the real production incident a hard failure here
-        # caused.
+        # Confirmed live on 2026-08-10 against a real populated response
+        # (see the module docstring's "account_v2.get_account_position"
+        # entry for the exact row shape observed): `symbol`/`quantity`/
+        # `cost_price` below are all confirmed correct. `symbol` still keeps
+        # its multi-key fallback (rather than a bare `raw["symbol"]`, which
+        # used to be a hard KeyError on any mismatch -- see get_positions'
+        # docstring for the real production incident that caused) as cheap
+        # insurance against a future response shape change, even though the
+        # plain `"symbol"` key is now confirmed to be correct today.
+        #
+        # NOT confirmed, and known-wrong as written: there is no `side`
+        # field in the real response at all, so `side_raw` below always
+        # falls back to the "BUY" default -- a short position cannot
+        # currently be reported as anything but a (wrong) long. No
+        # confirmed alternate field to key off of yet; every real position
+        # observed so far has been long, so this hasn't been forced to
+        # matter in practice. Also no `open_time` field -- `opened_at`
+        # below is never the real fill time.
         symbol = raw.get("symbol") or raw.get("ticker_symbol") or raw.get("instrument_symbol")
         if not symbol:
             raise KeyError("no recognized symbol field in position row")
