@@ -96,6 +96,10 @@ class PositionSettingsUpdate(BaseModel):
     breakeven_trigger_pct: Optional[float] = None
 
 
+class KillSwitchUpdate(BaseModel):
+    active: bool
+
+
 def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session], trading_mode: str) -> FastAPI:
     app = FastAPI(title="Webull Momentum Bot Dashboard")
     app.add_middleware(_NoCacheMiddleware)
@@ -213,6 +217,24 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         for field, value in updates.items():
             setattr(config, field, value)
         return {field: getattr(config, field) for field in _ADJUSTABLE_POSITION_FIELDS}
+
+    @app.post("/api/kill-switch")
+    def update_kill_switch(update: KillSwitchUpdate):
+        """Toggles the kill switch from the dashboard's header button.
+
+        Engaging (`active=true`) calls
+        TradingLoop.engage_kill_switch_and_flatten, which blocks all new
+        entries immediately (RiskEngine checks this on every signal) and
+        requests every open position be force-closed at market -- the
+        actual closing happens on the trading loop's own processing thread
+        within one poll cycle, not synchronously in this request (see that
+        method's docstring for why). Disengaging (`active=false`) just
+        releases the switch -- there's nothing to flatten on the way out."""
+        if update.active:
+            trading_loop.engage_kill_switch_and_flatten("Kill switch engaged from dashboard")
+        else:
+            trading_loop.risk_engine.release_kill_switch()
+        return {"kill_switch_active": trading_loop.risk_engine.kill_switch_active}
 
     @app.get("/api/positions")
     def get_positions():

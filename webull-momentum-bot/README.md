@@ -217,6 +217,16 @@ This is checked in three independent places: `Settings.require_non_live_or_autho
 (called by the broker factory and `main.py`), `WebullBrokerClient.__init__`,
 and again by `OrderManager` before every order. See `src/webull_bot/config.py`.
 
+**Kill switch**: the dashboard's header has a "Safety" button (top right)
+that toggles `RiskEngine`'s kill switch, gated behind a confirmation
+dialog. Engaging it blocks every new trade instantly and force-closes all
+currently open positions at market -- the position-closing runs on the
+trading loop's own thread within one poll cycle (not synchronously in the
+browser request), so there's a few seconds of latency for that half, but
+new-entry blocking is immediate. Disengaging just resumes normal trading;
+it never touches positions on the way out. See `docs/ARCHITECTURE.md`'s
+"Safety" section for the full mechanics.
+
 `TRADING_MODE=sandbox` now runs end-to-end against a real Webull sandbox
 account (fake money) -- verified live for account balance/positions,
 snapshots, historical bars, and order submission (rejected only for being

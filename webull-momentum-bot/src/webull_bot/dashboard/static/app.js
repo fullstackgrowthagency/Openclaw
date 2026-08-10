@@ -249,14 +249,17 @@ async function fetchJSON(path) {
   return res.json();
 }
 
+let currentKillSwitchActive = false;
+
 async function refreshStatus() {
   const bar = document.getElementById("status-bar");
   try {
     const s = await fetchJSON("/api/status");
+    currentKillSwitchActive = !!s.kill_switch_active;
     const modeBadge = `<span class="badge ${s.trading_mode}">${s.trading_mode}</span>`;
-    const killBadge = s.kill_switch_active
-      ? `<span class="badge kill-active">Kill Switch ON</span>`
-      : `<span class="badge kill-inactive">Kill Switch off</span>`;
+    const killBadge = currentKillSwitchActive
+      ? `<button class="badge kill-active kill-switch-btn" id="kill-switch-btn" title="Click to disengage">Kill Switch ON</button>`
+      : `<button class="badge kill-inactive kill-switch-btn" id="kill-switch-btn" title="Click to engage">Kill Switch off</button>`;
     bar.innerHTML = `
       <div class="stat"><span class="label">Mode</span><span class="value">${modeBadge}</span></div>
       <div class="stat"><span class="label">Equity</span><span class="value">${fmtMoney(s.equity)}</span></div>
@@ -265,9 +268,75 @@ async function refreshStatus() {
       <div class="stat"><span class="label">Open Positions</span><span class="value">${s.open_position_count}</span></div>
       <div class="stat"><span class="label">Safety</span><span class="value">${killBadge}</span></div>
     `;
+    document.getElementById("kill-switch-btn")?.addEventListener("click", openKillSwitchModal);
   } catch (e) {
     bar.innerHTML = `<span class="neg">Failed to load status: ${e.message}</span>`;
   }
+}
+
+function openKillSwitchModal() {
+  const overlay = document.getElementById("kill-switch-modal-overlay");
+  const title = document.getElementById("kill-switch-modal-title");
+  const body = document.getElementById("kill-switch-modal-body");
+  const confirmBtn = document.getElementById("kill-switch-confirm");
+  const resultBar = document.getElementById("kill-switch-result");
+  if (!overlay) return;
+  resultBar.innerHTML = "";
+
+  if (currentKillSwitchActive) {
+    title.textContent = "Disengage Kill Switch?";
+    body.textContent = "This resumes normal trading -- the bot can enter new positions again on its usual signals. Open positions (if any) are left exactly as they are.";
+    confirmBtn.textContent = "Disengage";
+    confirmBtn.className = "";
+  } else {
+    title.textContent = "Engage Kill Switch?";
+    body.textContent = "This immediately blocks all new trades AND force-closes every open position at the current market price. Closing happens within a few seconds, not instantly, and cannot be undone once positions start closing. Are you sure?";
+    confirmBtn.textContent = "Engage & Close All Positions";
+    confirmBtn.className = "danger";
+  }
+  overlay.classList.add("open");
+}
+
+function closeKillSwitchModal() {
+  document.getElementById("kill-switch-modal-overlay")?.classList.remove("open");
+}
+
+function initKillSwitchModal() {
+  const overlay = document.getElementById("kill-switch-modal-overlay");
+  const closeBtn = document.getElementById("kill-switch-modal-close");
+  const cancelBtn = document.getElementById("kill-switch-cancel");
+  const confirmBtn = document.getElementById("kill-switch-confirm");
+  if (!overlay || !confirmBtn) return;
+
+  closeBtn.addEventListener("click", closeKillSwitchModal);
+  cancelBtn.addEventListener("click", closeKillSwitchModal);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeKillSwitchModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeKillSwitchModal();
+  });
+
+  confirmBtn.addEventListener("click", async () => {
+    const resultBar = document.getElementById("kill-switch-result");
+    const nextActive = !currentKillSwitchActive;
+    resultBar.innerHTML = `<span class="muted">${nextActive ? "Engaging and closing positions..." : "Disengaging..."}</span>`;
+    try {
+      const res = await fetch("/api/kill-switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: nextActive }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
+      resultBar.innerHTML = `<span class="pos">Done.</span>`;
+      await refreshStatus();
+      await refreshPositions();
+      setTimeout(closeKillSwitchModal, 600);
+    } catch (err) {
+      resultBar.innerHTML = `<span class="neg">${err.message}</span>`;
+    }
+  });
 }
 
 let selectedCandidateSymbol = null;
@@ -592,6 +661,7 @@ async function refreshAll() {
 
 initInfoModal();
 initSettingsModal();
+initKillSwitchModal();
 initScoreHistoryForm();
 initCandidateSelection();
 refreshAll();

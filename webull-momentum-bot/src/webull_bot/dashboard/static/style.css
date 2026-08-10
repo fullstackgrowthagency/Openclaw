@@ -107,6 +107,7 @@ header h1 {
 .settings-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 10px;
   margin-top: 6px;
 }
 
@@ -123,6 +124,25 @@ header h1 {
 .settings-actions button:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.settings-actions button.danger {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+  font-weight: 600;
+}
+
+.settings-actions button.danger:hover {
+  background: #d63a33;
+  border-color: #d63a33;
+  color: #fff;
+}
+
+.kill-switch-btn {
+  border: none;
+  cursor: pointer;
+  font: inherit;
 }
 
 .stat {

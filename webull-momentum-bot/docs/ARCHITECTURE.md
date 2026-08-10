@@ -921,9 +921,10 @@ endpoints every 5s. Keep it that way unless there's a real reason to add a
 frontend toolchain; a monitoring dashboard for a single operator doesn't
 need one.
 
-**Settings (top-right gear button)**: the only panel that writes, not just
-reads. Two separate config objects, two separate endpoint pairs, shown
-together in one modal:
+**Settings (top-right gear button)**: writes, not just reads (see the
+Safety section's kill-switch button for the dashboard's other write path).
+Two separate config objects, two separate endpoint pairs, shown together
+in one modal:
 - `GET`/`POST /api/risk-settings` expose four `RiskConfig` fields (see
   "Risk sizing" above), mutating `trading_loop.risk_engine.config` directly.
 - `GET`/`POST /api/position-settings` expose two `PositionManagementConfig`
@@ -1095,3 +1096,50 @@ See `config.py` docstring and the README's "Safety model" section. The
 three-condition live-trading gate is checked independently in the broker
 factory, `WebullBrokerClient.__init__`, and `OrderManager.submit_signal` --
 redundant on purpose.
+
+**Kill switch, from the dashboard**: the header's "Safety" badge (top
+right) is a button, not just a status indicator -- clicking it opens a
+confirmation modal (a second, deliberate step before anything happens) and
+then `POST /api/kill-switch` with `{"active": true|false}`.
+
+- **Engaging** (`active: true`) calls `TradingLoop.engage_kill_switch_and_flatten`,
+  which does two things with two different timings:
+  1. `RiskEngine.engage_kill_switch()` -- a plain boolean flip, takes
+     effect the instant it's called (`RiskEngine.evaluate()` checks
+     `kill_switch_active` first, before anything else, so no new entry can
+     slip through even mid-request).
+  2. Sets a request flag (`TradingLoop._close_all_positions_requested`)
+     that `_process_all_candidates` consumes on the trading loop's own
+     main thread, at the start of its very next tick -- **not**
+     synchronously in the dashboard's request handler. `_close_all_positions_now`
+     then force-closes every open position at market
+     (`ExitReason.RISK_KILL_SWITCH`), reusing the exact same
+     submit -> fill-or-pending -> finalize path `_manage_position` uses
+     for any other exit (`_dispatch_exit_finalization`,
+     `_pending_exit_orders`) -- a position that doesn't fill synchronously
+     is left pending and picked up by the following tick's ordinary
+     `_manage_position`/`_poll_pending_exit` call for that symbol, no
+     kill-switch-specific polling code needed.
+- **Disengaging** (`active: false`) just calls `RiskEngine.release_kill_switch()`
+  -- nothing to flatten on the way out, positions (if any exist) are left
+  exactly as they are.
+
+**Why the flatten is deferred to the main thread instead of running inline
+in the request handler**: `_close_all_positions_now` mutates `Candidate`/
+`Position` objects and the trading loop's internal dicts fairly heavily
+(pop positions, transition states, append trades) -- much more than the
+simple attribute reassignments the resistance-refresh and Settings-panel
+mutations get away with doing directly from another thread (see "Resistance
+detection"'s "Periodic refresh" and "Dashboard"'s Settings section). Doing
+that from the dashboard's request thread while the main thread might
+simultaneously be running `PositionManager.check_exit` on the very same
+position would be a real, not just theoretical, race. Deferring it to a
+flag the main thread itself consumes keeps 100% of position-closing logic
+on the single thread that already owns it, at the cost of up to one
+`poll_interval_seconds` of latency before flattening actually starts --
+new-entry blocking, the more time-sensitive half, still happens instantly
+regardless.
+
+A `get_snapshot` failure for one symbol during a flatten is logged and
+skipped, not fatal to the rest -- one bad quote during an emergency stop
+shouldn't leave every other position uncautiously open.

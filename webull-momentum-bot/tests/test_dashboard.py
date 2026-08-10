@@ -402,6 +402,35 @@ def test_position_settings_update_rejects_value_over_100(loop, client):
     assert loop.position_manager.config.breakeven_trigger_pct != 150
 
 
+def test_kill_switch_engage_via_dashboard(loop, client):
+    resp = client.post("/api/kill-switch", json={"active": True})
+    assert resp.status_code == 200
+    assert resp.json()["kill_switch_active"] is True
+    # Takes effect immediately -- no need to wait for a trading-loop tick.
+    assert loop.risk_engine.kill_switch_active is True
+    # Also requests the flatten-all-positions action the trading loop's own
+    # next tick will carry out -- see TradingLoop.engage_kill_switch_and_flatten.
+    assert loop._close_all_positions_requested is True
+
+
+def test_kill_switch_disengage_via_dashboard(loop, client):
+    loop.risk_engine.engage_kill_switch("manual test")
+
+    resp = client.post("/api/kill-switch", json={"active": False})
+
+    assert resp.status_code == 200
+    assert resp.json()["kill_switch_active"] is False
+    assert loop.risk_engine.kill_switch_active is False
+
+
+def test_kill_switch_disengage_does_not_request_flatten(loop, client):
+    loop.risk_engine.engage_kill_switch("manual test")
+
+    client.post("/api/kill-switch", json={"active": False})
+
+    assert loop._close_all_positions_requested is False
+
+
 def test_index_and_static_assets_are_served(client):
     assert client.get("/").status_code == 200
     assert client.get("/style.css").status_code == 200

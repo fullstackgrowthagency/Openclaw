@@ -203,6 +203,77 @@ class TradingLoop:
         self._positions: dict[str, Position] = {}          # symbol -> our own tracked open position
         self._last_universe_scan: Optional[datetime] = None
         self._persisted_transition_counts: dict[str, int] = {}  # symbol -> len(state_history) already flushed
+        # Set by engage_kill_switch_and_flatten (callable from any thread,
+        # e.g. the dashboard's request thread) and consumed by
+        # _process_all_candidates on the main thread -- see that method's
+        # docstring for why the actual position-closing work is deferred
+        # to the main thread rather than run inline on the caller's thread.
+        self._close_all_positions_requested = False
+        self._close_all_positions_reason = ""
+
+    # -- kill switch: halt + flatten ------------------------------------------
+
+    def engage_kill_switch_and_flatten(self, reason: str) -> None:
+        """Engages the kill switch (blocks all new entries immediately --
+        RiskEngine.evaluate() checks this on every signal, so this part
+        takes effect the instant it's called, from any thread) and
+        requests that every currently open position be force-closed at
+        market. Safe to call from any thread: engage_kill_switch itself is
+        just a boolean flip (atomic under the GIL), and the request flag
+        set here is consumed by _process_all_candidates on the main
+        processing thread, which is where the actual position-closing
+        happens -- see that method and _close_all_positions_now for why."""
+        self.risk_engine.engage_kill_switch(reason)
+        self._close_all_positions_reason = reason
+        self._close_all_positions_requested = True
+
+    def _close_all_positions_now(self, reason: str, now: datetime) -> None:
+        """Force-closes every open position immediately at market,
+        regardless of PositionManager's own exit conditions -- the kill
+        switch's "flatten everything" action. Runs exclusively on the main
+        processing thread (see _process_all_candidates), so this shares
+        the exact same submit -> fill-or-pending -> finalize path
+        _manage_position uses (_dispatch_exit_finalization,
+        _pending_exit_orders) with no extra cross-thread coordination
+        needed: a position that doesn't fill synchronously is left in
+        _pending_exit_orders and picked up by the very next tick's normal
+        _manage_position/_poll_pending_exit call for that symbol, same as
+        any other exit.
+
+        A get_snapshot or order failure for one symbol is logged and
+        skipped rather than aborting the whole flatten -- one bad quote
+        shouldn't leave every other position uncautiously open during an
+        emergency stop."""
+        for symbol, position in list(self._positions.items()):
+            candidate = self.candidates.get(symbol)
+            if candidate is None:
+                continue
+            try:
+                snapshot = self.broker.get_snapshot(symbol)
+            except Exception:
+                logger.warning("get_snapshot failed for %s while force-closing for kill switch.", symbol, exc_info=True)
+                continue
+
+            exit_signal = Signal(
+                symbol=symbol,
+                action=SignalAction.EXIT,
+                generated_at=snapshot.timestamp,
+                strategy_name=position.strategy_name,
+                strategy_version="kill_switch",
+                reference_price=snapshot.last_price,
+                metadata={"exit_reason": ExitReason.RISK_KILL_SWITCH.value, "reason": reason},
+            )
+            try:
+                order = self.order_manager.submit_signal(exit_signal, snapshot=snapshot, position=position)
+            except OrderRejected:
+                logger.exception("Unexpected OrderRejected while force-closing %s for kill switch.", symbol)
+                continue
+            self._notify_order_update(order)
+
+            if order.status == OrderStatus.FILLED:
+                self._dispatch_exit_finalization(candidate, position, order, exit_signal, now)
+            else:
+                self._pending_exit_orders[symbol] = (order, exit_signal)
 
     # -- universe / discovery ------------------------------------------------
 
@@ -679,6 +750,21 @@ class TradingLoop:
         self._process_all_candidates(now)
 
     def _process_all_candidates(self, now: datetime) -> None:
+        # Consumed here (main thread) rather than acted on immediately by
+        # whatever thread called engage_kill_switch_and_flatten -- keeps
+        # all position-closing work on the single thread that already owns
+        # mutating candidates/positions, with no new locking needed. A few
+        # seconds of latency (at most one poll_interval_seconds) before
+        # flattening actually starts is an acceptable cost for that safety;
+        # new entries are already blocked immediately regardless, since
+        # engage_kill_switch itself takes effect the instant it's called.
+        if self._close_all_positions_requested:
+            self._close_all_positions_requested = False
+            try:
+                self._close_all_positions_now(self._close_all_positions_reason, now)
+            except Exception:
+                logger.exception("Unhandled error force-closing all positions for kill switch.")
+
         for candidate in self._snapshot_candidates():
             try:
                 self._process_candidate(candidate, now)

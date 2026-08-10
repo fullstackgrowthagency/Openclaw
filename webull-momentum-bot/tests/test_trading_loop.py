@@ -158,7 +158,14 @@ class _FakeBroker(BrokerClient):
     def get_account_equity(self): return self.equity
     def get_buying_power(self): return self.equity
     def get_positions(self): return list(self._positions)
-    def get_snapshot(self, symbol): raise NotImplementedError
+
+    def get_snapshot(self, symbol):
+        return MarketSnapshot(
+            symbol=symbol, timestamp=datetime.utcnow(), last_price=5.20, bid=5.19, ask=5.21,
+            bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=5.20, high_of_day=5.20,
+            low_of_day=5.20, open_price=5.20,
+        )
+
     def get_bars(self, symbol, interval, lookback): raise NotImplementedError
     def subscribe_quotes(self, symbols, on_update): raise NotImplementedError
 
@@ -701,6 +708,153 @@ def test_rescan_universe_resistance_refresh_failure_does_not_crash():
     loop.broad_scanner.refresh_resistance_levels = _boom
 
     loop._rescan_universe(datetime.utcnow())  # must not raise
+
+
+# -- kill switch: halt + flatten (engage_kill_switch_and_flatten) -----------
+
+def _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0, quantity=100):
+    from webull_bot.state_machine import new_candidate, transition
+    from webull_bot.enums import CandidateState
+
+    broker.feed_snapshot(MarketSnapshot(
+        symbol=symbol, timestamp=datetime.utcnow(), last_price=price, bid=price - 0.01, ask=price + 0.01,
+        bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=price, high_of_day=price,
+        low_of_day=price, open_price=price,
+    ))
+    candidate = new_candidate(symbol)
+    for state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
+                  CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
+        transition(candidate, state)
+    loop.candidates[symbol] = candidate
+    loop._positions[symbol] = Position(
+        symbol=symbol, side=OrderSide.BUY, quantity=quantity, avg_entry_price=price - 1.0,
+        stop_price=price - 2.0, target_price=price + 5.0, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    return candidate
+
+
+def test_engage_kill_switch_and_flatten_blocks_new_entries_immediately():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+
+    loop.engage_kill_switch_and_flatten("test halt")
+
+    # Takes effect the instant it's called -- no tick needs to run first.
+    assert loop.risk_engine.kill_switch_active is True
+
+
+def test_engage_kill_switch_and_flatten_closes_open_position_on_next_tick():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker)
+
+    loop.engage_kill_switch_and_flatten("test halt")
+    assert "TEST" in loop._positions  # not closed synchronously by the call itself
+
+    loop._process_all_candidates(datetime.utcnow())
+
+    assert "TEST" not in loop._positions
+    assert candidate.state.value == "cooldown"
+    assert len(loop._trades) == 1
+    assert loop._trades[0].exit_reason == ExitReason.RISK_KILL_SWITCH
+
+
+def test_engage_kill_switch_and_flatten_closes_multiple_positions():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker, symbol="AAA", price=10.0)
+    _managing_candidate_with_position(loop, broker, symbol="BBB", price=20.0)
+
+    loop.engage_kill_switch_and_flatten("test halt")
+    loop._process_all_candidates(datetime.utcnow())
+
+    assert loop._positions == {}
+    assert len(loop._trades) == 2
+    assert {t.symbol for t in loop._trades} == {"AAA", "BBB"}
+
+
+def test_disengage_kill_switch_does_not_touch_open_positions():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+    loop.risk_engine.engage_kill_switch("test halt")
+
+    loop.risk_engine.release_kill_switch()
+    loop._process_all_candidates(datetime.utcnow())
+
+    assert loop.risk_engine.kill_switch_active is False
+    assert "TEST" in loop._positions  # untouched -- disengaging never flattens
+
+
+def test_kill_switch_flatten_leaves_pending_when_broker_does_not_fill_synchronously():
+    from webull_bot.state_machine import new_candidate, transition
+    from webull_bot.enums import CandidateState
+
+    # fills_after_polls=2: the submit happens via _close_all_positions_now,
+    # and _manage_position's own pending-order check then polls once more
+    # in that SAME tick (see _manage_position's "pending is not None"
+    # branch) -- fills_after_polls=1 would fill on that very first poll,
+    # collapsing submit+finalize into one tick and defeating this test's
+    # purpose. =2 means that first poll (still within tick 1) isn't enough,
+    # so it genuinely stays pending until tick 2's poll.
+    broker = _FakeBroker(fills_after_polls=2)
+    loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.engage_kill_switch_and_flatten("test halt")
+    loop._process_all_candidates(datetime.utcnow())
+
+    # _FakeBroker returns SUBMITTED first -- the close is pending, not
+    # finalized yet, and the position is still tracked as open.
+    assert "TEST" in loop._pending_exit_orders
+    assert "TEST" in loop._positions
+    assert candidate.state.value == "managing"
+
+    # The very next tick's normal _manage_position path (not any kill-switch-
+    # specific code) picks up and finalizes the pending exit, same as any
+    # other exit order.
+    loop._process_all_candidates(datetime.utcnow())
+    assert "TEST" not in loop._pending_exit_orders
+    assert "TEST" not in loop._positions
+    assert candidate.state.value == "cooldown"
+
+
+def test_kill_switch_flatten_skips_symbol_on_snapshot_failure_without_crashing():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+    # No snapshot fed for a second symbol -- get_snapshot raises for it.
+    from webull_bot.state_machine import new_candidate, transition
+    from webull_bot.enums import CandidateState
+
+    broken_candidate = new_candidate("NOSNAPSHOT")
+    for state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
+                  CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
+        transition(broken_candidate, state)
+    loop.candidates["NOSNAPSHOT"] = broken_candidate
+    loop._positions["NOSNAPSHOT"] = Position(
+        symbol="NOSNAPSHOT", side=OrderSide.BUY, quantity=10, avg_entry_price=5.0, stop_price=4.0,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.engage_kill_switch_and_flatten("test halt")
+    loop._process_all_candidates(datetime.utcnow())  # must not raise
+
+    # The good symbol still closes even though the other one failed.
+    assert "TEST" not in loop._positions
+    assert "NOSNAPSHOT" in loop._positions
 
 
 # -- scan_and_add_candidate (on-demand single-ticker scan, backs the
