@@ -97,3 +97,12 @@ def test_no_signal_when_not_armed():
     strategy = RefinedBreakoutStrategy()
     candidate = _candidate(state=CandidateState.WATCHING, resistance_level=10.0)
     assert strategy.on_snapshot(candidate, _snapshot(10.2)) is None
+
+
+def test_target_follows_injected_reward_risk_ratio():
+    strategy = RefinedBreakoutStrategy(reward_risk_ratio_fn=lambda: 3.0)
+    candidate = _candidate(resistance_level=10.0)
+    signal = strategy.on_snapshot(candidate, _snapshot(10.2))
+    assert signal is not None
+    risk_per_share = signal.reference_price - signal.suggested_stop
+    assert signal.suggested_target == signal.reference_price + risk_per_share * 3.0

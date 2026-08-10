@@ -66,7 +66,21 @@ def test_fires_on_volume_acceleration_surge():
     assert signal.action == SignalAction.ENTER_LONG
     assert signal.suggested_stop is not None
     assert signal.suggested_stop < signal.reference_price
-    assert signal.suggested_target is None
+    # A target hit is now a partial exit (see PositionManager.check_exit),
+    # not a full close, so this strategy computes one like every other --
+    # default reward_risk_ratio_fn returns 2.0.
+    assert signal.suggested_target is not None
+    risk_per_share = signal.reference_price - signal.suggested_stop
+    assert signal.suggested_target == signal.reference_price + risk_per_share * 2.0
+
+
+def test_target_follows_injected_reward_risk_ratio():
+    strategy = VolumeIgnitionStrategy(reward_risk_ratio_fn=lambda: 3.0)
+    candidate = _candidate(latest_metrics=_metrics(volume_accel_1m_3m=4.0))
+    signal = strategy.on_snapshot(candidate, _snapshot())
+    assert signal is not None
+    risk_per_share = signal.reference_price - signal.suggested_stop
+    assert signal.suggested_target == signal.reference_price + risk_per_share * 3.0
 
 
 def test_fires_on_float_velocity_surge_alone():

@@ -78,8 +78,23 @@ const COLUMN_INFO = {
       "5. Breakout Pullback -- after a resistance breakout, waits for a controlled pullback on fading volume, then enters once price reclaims the pullback high. Avoids buying the very first spike; targets a steadier, less exhausted move.\n\n" +
       "6. Ignition Pullback -- the same pullback-then-reclaim pattern as #5, but anchored to a volume/float-turnover surge instead of a resistance level, so it works even when there's no nearby resistance to react to.\n\n" +
       "7. Volatility Contraction (\"flag/pennant\") -- looks for price tightening into a narrow range after an initial move, then enters once that range expands again with volume. A classic continuation setup for a stock that's \"coiling\" before its next leg.\n\n" +
-      "8. Volume Ignition -- the broadest strategy, placed last on purpose so it only fires when none of the above already did. Triggers on a sudden volume acceleration or a float-turnover surge, combined with rising price above VWAP, with no resistance level or fixed profit target required. This is what catches a stock whose resistance is too far away to be a useful reference at all -- it relies on the trailing stop (and VWAP-failure/time exits) to manage the trade instead of a fixed target.\n\n" +
+      "8. Volume Ignition -- the broadest strategy, placed last on purpose so it only fires when none of the above already did. Triggers on a sudden volume acceleration or a float-turnover surge, combined with rising price above VWAP, with no resistance level required. This is what catches a stock whose resistance is too far away to be a useful reference at all.\n\n" +
+      "Every strategy's target is computed from the same live \"Minimum reward:risk ratio\" setting in the Settings panel (top right), not a fixed number baked into each strategy -- tightening or loosening that one dial changes what all 8 target on their next signal. Hitting target doesn't fully close a trade, either: it sells half and lets the rest keep riding the stop -- see the Position Management guide for the full exit sequence (breakeven, trailing stop, and why trailing only kicks in after that first partial).\n\n" +
       "Every strategy still flows through the same risk checks (position sizing, per-trade risk, daily loss limit, spread/liquidity gates, cooldowns) before an order is placed -- a strategy signal never bypasses risk management. None of these have been backtested or run live yet; their exact thresholds are starting points, not tuned values.",
+  },
+  "position-management": {
+    title: "Position Management",
+    body:
+      "Once an entry fills, PositionManager checks the position every poll tick and decides whether to exit -- in this order, first match wins:\n\n" +
+      "1. Stop hit -- price at or below the current stop. Closes the entire remaining position.\n\n" +
+      "2. Target hit (first time only) -- sells HALF the position instead of closing it entirely. The strategy's own target (see the Entry Strategies guide -- it's the same live \"Minimum reward:risk ratio\" setting for all 8) decides when this fires. This is deliberate: banking some profit at a known level while letting the other half keep riding, instead of a hard cap that exits the whole trade the instant it reaches target. If the position is too small to split into two whole shares, this falls back to closing it entirely.\n\n" +
+      "3. VWAP failure -- price drops meaningfully below VWAP, regardless of where the stop sits. Full close.\n\n" +
+      "4. Time limit (30 minutes by default) -- if none of the above triggered by then. Full close.\n\n" +
+      "Two rules move the stop itself, both adjustable in Settings (top right):\n\n" +
+      "• Breakeven -- once price is up 5% from entry, the stop jumps to exactly your entry price (a guaranteed no-loss floor). Active from the moment a position opens.\n\n" +
+      "• Trailing stop -- recomputed every tick as 3% below the current price, and only ever moves the stop up, never down. This one does NOT start until AFTER the first target hit (rule 2 above) -- before that, only the breakeven rule can move the stop. The idea: let the trade prove itself by reaching target and banking some profit first, then use the trailing stop to protect the remaining half's gains without capping them at a fixed level.\n\n" +
+      "Put together: a fresh position rides on its original stop, then breakeven once it's up 5%, then hits target and banks half its size, then trails the remaining half with a 3%-below-price stop that only ever tightens -- letting a strong move keep running instead of being capped at the target.\n\n" +
+      "None of this has been backtested or run live yet -- the 5% breakeven trigger and 3% trailing distance are starting points, not tuned values.",
   },
 };
 

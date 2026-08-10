@@ -50,9 +50,11 @@ What's implemented and tested:
   (breakout bounded to within 3% above resistance), Opening Range Breakout,
   VWAP Reclaim Continuation, Momentum Breakout, Breakout Pullback,
   Ignition Pullback, Volatility Contraction ("flag/pennant"), and Volume
-  Ignition (volume/float-turnover surge, no resistance level needed --
-  relies on the trailing-stop/VWAP-failure/time exits below instead of a
-  fixed profit target)
+  Ignition (volume/float-turnover surge, no resistance level needed).
+  Every strategy computes its target from the *same live*
+  `RiskConfig.min_risk_reward_ratio` (no more hardcoded per-strategy
+  multiples) via an injected `reward_risk_ratio_fn`, so tuning that one
+  setting in the dashboard changes what all 8 target on their next signal
 - Deterministic Risk Engine enforcing per-trade risk sizing (5% of equity,
   entry-to-stop), a minimum 1:2 reward:risk ratio on any signal with a
   target, a max single-position size (100% of buying power), a fleet-wide
@@ -65,13 +67,14 @@ What's implemented and tested:
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry
-  once price is up 5%) plus a 3% trailing stop apply to every open
-  position regardless of strategy, both only ever tightening the stop, plus
-  VWAP-failure and time-limit backstops. A target hit doesn't fully close
-  the position -- it sells half (partial exit) and lets the rest keep
-  riding the breakeven/trailing rules, so gains aren't capped at a fixed
-  R-multiple the way a full-exit target would. The strategy's own
-  suggested stop/target still become the position's initial stop/target
+  once price is up 5%) applies to every open position from tick one; the 3%
+  trailing stop only takes over once a target has been hit (see below) --
+  both only ever tighten the stop, plus VWAP-failure and time-limit
+  backstops. A target hit doesn't fully close the position -- it sells half
+  (partial exit) and lets the rest keep riding the breakeven/trailing
+  rules, so gains aren't capped at a fixed R-multiple the way a full-exit
+  target would. The strategy's own suggested stop/target still become the
+  position's initial stop/target
   unchanged (RiskEngine's settings gate entry, they never move an open
   position's stop or target). Both the breakeven trigger and trailing-stop
   % are live-adjustable from the dashboard's Settings button alongside the

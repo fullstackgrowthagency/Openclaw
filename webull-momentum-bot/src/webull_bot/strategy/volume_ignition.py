@@ -18,16 +18,24 @@ A volume spike alone is ambiguous -- it's just as consistent with a dump
 as a breakout -- so two more conditions are required to confirm this is
 upward momentum, not distribution: price must actually be rising
 (price_velocity_1m > 0) and trading above VWAP (the standard momentum-long
-filter against buying into a fade). Because there's no resistance level to
-anchor a target to, `suggested_target` is deliberately left None here --
-the existing trailing-stop/VWAP-failure/time-limit exits in
-PositionManager are what let a winner run instead of capping it at a
-fixed R-multiple.
+filter against buying into a fade).
+
+Unlike the original design, `suggested_target` is no longer None: it's
+computed from reward_risk_ratio_fn() the same way as every other
+strategy, since hitting a target is now a PARTIAL exit (sells half, see
+PositionManager.check_exit) rather than a full close -- there's no longer
+a "capped at target" downside to worry about, and without any target at
+all this strategy had no way to ever bank profit except the stop or
+trailing stop eventually catching up, even through a long sideways chop.
+The remaining half after the partial still rides the
+breakeven/trailing-stop exits exactly as it did before. See main.py's
+build_trading_loop for the live wiring to
+RiskEngine.config.min_risk_reward_ratio.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from ..enums import CandidateState, SignalAction
 from ..interfaces.strategy import Strategy
@@ -46,8 +54,9 @@ class VolumeIgnitionStrategy(Strategy):
     name = "volume_ignition"
     version = "v1"
 
-    def __init__(self, config: Optional[VolumeIgnitionConfig] = None):
+    def __init__(self, config: Optional[VolumeIgnitionConfig] = None, *, reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0):
         self.config = config or VolumeIgnitionConfig()
+        self._reward_risk_ratio_fn = reward_risk_ratio_fn
 
     def on_snapshot(self, candidate: Candidate, snapshot: MarketSnapshot) -> Optional[Signal]:
         if candidate.state != CandidateState.ARMED:
@@ -73,6 +82,8 @@ class VolumeIgnitionStrategy(Strategy):
 
         entry_price = snapshot.last_price
         stop_price = entry_price * (1 - self.config.initial_stop_pct / 100.0)
+        risk_per_share = entry_price - stop_price
+        target_price = entry_price + risk_per_share * self._reward_risk_ratio_fn()
 
         return Signal(
             symbol=candidate.symbol,
@@ -82,7 +93,7 @@ class VolumeIgnitionStrategy(Strategy):
             strategy_version=self.version,
             reference_price=entry_price,
             suggested_stop=stop_price,
-            suggested_target=None,  # let the trailing stop / VWAP-failure exit run the winner
+            suggested_target=target_price,
             score_at_signal=candidate.latest_score.score if candidate.latest_score else None,
             metadata={
                 "volume_accel_1m_3m": metrics.volume_accel_1m_3m,

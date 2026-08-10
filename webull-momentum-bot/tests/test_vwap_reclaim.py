@@ -108,3 +108,15 @@ def test_custom_below_vwap_threshold_respected():
     strategy.on_snapshot(candidate, _snapshot())
     candidate.latest_metrics = _metrics(distance_from_vwap_pct=0.5, volume_accel_1m_3m=2.0)
     assert strategy.on_snapshot(candidate, _snapshot()) is None
+
+
+def test_target_follows_injected_reward_risk_ratio():
+    strategy = VWAPReclaimStrategy(reward_risk_ratio_fn=lambda: 3.0)
+    candidate = _candidate()
+    candidate.latest_metrics = _metrics(distance_from_vwap_pct=-0.5)
+    strategy.on_snapshot(candidate, _snapshot())
+    candidate.latest_metrics = _metrics(distance_from_vwap_pct=0.5, volume_accel_1m_3m=2.0)
+    signal = strategy.on_snapshot(candidate, _snapshot(10.1))
+    assert signal is not None
+    risk_per_share = signal.reference_price - signal.suggested_stop
+    assert signal.suggested_target == signal.reference_price + risk_per_share * 3.0

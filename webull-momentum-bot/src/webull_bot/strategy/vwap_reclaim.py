@@ -18,11 +18,18 @@ clobbering each other's state on the same candidate.
 
 Stop is VWAP-anchored rather than a flat %, since VWAP is the level this
 entry is explicitly betting will now hold as support.
+
+target_price is computed from reward_risk_ratio_fn(), not a hardcoded
+per-strategy multiple -- see main.py's build_trading_loop, which wires
+this to the live RiskEngine.config.min_risk_reward_ratio (the same value
+adjustable from the dashboard's Settings panel) so every strategy's target
+moves together when that setting changes. Defaults to a fixed 2.0 when not
+supplied (tests, standalone use).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from ..enums import CandidateState, SignalAction
 from ..interfaces.strategy import Strategy
@@ -36,15 +43,15 @@ class VWAPReclaimConfig:
     min_volume_acceleration: float = 1.5
     max_spread_pct: float = 2.0
     stop_buffer_pct: float = 0.5             # stop placed this % below VWAP itself
-    profit_target_r_multiple: float = 2.0
 
 
 class VWAPReclaimStrategy(Strategy):
     name = "vwap_reclaim"
     version = "v1"
 
-    def __init__(self, config: Optional[VWAPReclaimConfig] = None):
+    def __init__(self, config: Optional[VWAPReclaimConfig] = None, *, reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0):
         self.config = config or VWAPReclaimConfig()
+        self._reward_risk_ratio_fn = reward_risk_ratio_fn
         self._was_below_vwap: dict[str, bool] = {}
 
     def on_snapshot(self, candidate: Candidate, snapshot: MarketSnapshot) -> Optional[Signal]:
@@ -75,7 +82,7 @@ class VWAPReclaimStrategy(Strategy):
         risk_per_share = entry_price - stop_price
         if risk_per_share <= 0:
             return None
-        target_price = entry_price + risk_per_share * self.config.profit_target_r_multiple
+        target_price = entry_price + risk_per_share * self._reward_risk_ratio_fn()
 
         self._was_below_vwap[candidate.symbol] = False  # reset -- a fresh dip must occur before this can fire again
         return Signal(

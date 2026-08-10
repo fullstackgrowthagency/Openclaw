@@ -15,12 +15,19 @@ strategies sharing state on the same Candidate fields would silently
 clobber each other every tick one of them is asked but the other already
 mutated those fields. Keeping this strategy's state private avoids that
 collision entirely.
+
+target_price is computed from reward_risk_ratio_fn(), not a hardcoded
+per-strategy multiple -- see main.py's build_trading_loop, which wires
+this to the live RiskEngine.config.min_risk_reward_ratio (the same value
+adjustable from the dashboard's Settings panel) so every strategy's target
+moves together when that setting changes. Defaults to a fixed 2.0 when not
+supplied (tests, standalone use).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Callable, Optional
 
 from ..enums import CandidateState, SignalAction
 from ..interfaces.strategy import Strategy
@@ -45,15 +52,15 @@ class IgnitionPullbackConfig:
     reclaim_buffer_pct: float = 0.1
     max_spread_pct: float = 2.0
     initial_stop_buffer_pct: float = 0.5     # stop placed this % below the pullback low
-    profit_target_r_multiple: float = 2.0
 
 
 class IgnitionPullbackStrategy(Strategy):
     name = "ignition_pullback"
     version = "v1"
 
-    def __init__(self, config: Optional[IgnitionPullbackConfig] = None):
+    def __init__(self, config: Optional[IgnitionPullbackConfig] = None, *, reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0):
         self.config = config or IgnitionPullbackConfig()
+        self._reward_risk_ratio_fn = reward_risk_ratio_fn
         self._phase: dict[str, _Phase] = {}
         self._ignition_price: dict[str, float] = {}
         self._pullback_low: dict[str, float] = {}
@@ -120,7 +127,7 @@ class IgnitionPullbackStrategy(Strategy):
             risk_per_share = entry_price - stop_price
             if risk_per_share <= 0:
                 return None
-            target_price = entry_price + risk_per_share * self.config.profit_target_r_multiple
+            target_price = entry_price + risk_per_share * self._reward_risk_ratio_fn()
 
             signal = Signal(
                 symbol=symbol,

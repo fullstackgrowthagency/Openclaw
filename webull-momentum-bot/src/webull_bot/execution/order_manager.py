@@ -10,7 +10,6 @@ architecture is being bypassed -- don't do it.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 from typing import Optional
 
 from ..config import Settings
@@ -74,8 +73,18 @@ class OrderManager:
                 quantity=quantity,
                 status=OrderStatus.PENDING,
                 client_order_id=str(uuid.uuid4()),
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                # signal.generated_at, not datetime.utcnow() -- callers use
+                # this as `since` in poll_fills(since=order.created_at) to
+                # find this order's fill. In backtests/paper-fed-snapshot
+                # tests, fills are recorded at the *simulated* snapshot
+                # timestamp, which can be arbitrarily far from the real
+                # wall clock; using utcnow() here made that lookup silently
+                # fail every time in that context (confirmed: a partial
+                # exit's realized P&L came back as exactly $0 because the
+                # fallback exit price landed on avg_entry_price instead of
+                # the real fill price).
+                created_at=signal.generated_at,
+                updated_at=signal.generated_at,
                 strategy_name=signal.strategy_name,
             )
             return self.broker.place_order(order)
@@ -97,8 +106,8 @@ class OrderManager:
             quantity=decision.max_shares,
             status=OrderStatus.PENDING,
             client_order_id=str(uuid.uuid4()),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=signal.generated_at,  # see the exit branch above for why not datetime.utcnow()
+            updated_at=signal.generated_at,
             strategy_name=signal.strategy_name,
         )
         return self.broker.place_order(order)

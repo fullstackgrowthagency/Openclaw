@@ -14,6 +14,12 @@ chosen design (see docs/ARCHITECTURE.md's "Position management" section):
 letting the whole position ride only on the trailing stop was considered
 and rejected in favor of banking some profit at a known level while still
 letting the remainder run.
+
+The trailing stop itself only activates after that partial exit -- before
+target is reached, the stop is governed solely by the strategy's initial
+stop and the breakeven-at-+N% rule, not the continuous %-of-current-price
+trailing math. See _maybe_update_trailing_stop's docstring for why these
+two don't run together.
 """
 from __future__ import annotations
 
@@ -73,7 +79,18 @@ class PositionManager:
             position.stop_price = position.avg_entry_price
 
     def _maybe_update_trailing_stop(self, position: Position, snapshot: MarketSnapshot) -> None:
-        if not self.config.trailing_stop_pct:
+        """Only takes over once the target has been reached and the partial
+        exit taken -- before that, the stop is governed solely by the
+        strategy's own initial stop and the breakeven rule above. This is a
+        deliberate choice: trailing 3% off the *current* price starting
+        from tick one would fight the breakeven rule's fixed floor and can
+        ratchet the stop up faster than the trade has actually proven
+        itself. Once target is hit, the position has already banked half
+        its profit and earned a genuine trailing take-profit on the rest.
+        A strategy that never sets a target (none currently do) never
+        reaches partial_exit_taken=True, so its position rides on the
+        initial stop + breakeven alone for its whole lifetime."""
+        if not self.config.trailing_stop_pct or not position.partial_exit_taken:
             return
         trailing_level = snapshot.last_price * (1 - self.config.trailing_stop_pct / 100.0)
         if position.stop_price is None or trailing_level > position.stop_price:
@@ -98,7 +115,12 @@ class PositionManager:
         action = SignalAction.EXIT
 
         if position.stop_price is not None and snapshot.last_price <= position.stop_price:
-            reason = ExitReason.TRAILING_STOP if self.config.trailing_stop_pct else ExitReason.STOP_LOSS
+            # TRAILING_STOP only once trailing is actually the thing
+            # governing the stop (post-partial-exit, see
+            # _maybe_update_trailing_stop) -- before that, whether it's the
+            # strategy's original stop or the breakeven-adjusted one, it's
+            # simply a stop loss, not a trailing one.
+            reason = ExitReason.TRAILING_STOP if (self.config.trailing_stop_pct and position.partial_exit_taken) else ExitReason.STOP_LOSS
         elif (
             position.target_price is not None
             and not position.partial_exit_taken

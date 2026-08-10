@@ -532,14 +532,16 @@ more specific patterns from ever getting a chance):
    min_volume_acceleration`) **or** a float-turnover-specific ignition
    (`float_velocity_5m >= min_float_velocity_5m`), combined with rising
    price and price above VWAP as anti-dump confirmation. No resistance
-   level and no fixed profit target needed -- `suggested_target=None` is
-   deliberate (confirmed safe: `RiskEngine.evaluate()` never reads
-   `suggested_target`, only `suggested_stop`), relying on
-   `PositionManager`'s existing trailing-stop/VWAP-failure/time-limit exits
-   to let winners run instead of capping them at a fixed R-multiple. This
-   is the entry for a symbol whose resistance is too far away to be a
-   useful reference at all -- the original motivating case for this whole
-   batch of strategies.
+   level needed to anchor an entry to. Its target is computed the same way
+   as every other strategy's (see "Risk sizing" below) -- an earlier
+   version of this strategy left `suggested_target=None` on the reasoning
+   that a fixed target would cap gains, but now that hitting target is a
+   partial exit rather than a full close (see "Position management"
+   below), that concern no longer applies: it banks half at target like
+   the other 7 and lets the rest keep riding `PositionManager`'s
+   trailing-stop/VWAP-failure/time-limit exits. This is the entry for a
+   symbol whose resistance is too far away to be a useful reference at
+   all -- the original motivating case for this whole batch of strategies.
 
 **State isolation**: with several pullback/phase-tracking strategies now
 registered simultaneously, any *new* stateful strategy added here keeps its
@@ -638,29 +640,49 @@ a signal outright if its own stop/target combo doesn't already meet the
 ratio. If the signal is approved, the exact `suggested_stop`/
 `suggested_target` values the *strategy* computed become
 `Position.stop_price`/`target_price` unchanged (`trading_loop.py:_confirm_entry_filled`).
-Raising or lowering `min_risk_reward_ratio` in the dashboard's Settings
-panel changes what gets rejected at entry; it does not reach into an
-approved position and move its stop or target. Each strategy currently
-hardcodes its own reward multiple independently (`profit_target_r_multiple`,
-mostly `2.0` -- see each `strategy/*.py` file's config) -- it happens to
-match `RiskConfig`'s default `min_risk_reward_ratio` today, but the two
-are not wired together, so changing one does not change the other.
+
+Unlike an earlier version of this design, every strategy's target
+computation IS wired to `RiskConfig.min_risk_reward_ratio` -- none of them
+hardcode their own reward multiple anymore. Each `Strategy.__init__` takes
+a `reward_risk_ratio_fn: Callable[[], float]` (default `lambda: 2.0` when
+not supplied, e.g. in tests), called fresh every time a target is computed
+(`target_price = entry_price + risk_per_share * self._reward_risk_ratio_fn()`).
+`main.py`'s `build_trading_loop` constructs `RiskEngine` first and passes
+`lambda: risk_engine.config.min_risk_reward_ratio` to all 8 strategies --
+the exact same live object the entry gate itself reads -- so raising or
+lowering that value in the dashboard's Settings panel changes what every
+strategy targets on its very next signal, not just what the gate demands.
+A strategy's own freshly-computed target can therefore never fail its own
+gate check. This also gave `VolumeIgnitionStrategy` a real target for the
+first time (previously `None` -- see its docstring for why that's no
+longer the right call now that a target hit is a partial exit, not a full
+close).
 
 Once a position is open, `PositionManager.check_exit` (`position/position_manager.py`)
 runs once per poll tick. Two stop-ratcheting updates happen first (both
-only ever tighten `stop_price`, never loosen it), then four conditions are
-checked in order -- first match wins:
+only ever tighten `stop_price`, never loosen it, and the second only
+activates once the first partial exit has happened -- see below), then
+four conditions are checked in order -- first match wins:
 
 1. **Breakeven** (`PositionManagementConfig.breakeven_trigger_pct`, default
    5%) -- once `price >= avg_entry_price * 1.05`, `stop_price` jumps to at
    least `avg_entry_price` (a guaranteed no-loss floor) if it wasn't
-   already there or better. This is a deliberate, explicit guarantee,
-   distinct from the trailing stop below: at a shallow `trailing_stop_pct`
-   or right after entry, the flat trailing calculation alone might not
-   have reached breakeven yet even though price already has.
+   already there or better. Runs on every tick regardless of whether a
+   partial exit has happened yet.
 2. **Trailing stop** (`trailing_stop_pct`, default 3%) -- recomputed every
    tick as `current_price * (1 - 3%)`, replacing `stop_price` whenever
-   that's tighter (higher) than whatever breakeven left it at.
+   that's tighter (higher) than whatever breakeven left it at. **Only
+   takes effect once `Position.partial_exit_taken` is `True`** (i.e. after
+   check ② below has fired at least once) -- before that, the stop is
+   governed solely by the strategy's initial stop and the breakeven rule,
+   not this continuous %-of-current-price math. This is a deliberate,
+   explicit choice: trailing from tick one would fight the breakeven
+   floor and can ratchet the stop up before the trade has actually proven
+   itself by reaching its target. See `_maybe_update_trailing_stop`'s
+   docstring for the full reasoning. One consequence: a strategy that
+   somehow set no target at all would never reach `partial_exit_taken`,
+   so its position would ride on the initial stop + breakeven alone for
+   its whole lifetime -- not a concern today since all 8 strategies set one.
 
 Both apply identically to every open position regardless of which of the 8
 strategies triggered its entry -- this is universal position management,

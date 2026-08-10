@@ -53,14 +53,22 @@ def test_breakeven_disabled_when_trigger_pct_is_none():
     assert position.stop_price == 9.5
 
 
-def test_breakeven_and_trailing_combine_taking_the_higher_stop():
-    # At +10% with a 3% trailing stop, the trailing calc (10.0*1.10*0.97 =
-    # 10.67) lands well above plain breakeven (10.0) -- the higher of the
-    # two should win.
+def test_trailing_does_not_apply_before_partial_exit_even_at_high_price():
+    # Trailing is gated to only take over once a target has been hit (see
+    # _maybe_update_trailing_stop's docstring) -- even at +10% with a 3%
+    # trailing stop configured, an untouched position (no target, so
+    # partial_exit_taken never flips True) stays at plain breakeven, not
+    # the tighter trailing level.
     manager = PositionManager(PositionManagementConfig(breakeven_trigger_pct=5.0, trailing_stop_pct=3.0, exit_on_vwap_failure=False, time_limit_minutes=None))
     position = _position(stop_price=9.5, target_price=None)
     manager.check_exit(position, _snapshot(11.0))
-    assert position.stop_price > 10.0
+    assert position.stop_price == 10.0  # breakeven only
+
+
+def test_trailing_takes_over_once_partial_exit_taken():
+    manager = PositionManager(PositionManagementConfig(breakeven_trigger_pct=5.0, trailing_stop_pct=3.0, exit_on_vwap_failure=False, time_limit_minutes=None))
+    position = _position(stop_price=9.5, target_price=None, partial_exit_taken=True)
+    manager.check_exit(position, _snapshot(11.0))
     assert position.stop_price == 11.0 * (1 - 3.0 / 100.0)
 
 
@@ -111,13 +119,26 @@ def test_stop_hit_emits_full_exit():
     assert signal.metadata["exit_reason"] == ExitReason.STOP_LOSS.value
 
 
-def test_stop_hit_reason_is_trailing_stop_when_trailing_enabled():
+def test_stop_hit_reason_is_stop_loss_before_any_partial_exit():
+    # Trailing hasn't taken over yet (no partial exit taken), so even with
+    # trailing_stop_pct configured, a stop hit here is a plain stop loss --
+    # see _maybe_update_trailing_stop's docstring for why trailing is gated
+    # to only govern the stop after target is hit.
     manager = PositionManager(PositionManagementConfig(trailing_stop_pct=3.0, exit_on_vwap_failure=False, time_limit_minutes=None, breakeven_trigger_pct=None))
     position = _position(stop_price=9.7, target_price=None)
-    # Price never moves favorably -- trailing calc (9.5*0.97=9.215) stays
-    # below the existing stop, so stop_price is untouched at 9.7; dropping
-    # to 9.5 triggers it.
     signal = manager.check_exit(position, _snapshot(9.5))
+    assert signal is not None
+    assert signal.metadata["exit_reason"] == ExitReason.STOP_LOSS.value
+
+
+def test_stop_hit_reason_is_trailing_stop_once_partial_exit_taken():
+    manager = PositionManager(PositionManagementConfig(trailing_stop_pct=3.0, exit_on_vwap_failure=False, time_limit_minutes=None, breakeven_trigger_pct=None))
+    position = _position(stop_price=9.7, target_price=None, partial_exit_taken=True)
+    # Trailing recomputes to 10.5*0.97=10.185 on this tick (above the old
+    # 9.7 stop), so a later drop to 10.1 catches the *trailing* level, not
+    # the original stop.
+    manager.check_exit(position, _snapshot(10.5))
+    signal = manager.check_exit(position, _snapshot(10.1))
     assert signal is not None
     assert signal.metadata["exit_reason"] == ExitReason.TRAILING_STOP.value
 

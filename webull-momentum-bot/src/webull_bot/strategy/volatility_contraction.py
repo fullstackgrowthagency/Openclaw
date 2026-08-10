@@ -21,11 +21,18 @@ rising price" using only already-computed per-tick metrics, rather than
 adding new stateful range/swing tracking on top of an already large batch
 of new strategies. Worth revisiting with real consolidation-high tracking
 if this version underperforms in practice.
+
+target_price is computed from reward_risk_ratio_fn(), not a hardcoded
+per-strategy multiple -- see main.py's build_trading_loop, which wires
+this to the live RiskEngine.config.min_risk_reward_ratio (the same value
+adjustable from the dashboard's Settings panel) so every strategy's target
+moves together when that setting changes. Defaults to a fixed 2.0 when not
+supplied (tests, standalone use).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from ..enums import CandidateState, SignalAction
 from ..interfaces.strategy import Strategy
@@ -39,15 +46,15 @@ class VolatilityContractionConfig:
     min_volume_acceleration: float = 2.0  # the volume kick confirming expansion out of the range
     max_spread_pct: float = 2.0
     initial_stop_pct: float = 2.5
-    profit_target_r_multiple: float = 2.0
 
 
 class VolatilityContractionBreakoutStrategy(Strategy):
     name = "volatility_contraction"
     version = "v1"
 
-    def __init__(self, config: Optional[VolatilityContractionConfig] = None):
+    def __init__(self, config: Optional[VolatilityContractionConfig] = None, *, reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0):
         self.config = config or VolatilityContractionConfig()
+        self._reward_risk_ratio_fn = reward_risk_ratio_fn
 
     def on_snapshot(self, candidate: Candidate, snapshot: MarketSnapshot) -> Optional[Signal]:
         if candidate.state != CandidateState.ARMED:
@@ -74,7 +81,7 @@ class VolatilityContractionBreakoutStrategy(Strategy):
         risk_per_share = entry_price - stop_price
         if risk_per_share <= 0:
             return None
-        target_price = entry_price + risk_per_share * self.config.profit_target_r_multiple
+        target_price = entry_price + risk_per_share * self._reward_risk_ratio_fn()
 
         return Signal(
             symbol=candidate.symbol,

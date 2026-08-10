@@ -140,6 +140,19 @@ def build_trading_loop(
         universe_provider = StaticUniverseProvider(_PAPER_MODE_PLACEHOLDER_WATCHLIST)
 
     watcher = CandidateWatcher()
+    # Constructed before the strategies below so each one can be handed a
+    # live-reading closure over its config -- see reward_risk_ratio_fn.
+    risk_engine = RiskEngine()
+
+    # Every strategy computes its target as entry + risk_per_share * this
+    # ratio, read fresh on every signal rather than each hardcoding its own
+    # fixed multiple -- so tightening/loosening RiskConfig.min_risk_reward_ratio
+    # from the dashboard's Settings panel (see risk/risk_engine.py) changes
+    # what every strategy actually targets, not just what the risk engine's
+    # entry gate demands. Same object the gate itself reads, so a strategy's
+    # own signal can never fail that gate on account of the target it just computed.
+    reward_risk_ratio_fn = lambda: risk_engine.config.min_risk_reward_ratio  # noqa: E731
+
     # Ordered most-selective/confirmed first, most-permissive last -- the
     # first strategy to return a Signal for a given tick wins (see
     # TriggerEngine), so a broad catch-all placed early would pre-empt
@@ -147,16 +160,15 @@ def build_trading_loop(
     # docs/ARCHITECTURE.md's "Entry strategies" section for what each one
     # catches and why it's ordered here the way it is.
     trigger_engine = TriggerEngine(strategies=[
-        RefinedBreakoutStrategy(),
-        OpeningRangeBreakoutStrategy(),
-        VWAPReclaimStrategy(),
-        MomentumBreakoutStrategy(),
-        BreakoutPullbackStrategy(),
-        IgnitionPullbackStrategy(),
-        VolatilityContractionBreakoutStrategy(),
-        VolumeIgnitionStrategy(),
+        RefinedBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        OpeningRangeBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        VWAPReclaimStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        MomentumBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        BreakoutPullbackStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        IgnitionPullbackStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        VolatilityContractionBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        VolumeIgnitionStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
     ])
-    risk_engine = RiskEngine()
     order_manager = OrderManager(broker, risk_engine, settings)
     position_manager = PositionManager()
 

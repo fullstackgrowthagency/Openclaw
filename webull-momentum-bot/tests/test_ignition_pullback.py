@@ -89,3 +89,20 @@ def test_no_signal_without_metrics():
     strategy = IgnitionPullbackStrategy()
     candidate = _candidate(latest_metrics=None)
     assert strategy.on_snapshot(candidate, _snapshot(12.0)) is None
+
+
+def test_target_follows_injected_reward_risk_ratio():
+    strategy = IgnitionPullbackStrategy(reward_risk_ratio_fn=lambda: 3.0)
+    candidate = _candidate()
+
+    candidate.latest_metrics = _metrics(volume_accel_1m_3m=4.0, price_velocity_1m=1.0, distance_from_vwap_pct=1.0)
+    strategy.on_snapshot(candidate, _snapshot(12.0))
+    candidate.latest_metrics = _metrics(volume_accel_1m_3m=0.5)
+    strategy.on_snapshot(candidate, _snapshot(11.5))
+    candidate.latest_metrics = _metrics(volume_accel_1m_3m=1.5)
+    strategy.on_snapshot(candidate, _snapshot(11.6))
+    signal = strategy.on_snapshot(candidate, _snapshot(11.7))
+
+    assert signal is not None
+    risk_per_share = signal.reference_price - signal.suggested_stop
+    assert signal.suggested_target == signal.reference_price + risk_per_share * 3.0

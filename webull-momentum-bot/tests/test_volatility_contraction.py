@@ -88,3 +88,12 @@ def test_no_signal_when_not_armed():
     strategy = VolatilityContractionBreakoutStrategy()
     candidate = _candidate(state=CandidateState.WATCHING)
     assert strategy.on_snapshot(candidate, _snapshot()) is None
+
+
+def test_target_follows_injected_reward_risk_ratio():
+    strategy = VolatilityContractionBreakoutStrategy(reward_risk_ratio_fn=lambda: 3.0)
+    candidate = _candidate(latest_metrics=_metrics(price_range_pct_3m=1.0, price_range_pct_15m=5.0))
+    signal = strategy.on_snapshot(candidate, _snapshot())
+    assert signal is not None
+    risk_per_share = signal.reference_price - signal.suggested_stop
+    assert signal.suggested_target == signal.reference_price + risk_per_share * 3.0
