@@ -1421,7 +1421,7 @@ a successful order response body, fill executions), and why: the sandbox
 account had zero positions and every live order test happened on a weekend
 market close, so those specific shapes couldn't be observed.
 
-Two non-obvious things worth knowing if you're debugging this client:
+Four non-obvious things worth knowing if you're debugging this client:
 
 1. **App key/secret are environment-locked.** A key issued for production
    authenticates fine against `api.webull.com` but gets a generic
@@ -1488,6 +1488,31 @@ Two non-obvious things worth knowing if you're debugging this client:
    checks `get_raw_bars`' `trading_sessions` parameter specifically, not
    this one, but the same "does the live response actually confirm the
    inferred field/value" question applies here.
+4. **`support_trading_session` must be `"ALL"`, not `"CORE"`, or orders
+   placed outside 9:30am-4:00pm ET sit queued forever.** `_order_payload()`
+   (used for both entries and exits) previously hardcoded this field to
+   `"CORE"` with no comment explaining the choice -- Webull's own docs
+   (`developer.webull.com/apis/docs/trade-api/stock/`) list three values:
+   `"CORE"` (regular session only), `"ALL"` (regular + pre-market +
+   after-hours), and `"NIGHT"` (a separate overnight session, out of scope
+   here for the same reason `overnight_required`/`ovn_price`/`ovn_volume`
+   are above -- only pre/after-market was asked for). The production
+   symptom this caused: a candidate would trigger and the dashboard would
+   show buying power reserved against it, but no fill and no open position
+   -- because Webull accepted the order but wouldn't execute a CORE-flagged
+   order until the next regular session opened, and by then the momentum
+   (and often the trigger conditions) were long gone. Confirmed via
+   Webull's official documentation that `"ALL"` is the correct value to
+   request pre/after-hours eligibility and that market orders carry no
+   documented restriction against it (trailing-stop and algorithmic orders
+   like TWAP/VWAP/POV remain core-hours-only regardless of this field) --
+   *not yet confirmed* by an actual live order placed with `"ALL"` in the
+   sandbox during an extended-hours window, since every prior live order
+   test happened on a weekend market close (see the module docstring note
+   above). If a live extended-hours order still doesn't fill after this
+   change, re-check whether Webull silently ignores `"ALL"` for the
+   specific order type/symbol rather than assuming the field name or
+   values are wrong.
 
 Streaming (`subscribe_quotes`) intentionally raises `NotImplementedError`:
 `DataStreamingClient` needs an `mqtt_host`, and only the production value

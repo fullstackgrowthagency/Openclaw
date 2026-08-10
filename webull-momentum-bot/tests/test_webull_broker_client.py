@@ -42,6 +42,11 @@ def test_order_payload_maps_market_buy_correctly():
     assert payload["quantity"] == "10"
     assert payload["client_order_id"] == "test-id-123"
     assert "limit_price" not in payload
+    # "ALL" (regular + pre/after-market), not "CORE" (regular-hours-only,
+    # the real production bug this fixes) -- see _order_payload's comment.
+    # Applies to every order (entries AND exits) since this payload builder
+    # is shared by both.
+    assert payload["support_trading_session"] == "ALL"
 
 
 def test_order_payload_includes_limit_price_when_set():

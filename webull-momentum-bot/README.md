@@ -182,6 +182,17 @@ What's implemented and tested:
   `docs/ARCHITECTURE.md`'s "Webull integration" section. It fails soft: if
   a field name guess is wrong, or it's simply absent, pricing/volume just
   fall back to the regular-session fields as before.
+- **Extended-hours order execution**: `WebullBrokerClient._order_payload()`
+  now sets `support_trading_session` to `"ALL"` instead of `"CORE"`, so
+  orders placed during pre-market/after-hours are actually eligible to
+  fill instead of sitting queued until the next regular session opens. The
+  previous `"CORE"`-only value produced a real symptom: a candidate would
+  trigger and buying power would be reserved against the order, but no
+  fill and no open position ever appeared, because Webull won't execute a
+  CORE-flagged order outside 9:30am-4:00pm ET. Confirmed via Webull's
+  official API docs; not yet confirmed by a live extended-hours order fill
+  in the sandbox -- see `docs/ARCHITECTURE.md`'s "Webull integration"
+  section for the full explanation and what to re-check if it doesn't fill.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

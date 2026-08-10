@@ -579,7 +579,32 @@ class WebullBrokerClient(BrokerClient):
             "quantity": str(order.quantity),
             "side": side,
             "time_in_force": tif,
-            "support_trading_session": "CORE",
+            # "ALL" (regular + pre-market + after-hours), not "CORE" (regular
+            # hours only -- the prior value here, and a real production bug):
+            # this project actively discovers and prices candidates during
+            # pre/after-market (PRE_MARKET/AFTER_MARKET universe sources,
+            # ext_price/ext_volume in _snapshot_from_dict), so a signal can
+            # legitimately trigger outside regular hours. An order submitted
+            # with "CORE" during those windows doesn't fill or get rejected --
+            # it just sits queued at Webull until the next regular session,
+            # reserving buying power the whole time with nothing to show for
+            # it. Confirmed via a real production case: multiple candidates
+            # stuck in TRIGGERED with reduced buying power and zero open
+            # positions, all during a pre-market window. This matters even
+            # more for EXIT orders (this payload is shared by both): a
+            # stop-loss that can't execute during after-hours because of
+            # "CORE" would leave an open position exposed to further
+            # downside with no way to close it until the next session opens.
+            # Third documented value, "NIGHT" (a separate overnight session),
+            # is not requested here -- only pre/after-market was asked for,
+            # same scope as extend_hour_required elsewhere in this file.
+            # Values confirmed via Webull's official OpenAPI documentation
+            # (developer.webull.com/apis/docs/trade-api/stock/), NOT yet
+            # verified against an actual live order placed with "ALL" in the
+            # sandbox -- re-verify the next time an order is placed outside
+            # regular hours (confirm it actually fills instead of silently
+            # queuing) before fully trusting this.
+            "support_trading_session": "ALL",
             "entrust_type": "QTY",
             "client_order_id": client_order_id,
         }
