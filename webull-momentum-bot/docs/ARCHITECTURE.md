@@ -1117,40 +1117,70 @@ fires against a real, non-empty account -- check the logs for
 (Update: this has since happened for real -- see the module docstring's
 "account_v2.get_account_position" entry for the confirmed real field names.)
 
-**A restart can orphan a position exactly the same way, for a completely
-different reason -- `reconcile_positions_from_broker` closes that gap
-too.** The fixes above make a *running* process robust to a broker-lookup
-failure, but `self._positions` is still just a plain in-memory dict with
-no persistence of its own. Every process restart -- a deploy, a crash, a
-VPS reboot -- previously wiped tracking for any position that was
-genuinely open and correctly tracked a moment before, landing in the exact
-same "position exists at the broker, bot has zero record of it" state as
-the parsing-failure incident, just reached a different way. `TradingLoop.
-run_forever` now calls `reconcile_positions_from_broker()` once before
-entering its main loop: it fetches `broker.get_positions()` and, for any
-symbol not already in `self._positions`, adopts it -- inserting it into
-`self._positions` and creating (or advancing) a `Candidate` straight to
-`MANAGING` via the same state-transition chain tests use
-(`WATCHING -> HEATING_UP -> ARMED -> TRIGGERED -> ENTERED -> MANAGING`) so
-`_process_all_candidates` picks it up on the very next tick like any other
-managed position.
+**`self._positions` can drift out of sync with the broker in EITHER
+direction, and `reconcile_positions_from_broker` corrects both.** The
+fixes above make a *running* process robust to a broker-lookup failure,
+but `self._positions` is still just a plain in-memory dict with no
+persistence or cross-checking of its own. Two distinct real incidents, one
+in each direction:
 
-An adopted position has no originating `Signal` to pull a real
-`stop_price`/`target_price` from (that only ever exists at the moment a
-strategy fires, and this position may have opened in a previous process's
-lifetime) -- deliberately conservative synthetic values instead of leaving
-it unprotected: `stop_price` is set to `risk_engine.config.risk_per_trade_pct`
-below the *current* price for a long (above it for a short), a plain
-%-off-current-price line rather than a real entry-to-stop risk
-calculation, and `target_price` is left `None` entirely -- it rides on the
-breakeven/trailing-stop rules only, same as any position whose target has
-already been hit (see "Position management" below). `strategy_name` is set
-to the sentinel `"reconciled_at_startup"` so an adopted position is always
-distinguishable from a real signal-driven one in the trade history. A
-`get_positions()` or per-symbol `get_snapshot()` failure during
-reconciliation is logged and skipped, not fatal to the rest -- consistent
-with every other broker-loop failure mode in this file (kill-switch
-flatten, batched snapshot fetch, etc.).
+1. **Broker has a position, bot doesn't (a restart wipes tracking).** Every
+   process restart -- a deploy, a crash, a VPS reboot -- previously wiped
+   tracking for any position that was genuinely open and correctly tracked
+   a moment before, landing in the exact same "position exists at the
+   broker, bot has zero record of it" state as the parsing-failure
+   incident, just reached a different way.
+2. **Bot has a position, broker doesn't (an external close goes
+   unnoticed).** `scripts/list_and_close_positions.py` closes a position by
+   calling `broker.place_order` directly, entirely outside the running
+   `TradingLoop` process -- confirmed live: the dashboard kept showing a
+   position as open long after the script had genuinely closed it at the
+   broker, since nothing in this codebase ever told the running process
+   that happened. A manual close from the Webull app itself would produce
+   the identical symptom.
+
+`reconcile_positions_from_broker()` fetches `broker.get_positions()` once
+and does both directions in the same pass: **adopts** any symbol the
+broker reports that isn't already in `self._positions` (inserting it and
+creating/advancing a `Candidate` straight to `MANAGING` via the same
+state-transition chain tests use --
+`WATCHING -> HEATING_UP -> ARMED -> TRIGGERED -> ENTERED -> MANAGING` --
+so `_process_all_candidates` picks it up on the very next tick like any
+other managed position), and **drops** any symbol still in
+`self._positions` that the broker no longer reports at all (removing it
+and transitioning its candidate `MANAGING -> EXITED -> COOLDOWN`) -- except
+a symbol with a pending exit order already in flight
+(`self._pending_exit_orders`), which is left alone so
+`_poll_pending_exit`/`_dispatch_exit_finalization` can finish it normally
+through the usual path instead of having it yanked out from under that
+machinery.
+
+Called from `_process_all_candidates`, throttled by
+`TradingLoopConfig.position_reconcile_interval_seconds` (default 30s) --
+but firing immediately on that method's very first-ever call regardless,
+since `self._last_position_reconcile` starts unset. Both `run_once` and
+`run_forever` route through `_process_all_candidates`, so every real
+entrypoint reconciles before any candidate is processed, with no separate
+startup call needed. Direction 2 specifically needs the *periodic* re-run,
+not just a one-time startup check -- an external close can happen at any
+point while the process keeps running, not only right before it starts.
+
+An adopted position (direction 1) has no originating `Signal` to pull a
+real `stop_price`/`target_price` from (that only ever exists at the moment
+a strategy fires, and this position may have opened in a previous
+process's lifetime) -- deliberately conservative synthetic values instead
+of leaving it unprotected: `stop_price` is set to
+`risk_engine.config.risk_per_trade_pct` below the *current* price for a
+long (above it for a short), a plain %-off-current-price line rather than
+a real entry-to-stop risk calculation, and `target_price` is left `None`
+entirely -- it rides on the breakeven/trailing-stop rules only, same as
+any position whose target has already been hit (see "Position management"
+below). `strategy_name` is set to the sentinel `"reconciled_at_startup"`
+so an adopted position is always distinguishable from a real signal-driven
+one in the trade history. A `get_positions()` or per-symbol
+`get_snapshot()` failure during reconciliation is logged and skipped, not
+fatal to the rest -- consistent with every other broker-loop failure mode
+in this file (kill-switch flatten, batched snapshot fetch, etc.).
 
 ## Position management (exits)
 

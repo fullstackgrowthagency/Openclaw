@@ -120,17 +120,26 @@ What's implemented and tested:
   can't understand instead of losing every real position at once -- see
   `docs/ARCHITECTURE.md`'s "Position tracking can be lost..." section for
   the full mechanics and what the fix's logging captures for next time.
-- **A service restart can orphan a position too -- also fixed.** Separate
-  from the fill-reconciliation bug above: `self._positions` is a plain
-  in-memory dict, so any deploy, crash, or VPS reboot previously wiped
-  tracking for a position that was genuinely open a moment before, landing
-  in the same "bot has zero record of a real open position" state by a
-  different route. `TradingLoop.run_forever` now calls the new
-  `reconcile_positions_from_broker()` once before its main loop, adopting
-  any position the broker reports that this process doesn't already know
-  about. Since there's no original strategy signal to pull a real stop from
-  for an adopted position, it's given a conservative synthetic one instead
-  of being left unprotected: `RiskConfig.risk_per_trade_pct` as a straight
+- **`self._positions` can drift out of sync with the broker in either
+  direction -- both fixed.** `self._positions` is a plain in-memory dict
+  with no persistence or cross-checking of its own, and this bit twice in
+  one day, in opposite directions: (1) any deploy, crash, or VPS reboot
+  previously wiped tracking for a position that was genuinely open a
+  moment before ("broker has it, bot doesn't"), and (2) closing a position
+  with `scripts/list_and_close_positions.py` (or manually in the Webull
+  app) -- entirely outside the running bot process -- left the dashboard
+  showing it as open indefinitely afterward, confirmed live ("bot has it,
+  broker doesn't"). `TradingLoop.reconcile_positions_from_broker()` now
+  fixes both in one pass: adopts any broker position this process doesn't
+  know about, and drops any locally-tracked position the broker no longer
+  reports at all (skipping a symbol with an exit order already in flight,
+  so it can finish through the normal path instead). Runs from
+  `_process_all_candidates` -- immediately on the very first call, then
+  every `position_reconcile_interval_seconds` (30s default) afterward,
+  since an external close can happen at any time, not just before startup.
+  Since there's no original strategy signal to pull a real stop from for an
+  adopted position, it's given a conservative synthetic one instead of
+  being left unprotected: `RiskConfig.risk_per_trade_pct` as a straight
   %-below-current-price line (long) or %-above (short), no target -- it
   rides on the breakeven/trailing-stop rules only. Tagged with
   `strategy_name="reconciled_at_startup"` so it's always distinguishable

@@ -948,11 +948,20 @@ def _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0, q
                   CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
         transition(candidate, state)
     loop.candidates[symbol] = candidate
-    loop._positions[symbol] = Position(
+    position = Position(
         symbol=symbol, side=OrderSide.BUY, quantity=quantity, avg_entry_price=price - 1.0,
         stop_price=price - 2.0, target_price=price + 5.0, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test",
     )
+    loop._positions[symbol] = position
+    # Also register with the broker itself (PaperBrokerClient's own
+    # position store), not just the loop's local tracking -- needed since
+    # reconcile_positions_from_broker (see _process_all_candidates) now
+    # actively drops any locally-tracked position the broker doesn't also
+    # report, and would otherwise treat this test-injected position as
+    # having been closed externally the moment the loop ticks.
+    if hasattr(broker, "_state"):
+        broker._state.positions[symbol] = position
     return candidate
 
 
@@ -1066,10 +1075,16 @@ def test_kill_switch_flatten_skips_symbol_on_snapshot_failure_without_crashing()
                   CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
         transition(broken_candidate, state)
     loop.candidates["NOSNAPSHOT"] = broken_candidate
-    loop._positions["NOSNAPSHOT"] = Position(
+    nosnapshot_position = Position(
         symbol="NOSNAPSHOT", side=OrderSide.BUY, quantity=10, avg_entry_price=5.0, stop_price=4.0,
         target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
     )
+    loop._positions["NOSNAPSHOT"] = nosnapshot_position
+    # Also register with the broker's own position store -- see
+    # _managing_candidate_with_position's comment on why this matters now
+    # that reconcile_positions_from_broker actively drops anything the
+    # broker doesn't also report.
+    broker._state.positions["NOSNAPSHOT"] = nosnapshot_position
 
     loop.engage_kill_switch_and_flatten("test halt")
     loop._process_all_candidates(_IN_HOURS_NOW)  # must not raise
@@ -1290,6 +1305,65 @@ def test_reconcile_skips_a_symbol_whose_snapshot_fails():
     assert loop.candidates == {}
 
 
+def test_reconcile_drops_a_position_no_longer_at_the_broker():
+    # Real incident: scripts/list_and_close_positions.py closes a position
+    # by calling broker.place_order directly, entirely outside this
+    # running process -- the dashboard kept showing it as open indefinitely
+    # afterward since nothing ever told the bot it was gone.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState
+
+    broker = _FakeBroker()  # no positions -- simulates the broker-side close
+    loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert "TEST" not in loop._positions
+    assert candidate.state.value == "cooldown"
+
+
+def test_reconcile_does_not_drop_a_position_with_a_pending_exit_in_flight():
+    # This process's own exit is already submitted for this symbol --
+    # dropping it here would race _poll_pending_exit/_dispatch_exit_finalization,
+    # which needs the Position object to still exist to finalize the trade.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState
+    from webull_bot.models import Signal
+    from webull_bot.enums import SignalAction
+
+    broker = _FakeBroker()  # broker-side quantity already at 0 for this symbol
+    loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    pending_order = Order(
+        symbol="TEST", side=OrderSide.SELL, order_type=OrderType.MARKET, quantity=10,
+        status=OrderStatus.SUBMITTED, broker_order_id="ord-1",
+    )
+    exit_signal = Signal(
+        symbol="TEST", action=SignalAction.EXIT, generated_at=datetime.utcnow(),
+        strategy_name="test", strategy_version="v1", reference_price=4.50,
+    )
+    loop._pending_exit_orders["TEST"] = (pending_order, exit_signal)
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert "TEST" in loop._positions
+    assert candidate.state.value == "managing"
+
+
 def test_run_forever_reconciles_positions_before_entering_the_loop():
     broker = PaperBrokerClient()
     broker.connect()
@@ -1308,6 +1382,26 @@ def test_run_forever_reconciles_positions_before_entering_the_loop():
         runner.join(timeout=2)
 
     assert calls == [True]
+
+
+def test_process_all_candidates_reconciles_immediately_then_throttles():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+
+    calls = []
+    loop.reconcile_positions_from_broker = lambda *a, **kw: calls.append(True)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+    assert calls == [True]  # fires immediately -- _last_position_reconcile started unset
+
+    loop._process_all_candidates(_IN_HOURS_NOW + timedelta(seconds=1))
+    assert calls == [True]  # well within the 30s default interval -- no second call yet
+
+    loop._process_all_candidates(
+        _IN_HOURS_NOW + timedelta(seconds=loop.config.position_reconcile_interval_seconds + 1)
+    )
+    assert calls == [True, True]
 
 
 # -- scan_and_add_candidate (on-demand single-ticker scan, backs the

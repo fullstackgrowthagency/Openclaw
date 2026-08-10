@@ -132,6 +132,15 @@ class TradingLoopConfig:
     # unvalidated starting point, not tuned against live rate limits yet.
     resistance_refresh_interval_seconds: float = 300.0
     cooldown_seconds: float = 900.0  # 15 min before a cooled-down candidate can be watched again
+    # How often reconcile_positions_from_broker re-runs after its initial
+    # run_forever-startup call -- see that method's docstring for why this
+    # needs to run more than once: a position can be closed OUTSIDE this
+    # process entirely (e.g. scripts/list_and_close_positions.py, or a
+    # manual close in the Webull app itself), and nothing else in this
+    # codebase ever notices that on its own. One extra broker.get_positions()
+    # call per interval (not per-candidate, unlike get_snapshots) is cheap
+    # enough to run this fairly often.
+    position_reconcile_interval_seconds: float = 30.0
 
 
 class TradingLoop:
@@ -203,6 +212,7 @@ class TradingLoop:
         self._pending_exit_orders: dict[str, tuple[Order, Signal]] = {}  # symbol -> (order, exit signal)
         self._positions: dict[str, Position] = {}          # symbol -> our own tracked open position
         self._last_universe_scan: Optional[datetime] = None
+        self._last_position_reconcile: Optional[datetime] = None
         self._persisted_transition_counts: dict[str, int] = {}  # symbol -> len(state_history) already flushed
         # Set by engage_kill_switch_and_flatten (callable from any thread,
         # e.g. the dashboard's request thread) and consumed by
@@ -855,21 +865,39 @@ class TradingLoop:
     # -- startup reconciliation --------------------------------------------
 
     def reconcile_positions_from_broker(self, now: Optional[datetime] = None) -> None:
-        """Adopts any position the broker reports that this process doesn't
-        already know about. Called once at the start of run_forever
-        (production's real entrypoint) specifically to close a gap
-        distinct from, but structurally identical in symptom to, the
-        get_positions()-parsing-failure incident documented in
-        _confirm_entry_filled: self._positions is a plain in-memory dict
-        with no persistence or reconciliation of its own, so EVERY process
-        restart -- a deploy, a crash, a VPS reboot -- previously wiped
-        tracking for any position that was genuinely open and correctly
-        tracked a moment before, with nothing to notice or recover it. The
-        position keeps existing at the broker; the bot just goes blind to
-        it, exactly like the original incident, until this existed.
+        """Two-way sync between self._positions and whatever the broker
+        actually reports, in both directions:
 
-        An adopted position has no original strategy Signal to pull
-        stop_price/target_price from (that only exists at the moment a
+        1. Adopts any position the broker reports that this process
+           doesn't already know about. Originally added to close a gap
+           structurally identical in symptom to the get_positions()-parsing-failure
+           incident documented in _confirm_entry_filled: self._positions is
+           a plain in-memory dict with no persistence of its own, so EVERY
+           process restart -- a deploy, a crash, a VPS reboot -- previously
+           wiped tracking for a position that was genuinely open a moment
+           before, with nothing to notice or recover it.
+        2. Drops any position this process still thinks is open that the
+           broker no longer reports at all. Also a real incident, found the
+           same day as (1): scripts/list_and_close_positions.py closes a
+           position by calling broker.place_order directly, entirely
+           outside this running process -- there was nothing to ever tell
+           the bot that happened, so the dashboard kept showing a position
+           as open indefinitely after it was genuinely closed. The same gap
+           applies to a manual close from the Webull app itself, or any
+           other out-of-band close this codebase doesn't control.
+
+        Called from _process_all_candidates, throttled by
+        TradingLoopConfig.position_reconcile_interval_seconds, but firing
+        immediately on that method's very first-ever call regardless
+        (self._last_position_reconcile starts unset) -- both run_once and
+        run_forever route through _process_all_candidates, so every real
+        entrypoint gets an immediate reconcile before any candidate is
+        processed, with no separate startup call needed. (2) in particular
+        needs to run repeatedly, not just once, since an external close can
+        happen at any time while this process keeps running.
+
+        An adopted position (case 1) has no original strategy Signal to
+        pull stop_price/target_price from (that only exists at the moment a
         Signal fires, and this position may have opened in a previous
         process's lifetime), so it can't be given the same kind of
         risk-accurate, entry-to-stop budgeted stop a real signal produces.
@@ -886,6 +914,26 @@ class TradingLoop:
         except Exception:
             logger.exception("reconcile_positions_from_broker: get_positions() failed; skipping this run.")
             return
+
+        broker_symbols = {p.symbol for p in broker_positions}
+        for symbol in set(self._positions.keys()) - broker_symbols:
+            if symbol in self._pending_exit_orders:
+                # This process's own exit is already in flight for this
+                # symbol -- let _poll_pending_exit/_dispatch_exit_finalization
+                # finish it normally instead of yanking it out from under
+                # that machinery just because the broker-side quantity has
+                # already dropped to zero ahead of this process noticing.
+                continue
+            logger.warning(
+                "%s no longer exists at the broker (closed outside this process -- a manual "
+                "close, scripts/list_and_close_positions.py, etc.) -- removing from local "
+                "tracking so the dashboard reflects reality.", symbol,
+            )
+            del self._positions[symbol]
+            candidate = self.candidates.get(symbol)
+            if candidate is not None and candidate.state in (CandidateState.ENTERED, CandidateState.MANAGING):
+                transition(candidate, CandidateState.EXITED, now=now, reason="position closed externally (not by this process)")
+                transition(candidate, CandidateState.COOLDOWN, now=now, reason="post-external-close cooldown")
 
         with self._candidates_lock:
             existing_candidates = dict(self.candidates)
@@ -992,6 +1040,16 @@ class TradingLoop:
             except Exception:
                 logger.exception("Unhandled error auto-flattening positions at end of core trading hours.")
 
+        if (
+            self._last_position_reconcile is None
+            or (now - self._last_position_reconcile) >= timedelta(seconds=self.config.position_reconcile_interval_seconds)
+        ):
+            self._last_position_reconcile = now
+            try:
+                self.reconcile_positions_from_broker(now)
+            except Exception:
+                logger.exception("Unhandled error reconciling positions against the broker.")
+
         candidates = self._snapshot_candidates()
 
         # Batch-fetch snapshots for every candidate that will actually need
@@ -1047,15 +1105,11 @@ class TradingLoop:
         loss management -- see this module's docstring's "Concurrency
         model" section. Runs until stop_flag() returns True (if provided).
 
-        Calls reconcile_positions_from_broker once before entering the
-        loop -- this is the one and only place that runs, so a service
-        restart adopts whatever the broker reports as open instead of
-        starting blind to it (see that method's docstring)."""
-        try:
-            self.reconcile_positions_from_broker()
-        except Exception:
-            logger.exception("reconcile_positions_from_broker raised at startup; continuing without it.")
-
+        No explicit startup call to reconcile_positions_from_broker needed
+        here: _process_all_candidates' own throttled check fires on its
+        very first invocation regardless (self._last_position_reconcile
+        starts unset), which happens before any candidate gets processed --
+        see that method and reconcile_positions_from_broker's docstring."""
         rescan_thread = threading.Thread(
             target=self._universe_rescan_loop, args=(stop_flag,), daemon=True, name="universe-rescan",
         )
