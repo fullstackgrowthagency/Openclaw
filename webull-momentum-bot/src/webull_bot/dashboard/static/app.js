@@ -45,7 +45,7 @@ const COLUMN_INFO = {
     body:
       "The nearest price level expected to act as resistance, combining two sources:\n\n" +
       "1. The running high of day for this candidate (only ever moves up)\n" +
-      "2. Static levels from volume-profile analysis done at discovery -- price zones where a lot of historical volume traded (\"high-volume nodes\"), which tend to act as real support/resistance\n\n" +
+      "2. Static levels from volume-profile analysis -- price zones where a lot of historical volume traded (\"high-volume nodes\"), which tend to act as real support/resistance. Computed at discovery and periodically refreshed (every 5 minutes by default) for as long as this candidate hasn't entered a position yet, so it reflects the day's volume profile filling in, not just whatever existed the moment it was first found\n\n" +
       "Whichever of these is the closest one still above the current price is shown. This is also the actual price a breakout strategy waits to see cleared before entering a trade once a candidate is ARMED.",
   },
   reason: {

@@ -227,6 +227,7 @@ class BroadScanner:
         candidate.previous_day_volume = previous_day_volume
         candidate.static_resistance_levels = self._compute_static_resistance_levels(bars)
         candidate.opening_range_high = self._compute_opening_range_high(bars)
+        candidate.resistance_last_refreshed_at = snapshot.timestamp
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate, None
 
@@ -302,11 +303,18 @@ class BroadScanner:
     def _compute_static_resistance_levels(self, bars: Optional[list[dict]]) -> list[float]:
         """High-volume-node price levels from recent volume-profile
         analysis (see metrics/volume_profile.py's module docstring for why
-        this is preferred over hand-picked special levels). Computed once
-        at discovery, not refreshed on every tick -- like float_data above,
-        this is a one-time enrichment of the candidate, not a per-snapshot
-        recomputation. `bars` is whatever _fetch_raw_bars returned (shared
-        with _compute_opening_range_high, one network call for both).
+        this is preferred over hand-picked special levels). Computed at
+        discovery AND periodically re-computed for still-pre-entry
+        candidates via refresh_resistance_levels below (see
+        TradingLoop._rescan_universe) -- like float_data above, this
+        started as a one-time enrichment, but a volume profile built from
+        only the bars available at the moment of discovery is necessarily
+        incomplete for a candidate found early in the session; refreshing
+        it as the day's volume accumulates lets it reflect nodes that
+        simply hadn't formed yet. `bars` is whatever _fetch_raw_bars
+        returned (shared with _compute_opening_range_high on the discovery
+        path, one network call for both -- the periodic refresh path only
+        needs this one, not opening_range_high, see below).
 
         A failure or missing capability here returns an empty list rather
         than failing the candidate: this only affects how
@@ -323,6 +331,34 @@ class BroadScanner:
             top_n=self.config.volume_profile_top_n_nodes,
             min_volume_pct_of_max=self.config.volume_profile_min_node_pct,
         )
+
+    def refresh_resistance_levels(self, candidate: Candidate, *, now: Optional[datetime] = None) -> None:
+        """Re-fetches bars and recomputes candidate.static_resistance_levels
+        from scratch -- called periodically by TradingLoop._rescan_universe
+        for already-tracked, pre-entry candidates (WATCHING/HEATING_UP/ARMED)
+        so resistance stays accurate as the day's volume profile fills in,
+        rather than being frozen at whatever bars existed the moment this
+        candidate was first discovered (see _compute_static_resistance_levels
+        above). Deliberately does NOT touch opening_range_high: that's a
+        fixed historical window (the first opening_range_minutes of the
+        session), and a later bars fetch can only see it WORSE, never
+        better -- get_raw_bars' fixed bar count covers a trailing window
+        that slides forward through the day, pushing market-open bars
+        further out of range the later it's called (see
+        metrics/opening_range.py and this module's docstring on
+        get_raw_bars' data-sparsity behavior).
+
+        On any fetch failure, leaves static_resistance_levels and
+        resistance_last_refreshed_at both untouched (not cleared, not
+        bumped) -- a transient failure this cycle shouldn't erase a
+        previously-good set of levels or reset the throttle clock, since
+        that would make the next rescan retry immediately instead of
+        waiting out the normal interval."""
+        bars = self._fetch_raw_bars(candidate.symbol)
+        if bars is None:
+            return
+        candidate.static_resistance_levels = self._compute_static_resistance_levels(bars)
+        candidate.resistance_last_refreshed_at = now or self.now_fn()
 
     def _compute_opening_range_high(self, bars: Optional[list[dict]]) -> Optional[float]:
         """The high of the first opening_range_minutes of the session, from

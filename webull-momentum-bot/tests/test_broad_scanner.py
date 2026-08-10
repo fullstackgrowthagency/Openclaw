@@ -482,6 +482,65 @@ def test_scan_fetches_raw_bars_only_once_per_symbol():
     assert broker.call_count == 1
 
 
+# -- resistance refresh on rescans (periodic re-computation for already-
+# tracked, pre-entry candidates -- see TradingLoop._refresh_stale_resistance_levels) --
+
+def test_scan_sets_resistance_last_refreshed_at_at_discovery():
+    broker = _RawBarsAwareBroker({"CLUSTERED": [_bar(8, 9, 5000)]}, prices={"CLUSTERED": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["CLUSTERED"])
+    assert candidates[0].resistance_last_refreshed_at is not None
+
+
+def test_refresh_resistance_levels_recomputes_from_fresh_bars():
+    bars = [_bar(5, 10, 100), _bar(8, 9, 5000), _bar(8, 9, 5000)]
+    broker = _RawBarsAwareBroker({"CLUSTERED": bars}, prices={"CLUSTERED": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidate = scanner.scan(["CLUSTERED"])[0]
+
+    # Simulate the volume profile shifting since discovery: a new, tighter
+    # cluster around 11-12 now dominates.
+    broker.raw_bars["CLUSTERED"] = [_bar(5, 10, 100), _bar(11, 12, 9000), _bar(11, 12, 9000)]
+    refresh_time = datetime(2026, 8, 10, 15, 0, 0)
+
+    scanner.refresh_resistance_levels(candidate, now=refresh_time)
+
+    assert any(11 <= level <= 12 for level in candidate.static_resistance_levels)
+    assert candidate.resistance_last_refreshed_at == refresh_time
+
+
+def test_refresh_resistance_levels_leaves_state_unchanged_on_fetch_failure():
+    class _FlakyRawBarsBroker(_RawBarsAwareBroker):
+        def get_raw_bars(self, symbol, interval, count):
+            raise RuntimeError("simulated Webull failure")
+
+    broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidate = scanner.scan(["ANY"])[0]
+    original_levels = candidate.static_resistance_levels
+    original_refreshed_at = candidate.resistance_last_refreshed_at
+
+    scanner.refresh_resistance_levels(candidate, now=datetime(2026, 8, 10, 15, 0, 0))
+
+    # A failed refresh must not clobber previously-good levels or reset the
+    # throttle clock -- see refresh_resistance_levels' docstring.
+    assert candidate.static_resistance_levels == original_levels
+    assert candidate.resistance_last_refreshed_at == original_refreshed_at
+
+
+def test_refresh_resistance_levels_does_not_touch_opening_range_high():
+    bars = [_bar(5, 6.5, 1000, time="2026-08-03T13:32:00.000+0000")]
+    broker = _RawBarsAwareBroker({"OPEN": bars}, prices={"OPEN": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider(), now_fn=lambda: datetime(2026, 8, 3, 15, 0, 0))
+    candidate = scanner.scan(["OPEN"])[0]
+    original_opening_range_high = candidate.opening_range_high
+
+    broker.raw_bars["OPEN"] = [_bar(5, 20, 1000, time="2026-08-03T13:32:00.000+0000")]  # would change it if touched
+    scanner.refresh_resistance_levels(candidate, now=datetime(2026, 8, 3, 16, 0, 0))
+
+    assert candidate.opening_range_high == original_opening_range_high
+
+
 # -- check_symbol_verbose (used by the dashboard's on-demand single-ticker
 # scan, dashboard/app.py's POST /api/scan-symbol) -- same structural checks
 # as _check_symbol/scan(), but also explains a rejection instead of

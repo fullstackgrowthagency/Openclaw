@@ -111,10 +111,37 @@ class TradingLoopConfig:
     # default) is kept as that floor since it no longer does any real
     # throttling work on its own.
     universe_rescan_interval_seconds: float = 60.0
+    # How often an already-tracked, still-pre-entry candidate's
+    # static_resistance_levels gets re-fetched and recomputed (see
+    # BroadScanner.refresh_resistance_levels) -- checked every
+    # _rescan_universe cycle, but only actually refreshed once this many
+    # seconds have passed since resistance_last_refreshed_at, so raising
+    # the rescan frequency above doesn't multiply this cost. A resistance
+    # level computed once at discovery is frozen at whatever bars existed
+    # at that moment; a candidate discovered early in the session has a
+    # necessarily incomplete volume profile, so periodic refreshing lets
+    # newly-formed high-volume nodes show up as the day progresses instead
+    # of the entry strategies that key off resistance_level (Refined
+    # Breakout, Momentum Breakout, Breakout Pullback, Opening Range
+    # Breakout's stop) working off stale data for the rest of the session.
+    # Deliberately longer than universe_rescan_interval_seconds's default:
+    # each refresh is a real Webull-paced call per eligible candidate, and
+    # unlike new-symbol discovery (which only pays this cost once per
+    # symbol ever), this recurs for every still-watched candidate -- an
+    # unvalidated starting point, not tuned against live rate limits yet.
+    resistance_refresh_interval_seconds: float = 300.0
     cooldown_seconds: float = 900.0  # 15 min before a cooled-down candidate can be watched again
 
 
 class TradingLoop:
+    # Pre-entry states only: resistance_level is what the resistance-based
+    # entry strategies (Refined Breakout, Momentum Breakout, Breakout
+    # Pullback, Opening Range Breakout's stop) read, and none of those
+    # matter anymore once a candidate has already entered a position --
+    # PositionManager's stop/target/trailing-stop rules take over from
+    # there, never resistance_level. Used by _refresh_stale_resistance_levels.
+    _RESISTANCE_REFRESH_STATES = (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED)
+
     def __init__(
         self,
         broker: BrokerClient,
@@ -187,18 +214,22 @@ class TradingLoop:
             return
 
         # Cost optimization (2026-08-09): a symbol already tracked in
-        # self.candidates gets nothing from being re-scanned here -- the
-        # insert loop below has always skipped it anyway
-        # (`if candidate.symbol not in self.candidates`), which meant every
-        # already-known symbol still paid the full BroadScanner cost
+        # self.candidates gets nothing from the full BroadScanner.scan()
+        # pipeline here -- the insert loop below has always skipped it
+        # anyway (`if candidate.symbol not in self.candidates`), which meant
+        # every already-known symbol still paid the full BroadScanner cost
         # (snapshot + volume history + resistance bars, each a paced
         # Webull round-trip) only to have the result thrown away. Filtering
         # them out before scan() means that cost is spent solely on
         # genuinely new discoveries each cycle. Already-tracked candidates
-        # lose nothing from this: they're re-checked far more often anyway
-        # by _process_all_candidates on its own 5s cadence (see this
-        # module's "Concurrency model" docstring), which is what actually
-        # drives their score/state/exit management, not this discovery pass.
+        # lose nothing from skipping the FULL pipeline here: they're
+        # re-checked far more often anyway by _process_all_candidates on
+        # its own 5s cadence (see this module's "Concurrency model"
+        # docstring), which is what actually drives their score/state/exit
+        # management. Resistance is the one exception -- see the
+        # resistance-refresh pass below, which deliberately does still
+        # touch already-tracked candidates, just via a much lighter,
+        # separately-throttled path than the full pipeline.
         with self._candidates_lock:
             already_tracked = set(self.candidates.keys())
         new_symbols = [s for s in symbols if s not in already_tracked]
@@ -213,6 +244,47 @@ class TradingLoop:
             for candidate in discovered:
                 if candidate.symbol not in self.candidates:
                     self.candidates[candidate.symbol] = candidate
+
+        self._refresh_stale_resistance_levels(now)
+
+    def _refresh_stale_resistance_levels(self, now: datetime) -> None:
+        """Re-fetches and recomputes static_resistance_levels (see
+        BroadScanner.refresh_resistance_levels) for already-tracked,
+        pre-entry candidates whose last refresh is older than
+        TradingLoopConfig.resistance_refresh_interval_seconds -- keeps
+        resistance accurate as the day's volume profile fills in, instead
+        of freezing it at whatever bars existed at discovery.
+
+        Deliberate, narrow exception to this module's stated concurrency
+        rule ("the rescan thread inserts, the main thread mutates existing
+        candidates"): this runs on the rescan thread and mutates fields on
+        Candidate objects the main thread is concurrently reading/writing.
+        It's safe without _candidates_lock because each mutation here is a
+        single attribute assignment (`candidate.static_resistance_levels =
+        ...`, `candidate.resistance_last_refreshed_at = ...`) -- atomic
+        under the GIL, so the main thread only ever sees the old value or
+        the fully-new one, never a torn read. Worst case on a genuine race
+        is the main thread using resistance_level computed from the
+        previous set of levels for one extra tick, which is harmless (the
+        whole point of throttling this to a period measured in minutes).
+        The dict structure itself (self.candidates' keys) is untouched
+        here, only values already known to exist -- the lock protects
+        structural changes (insert/iterate), which this isn't."""
+        with self._candidates_lock:
+            candidates_snapshot = list(self.candidates.values())
+
+        for candidate in candidates_snapshot:
+            if candidate.state not in self._RESISTANCE_REFRESH_STATES:
+                continue
+            if (
+                candidate.resistance_last_refreshed_at is not None
+                and now - candidate.resistance_last_refreshed_at < timedelta(seconds=self.config.resistance_refresh_interval_seconds)
+            ):
+                continue
+            try:
+                self.broad_scanner.refresh_resistance_levels(candidate, now=now)
+            except Exception:
+                logger.warning("refresh_resistance_levels failed for %s this cycle.", candidate.symbol, exc_info=True)
 
     def _snapshot_candidates(self) -> list[Candidate]:
         """Lock-protected copy of the tracked candidates' values, safe to

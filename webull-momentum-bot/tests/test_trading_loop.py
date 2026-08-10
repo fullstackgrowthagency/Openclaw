@@ -596,6 +596,113 @@ def test_rescan_universe_still_scans_genuinely_new_symbols():
     assert scan_calls == [["NEWSYM"]]
 
 
+# -- periodic resistance refresh (already-tracked, pre-entry candidates --
+# see TradingLoop._refresh_stale_resistance_levels) --------------------------
+
+def test_rescan_universe_refreshes_stale_resistance_for_pre_entry_candidate():
+    from webull_bot.enums import CandidateState
+    from webull_bot.state_machine import new_candidate, transition
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    loop.candidates["TEST"] = candidate  # resistance_last_refreshed_at defaults to None -- always "stale"
+
+    refreshed: list[str] = []
+    loop.broad_scanner.refresh_resistance_levels = lambda c, **kw: refreshed.append(c.symbol)
+
+    loop._rescan_universe(datetime.utcnow())
+
+    assert refreshed == ["TEST"]
+
+
+def test_rescan_universe_skips_resistance_refresh_within_throttle_window():
+    from webull_bot.enums import CandidateState
+    from webull_bot.state_machine import new_candidate, transition
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    now = datetime.utcnow()
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    candidate.resistance_last_refreshed_at = now  # just refreshed
+    loop.candidates["TEST"] = candidate
+
+    refreshed: list[str] = []
+    loop.broad_scanner.refresh_resistance_levels = lambda c, **kw: refreshed.append(c.symbol)
+
+    # Default resistance_refresh_interval_seconds is 300s -- 10s later is well within the throttle window.
+    loop._rescan_universe(now + timedelta(seconds=10))
+
+    assert refreshed == []
+
+
+def test_rescan_universe_refreshes_again_once_throttle_window_elapses():
+    from webull_bot.enums import CandidateState
+    from webull_bot.state_machine import new_candidate, transition
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    now = datetime.utcnow()
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    candidate.resistance_last_refreshed_at = now
+    loop.candidates["TEST"] = candidate
+
+    refreshed: list[str] = []
+    loop.broad_scanner.refresh_resistance_levels = lambda c, **kw: refreshed.append(c.symbol)
+
+    loop._rescan_universe(now + timedelta(seconds=loop.config.resistance_refresh_interval_seconds + 1))
+
+    assert refreshed == ["TEST"]
+
+
+def test_rescan_universe_skips_resistance_refresh_for_entered_candidate():
+    from webull_bot.enums import CandidateState
+    from webull_bot.state_machine import new_candidate, transition
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = new_candidate("TEST")
+    for state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
+                  CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
+        transition(candidate, state)
+    loop.candidates["TEST"] = candidate
+
+    refreshed: list[str] = []
+    loop.broad_scanner.refresh_resistance_levels = lambda c, **kw: refreshed.append(c.symbol)
+
+    loop._rescan_universe(datetime.utcnow())
+
+    # Resistance no longer matters once a candidate has entered a position
+    # -- PositionManager governs exits from there, not resistance_level.
+    assert refreshed == []
+
+
+def test_rescan_universe_resistance_refresh_failure_does_not_crash():
+    from webull_bot.enums import CandidateState
+    from webull_bot.state_machine import new_candidate, transition
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    loop.candidates["TEST"] = candidate
+
+    def _boom(c, **kw):
+        raise RuntimeError("simulated Webull failure")
+
+    loop.broad_scanner.refresh_resistance_levels = _boom
+
+    loop._rescan_universe(datetime.utcnow())  # must not raise
+
+
 # -- scan_and_add_candidate (on-demand single-ticker scan, backs the
 # dashboard's manual "scan a ticker" feature) --------------------------------
 

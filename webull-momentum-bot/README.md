@@ -130,12 +130,16 @@ What's implemented and tested:
   prior-day-high or round numbers, since those usually show up as volume
   clusters anyway, plus this gives a real strength signal a flat list of
   price points can't. `CandidateWatcher` merges the nearest still-untested
-  static level with the running high on every tick. See
+  static level with the running high on every tick. These levels are also
+  periodically **refreshed** on later universe rescans (every 5 minutes by
+  default) for any candidate that hasn't entered a position yet, so a
+  candidate discovered early in the session isn't stuck with a volume
+  profile that's missing everything that formed afterward. See
   `docs/ARCHITECTURE.md`'s "Resistance detection" section for the full
-  design and an important data-shape caveat (Webull's raw bars reach back
-  as far as needed to find real data for illiquid names, which this
-  deliberately bounds to a recent calendar window before building the
-  profile).
+  design, the refresh mechanics, and an important data-shape caveat
+  (Webull's raw bars reach back as far as needed to find real data for
+  illiquid names, which this deliberately bounds to a recent calendar
+  window before building the profile).
 - **Dashboard** (`dashboard/app.py` + `scripts/run_dashboard.py`): a FastAPI
   backend + self-contained HTML/JS frontend, run with
   `python scripts/run_dashboard.py`. Live panels (candidates, open

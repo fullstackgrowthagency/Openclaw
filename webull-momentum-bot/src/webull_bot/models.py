@@ -187,6 +187,14 @@ class Candidate:
     # opening_range_minutes couldn't be resolved from what was returned.
     # See strategy/opening_range_breakout.py.
     opening_range_high: Optional[float] = None
+    # When static_resistance_levels was last (re)computed -- set at
+    # discovery and then again each time TradingLoop._rescan_universe
+    # refreshes it for a still-pre-entry candidate (see
+    # BroadScanner.refresh_resistance_levels). Drives the throttling in
+    # TradingLoopConfig.resistance_refresh_interval_seconds so a candidate
+    # isn't re-fetched on every single rescan cycle regardless of how
+    # frequently those run.
+    resistance_last_refreshed_at: Optional[datetime] = None
     state_history: list[tuple[CandidateState, datetime]] = field(default_factory=list)
     notes: str = ""
 

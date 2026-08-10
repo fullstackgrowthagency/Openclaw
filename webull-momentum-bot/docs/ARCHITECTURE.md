@@ -367,9 +367,11 @@ watcher.update_resistance(candidate, snapshot)
 
 `resistance_level` used to be purely the running high of day. It's now a
 merge of that running high with **static levels from volume-profile
-analysis** (`metrics/volume_profile.py`), computed once per candidate at
-discovery time (`BroadScanner._compute_static_resistance_levels`) and
-stored on `candidate.static_resistance_levels`.
+analysis** (`metrics/volume_profile.py`), computed at discovery time
+(`BroadScanner._compute_static_resistance_levels`) and stored on
+`candidate.static_resistance_levels` -- and, since periodic refreshing was
+added, re-computed on later universe rescans for as long as the candidate
+hasn't entered a position yet (see "Periodic refresh" below).
 
 **Why volume profile instead of a list of special levels** (prior day
 high, premarket high, round numbers, ...): those special levels usually
@@ -447,6 +449,40 @@ one persisted across brand-new processes, suggesting the sandbox also
 enforces some rolling quota tracked server-side, independent of any local
 pacing. Re-verify the full pipeline live once quota recovers (or during
 real market hours on the VPS) before trusting its output blindly.
+
+**Periodic refresh** (`BroadScanner.refresh_resistance_levels`, called from
+`TradingLoop._refresh_stale_resistance_levels` on every
+`_rescan_universe` cycle): a volume profile built from whatever bars
+existed the moment a candidate was discovered is necessarily incomplete
+for one found early in the session -- nodes that form later in the day
+never show up in `static_resistance_levels` unless something re-fetches
+and recomputes it. This re-fetches fresh bars and rebuilds the profile
+exactly like discovery does, for any candidate still in a pre-entry state
+(`WATCHING`/`HEATING_UP`/`ARMED` -- `TradingLoop._RESISTANCE_REFRESH_STATES`)
+whose `resistance_last_refreshed_at` is older than
+`TradingLoopConfig.resistance_refresh_interval_seconds` (default 300s, an
+unvalidated starting point). Once a candidate enters a position,
+resistance stops mattering entirely (`PositionManager`'s stop/target/
+trailing-stop rules govern exits from there, never `resistance_level`),
+so refreshing stops too. Deliberately does **not** also re-fetch
+`opening_range_high`: unlike the volume profile, a later bars fetch can
+only make that value worse, never better, since `get_raw_bars`' fixed bar
+count covers a trailing window that slides forward through the day,
+pushing the market-open bars further out of range the later it's called
+-- see `refresh_resistance_levels`'s docstring.
+
+The throttle interval is independent of `universe_rescan_interval_seconds`
+specifically so raising rescan frequency doesn't multiply this cost: every
+refresh is a real Webull-paced call per eligible candidate, and unlike
+new-symbol discovery (which pays this cost once per symbol ever), this
+recurs for every still-watched candidate on a schedule of its own. This
+mutates already-tracked `Candidate` objects from the background rescan
+thread -- a deliberate, narrow exception to this module's stated rule that
+only the main thread mutates existing candidates, justified in
+`_refresh_stale_resistance_levels`'s docstring (plain attribute
+reassignment is atomic under the GIL, so there's no torn read, only a
+possible one-tick-stale read on a genuine race, which the multi-minute
+throttle interval makes immaterial).
 
 ## Entry strategies
 
