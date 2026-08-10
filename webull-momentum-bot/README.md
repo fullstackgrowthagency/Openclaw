@@ -119,21 +119,10 @@ What's implemented and tested:
   scales with universe size rather than being bounded by a fixed number;
   see `docs/ARCHITECTURE.md` for the measured per-symbol timing this
   implies (noting those numbers predate this wider price
-  range/pagination/more sources and now understate real scan time).
-- **Extended-hours pricing**: `WebullBrokerClient.get_snapshot()` now
-  requests extended-hours data (`extend_hour_required=True`) and prefers an
-  `ext_price` field over the regular-session `price` when present, so a
-  candidate's displayed/used price reflects the latest pre-market or
-  after-hours trade instead of going stale the moment the regular session
-  ends. The exact `ext_price` field name is inferred from the SDK's
-  protobuf streaming schema, not confirmed against a real sandbox response
-  -- see the module docstring in `brokers/webull/client.py` and
-  `docs/ARCHITECTURE.md`'s "Webull integration" section. It fails soft: if
-  the field name guess is wrong, or it's simply absent, pricing just falls
-  back to the regular-session `price` as before.
-  Dollar volume is an informational `Candidate` field, not a discovery
-  gate. Average-daily, previous-day, and current-day (today's
-  volume-so-far) volume, however, ARE a structural gate again
+  range/pagination/more sources and now understate real scan time). Dollar
+  volume is an informational `Candidate` field, not a discovery gate.
+  Average-daily, previous-day, and current-day (today's volume-so-far)
+  volume, however, ARE a structural gate again
   (`BroadScannerConfig.min_average_daily_volume`/`min_previous_day_volume`/
   `min_current_day_volume`, 500,000/750,000/500,000 by default) -- a
   symbol is rejected only when it misses ALL THREE, so clearing any one
@@ -143,6 +132,26 @@ What's implemented and tested:
   applied to `CandidateWatcher`'s spread/liquidity checks
   (`Candidate.trade_eligible`/`block_reasons`, which don't permanently
   reject a candidate).
+- **Extended-hours pricing and volume**: `WebullBrokerClient.get_snapshot()`
+  now requests extended-hours data (`extend_hour_required=True`) and
+  prefers `ext_price`/`ext_volume` fields over the regular-session
+  `price`/`volume` when present AND the quote's own timestamp falls
+  outside 9:30am-4:00pm ET, so a candidate's displayed price and every
+  volume-derived Momentum Ignition Score component (relative volume,
+  volume/dollar-volume acceleration, float velocity/turnover) reflect real
+  pre-market/after-hours activity instead of a stale price or a flat 0
+  (the regular-session `volume` field is legitimately 0 before 9:30am ET
+  even during active pre-market trading). The time gate exists because
+  it's unconfirmed whether Webull actually zeroes `ext_price`/`ext_volume`
+  out once the regular session opens, or keeps echoing that morning's last
+  pre-market value all day -- gating on the quote's own timestamp avoids
+  ever using a stale pre-market number during regular hours either way.
+  The exact `ext_price`/`ext_volume` field names are inferred from the
+  SDK's protobuf streaming schema, not confirmed against a real sandbox
+  response -- see the module docstring in `brokers/webull/client.py` and
+  `docs/ARCHITECTURE.md`'s "Webull integration" section. It fails soft: if
+  a field name guess is wrong, or it's simply absent, pricing/volume just
+  fall back to the regular-session fields as before.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

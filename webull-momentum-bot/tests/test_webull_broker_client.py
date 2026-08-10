@@ -108,9 +108,16 @@ def test_snapshot_from_dict_maps_real_fields():
     assert snapshot.premarket_high is None
 
 
-# -- extended-hours price preference (ext_price) -- see get_snapshot's
+# -- extended-hours price/volume preference (ext_price/ext_volume), gated to
+# outside the regular 9:30am-4:00pm ET session -- see get_snapshot's
 # extend_hour_required=True and _snapshot_from_dict's docstring for why the
-# exact REST field name here is inferred, not confirmed live -----------------
+# exact REST field names here are inferred, not confirmed live, and why the
+# time gate exists (protects regular-session data from a stale pre-market
+# value in case Webull doesn't zero these fields out at the open) ----------
+
+# _REAL_SNAPSHOT_ROW's quote_time (1786147200276) is 2026-08-07 20:00 ET --
+# after-hours -- which is why the tests below that rely on the ext_* fields
+# actually taking effect use it as-is, with no override needed.
 
 def test_snapshot_from_dict_falls_back_to_price_without_ext_price():
     # _REAL_SNAPSHOT_ROW has no ext_price key at all (captured before
@@ -142,6 +149,74 @@ def test_snapshot_from_dict_ignores_unparseable_ext_price():
     row = dict(_REAL_SNAPSHOT_ROW, ext_price="not-a-number")
     snapshot = client._snapshot_from_dict(row)
     assert snapshot.last_price == 313.33
+
+
+def test_snapshot_from_dict_prefers_ext_volume_when_present():
+    client = _client()
+    row = dict(_REAL_SNAPSHOT_ROW, ext_volume="999")
+    snapshot = client._snapshot_from_dict(row)
+    assert snapshot.cumulative_volume == 999.0
+
+
+def test_snapshot_from_dict_falls_back_to_volume_without_ext_volume():
+    client = _client()
+    snapshot = client._snapshot_from_dict(_REAL_SNAPSHOT_ROW)
+    assert snapshot.cumulative_volume == 34437191.0
+
+
+def test_snapshot_from_dict_ignores_zero_or_empty_ext_volume():
+    client = _client()
+    for zero_ish in ("0", 0, 0.0, ""):
+        row = dict(_REAL_SNAPSHOT_ROW, ext_volume=zero_ish)
+        snapshot = client._snapshot_from_dict(row)
+        assert snapshot.cumulative_volume == 34437191.0
+
+
+# 2026-08-07 12:00 ET -- squarely inside the regular session.
+_REGULAR_HOURS_QUOTE_TIME_MS = 1786118400000
+# 2026-08-07 08:00 ET -- pre-market.
+_PREMARKET_QUOTE_TIME_MS = 1786104000000
+
+
+def test_snapshot_from_dict_ignores_ext_price_during_regular_hours():
+    # Even a present, non-zero, parseable ext_price must NOT override price
+    # if the quote itself is timestamped during the regular session -- this
+    # is the gate that protects against Webull possibly not zeroing ext_price
+    # out once the regular session opens (unconfirmed either way).
+    client = _client()
+    row = dict(_REAL_SNAPSHOT_ROW, ext_price="320.00", quote_time=_REGULAR_HOURS_QUOTE_TIME_MS)
+    snapshot = client._snapshot_from_dict(row)
+    assert snapshot.last_price == 313.33
+
+
+def test_snapshot_from_dict_ignores_ext_volume_during_regular_hours():
+    client = _client()
+    row = dict(_REAL_SNAPSHOT_ROW, ext_volume="999", quote_time=_REGULAR_HOURS_QUOTE_TIME_MS)
+    snapshot = client._snapshot_from_dict(row)
+    assert snapshot.cumulative_volume == 34437191.0
+
+
+def test_snapshot_from_dict_honors_ext_fields_during_premarket():
+    client = _client()
+    row = dict(
+        _REAL_SNAPSHOT_ROW, ext_price="320.00", ext_volume="999", quote_time=_PREMARKET_QUOTE_TIME_MS,
+    )
+    snapshot = client._snapshot_from_dict(row)
+    assert snapshot.last_price == 320.00
+    assert snapshot.cumulative_volume == 999.0
+
+
+def test_is_outside_regular_session_boundaries():
+    from webull_bot.brokers.webull.client import _is_outside_regular_session
+
+    # 9:29:59am ET -- one second before the open.
+    assert _is_outside_regular_session(datetime(2026, 8, 7, 13, 29, 59)) is True
+    # 9:30:00am ET -- the open itself, regular session.
+    assert _is_outside_regular_session(datetime(2026, 8, 7, 13, 30, 0)) is False
+    # 3:59:59pm ET -- still regular session.
+    assert _is_outside_regular_session(datetime(2026, 8, 7, 19, 59, 59)) is False
+    # 4:00:00pm ET -- the close itself, after-hours begins.
+    assert _is_outside_regular_session(datetime(2026, 8, 7, 20, 0, 0)) is True
 
 
 class _FakeResponse:

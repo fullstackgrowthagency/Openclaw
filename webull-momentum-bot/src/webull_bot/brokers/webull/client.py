@@ -38,12 +38,21 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     endpoint returns VWAP directly -- see the comment in _snapshot_from_dict.
     NOT covered by this 2026-08-08 verification: get_snapshot is now called
     with extend_hour_required=True (added later) so pre-market/after-hours
-    prices aren't silently stale, and _snapshot_from_dict prefers an
-    `ext_price` field when present. Both the flag's effect on the REST body
-    and the `ext_price` key name itself are inferred from the SDK's
-    protobuf streaming schema, not confirmed against a real sandbox
+    prices/volumes aren't silently stale or zero, and _snapshot_from_dict
+    prefers `ext_price`/`ext_volume` fields when present AND the quote
+    timestamp itself falls outside the regular 9:30am-4:00pm ET session
+    (_is_outside_regular_session) -- the time gate exists because it's
+    unconfirmed whether Webull actually zeroes those fields out once the
+    regular session opens, versus them echoing that morning's last
+    pre-market value all day; gating on wall-clock time avoids ever using a
+    stale pre-market number during regular hours regardless of which way
+    that turns out. Both the flag's effect on the REST body and the
+    `ext_price`/`ext_volume` key names themselves are inferred from the
+    SDK's protobuf streaming schema, not confirmed against a real sandbox
     response -- re-verify live during an actual pre-market/after-hours
-    session before trusting the exact field name.
+    session before trusting the exact field names (see
+    scripts/verify_extended_hours_bars.py for the analogous check already
+    written for get_raw_bars' trading_sessions parameter).
   - Streaming (DataStreamingClient, MQTT-based) is NOT implemented here.
     Its constructor needs an http_host/mqtt_host; the production values are
     documented (data-api.webull.com) but no sandbox equivalent was found or
@@ -78,8 +87,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from typing import Callable, Optional
+from zoneinfo import ZoneInfo
 
 from webull.core.client import ApiClient
 from webull.data.common.category import Category
@@ -143,6 +153,29 @@ def _epoch_ms_to_dt(ms: Optional[int]) -> datetime:
     if not ms:
         return datetime.now(timezone.utc).replace(tzinfo=None)
     return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).replace(tzinfo=None)
+
+
+_EASTERN = ZoneInfo("America/New_York")
+_REGULAR_SESSION_OPEN = time(9, 30)
+_REGULAR_SESSION_CLOSE = time(16, 0)
+
+
+def _is_outside_regular_session(timestamp_utc: datetime) -> bool:
+    """True when `timestamp_utc` (naive UTC, same convention as
+    MarketSnapshot.timestamp) falls before 9:30am or at/after 4:00pm
+    US/Eastern -- i.e. pre-market or after-hours.
+
+    Used to gate _snapshot_from_dict's ext_price/ext_volume preference
+    below on wall-clock time, not just on "the field happened to be present
+    and non-zero": it's unconfirmed whether Webull actually zeroes those
+    fields out the instant the regular session opens, or whether they keep
+    reporting that morning's last pre-market value all day. If it's the
+    latter and this gate didn't exist, every regular-session snapshot would
+    silently use a stale pre-market price/volume instead of the live one --
+    gating on time removes that risk outright regardless of which way
+    Webull's own behavior turns out to be."""
+    eastern_time = timestamp_utc.replace(tzinfo=timezone.utc).astimezone(_EASTERN).time()
+    return eastern_time < _REGULAR_SESSION_OPEN or eastern_time >= _REGULAR_SESSION_CLOSE
 
 
 class WebullBrokerClient(BrokerClient):
@@ -234,33 +267,62 @@ class WebullBrokerClient(BrokerClient):
 
     def _snapshot_from_dict(self, raw: dict, timestamp: Optional[datetime] = None) -> MarketSnapshot:
         last_price = float(raw["price"])
-        # Prefer the extended-hours trade price when the API actually
-        # populated one -- `price` alone is the regular-session price and
-        # goes stale the moment the regular session ends, which would make
-        # every candidate's displayed/traded-on price silently lag by hours
-        # during pre-market or after-hours activity (exactly the window
-        # PRE_MARKET/AFTER_MARKET discovery below is meant to catch).
-        # get_snapshot() is called with extend_hour_required=True
-        # specifically so Webull includes this field at all -- per that
-        # method's docstring, it's omitted by default. Field name
-        # (`ext_price`) is inferred from the SDK's protobuf streaming
-        # schema's naming convention (webull/data/quotes/subscribe/message_pb2.py:
-        # ext_price/ext_high/ext_low/ext_volume alongside the regular
-        # price/high/low/volume), NOT confirmed against this REST endpoint's
-        # actual JSON body -- the SDK has no schema/fixture for that body to
-        # check against. If the real key differs, this silently falls back
-        # to the regular-session `price`, same fail-soft handling as every
-        # other optional field here; re-verify live during a real pre-market
-        # or after-hours session before trusting this blindly. (Webull also
-        # exposes a separate `overnight_required` flag / `ovn_price` field
-        # for its newer overnight session -- deliberately not requested
-        # here, since only pre/after-market was asked for.)
-        ext_price_raw = raw.get("ext_price")
-        if ext_price_raw not in (None, "", "0", 0, 0.0):
-            try:
-                last_price = float(ext_price_raw)
-            except (TypeError, ValueError):
-                pass
+        cumulative_volume = float(raw.get("volume", 0) or 0)
+        quote_timestamp = timestamp or _epoch_ms_to_dt(raw.get("quote_time"))
+
+        # Prefer the extended-hours trade price/volume when the API actually
+        # populated them AND the quote itself falls outside the regular
+        # session (see _is_outside_regular_session) -- `price`/`volume`
+        # alone are the regular-session fields and go stale/frozen-at-zero
+        # the moment the regular session ends (price) or before it begins
+        # (volume, which is legitimately 0 pre-9:30am even during active
+        # pre-market trading), which would make every candidate's
+        # displayed price AND every volume-derived metric (relative volume,
+        # volume/dollar-volume acceleration, float velocity/turnover --
+        # they're all built from cumulative_volume, see metrics/rolling.py)
+        # silently wrong during pre-market or after-hours (exactly the
+        # window PRE_MARKET/AFTER_MARKET discovery below is meant to catch).
+        # The time gate exists because it's unconfirmed whether Webull
+        # actually zeroes ext_price/ext_volume out once the regular session
+        # opens, or whether they keep echoing that morning's last
+        # pre-market value all day -- without the gate, the latter case
+        # would silently corrupt regular-session data with stale pre-market
+        # numbers. get_snapshot() is called with extend_hour_required=True
+        # specifically so Webull includes these fields at all -- per that
+        # method's docstring, they're omitted by default. Field names
+        # (`ext_price`/`ext_volume`) are inferred from the SDK's protobuf
+        # streaming schema's naming convention (webull/data/quotes/subscribe/
+        # message_pb2.py: ext_price/ext_high/ext_low/ext_volume alongside the
+        # regular price/high/low/volume), NOT confirmed against this REST
+        # endpoint's actual JSON body -- the SDK has no schema/fixture for
+        # that body to check against. If a key name is wrong, this silently
+        # falls back to the regular-session field, same fail-soft handling
+        # as every other optional field here; re-verify live during a real
+        # pre-market or after-hours session before trusting this blindly.
+        # (Webull also exposes a separate `overnight_required` flag /
+        # `ovn_price`/`ovn_volume` fields for its newer overnight session --
+        # deliberately not requested here, since only pre/after-market was
+        # asked for.) One known, self-healing edge case: a rolling window
+        # that straddles the 9:30am boundary will see cumulative_volume
+        # apparently drop (ext_volume's pre-market total -> volume's
+        # near-zero regular-session count), which metrics/rolling.py's
+        # _volume_since clamps to 0 rather than negative -- a single
+        # artificially-flat reading right at the open that clears itself
+        # once the straddling snapshot ages out of the window.
+        if _is_outside_regular_session(quote_timestamp):
+            ext_price_raw = raw.get("ext_price")
+            if ext_price_raw not in (None, "", "0", 0, 0.0):
+                try:
+                    last_price = float(ext_price_raw)
+                except (TypeError, ValueError):
+                    pass
+
+            ext_volume_raw = raw.get("ext_volume")
+            if ext_volume_raw not in (None, "", "0", 0, 0.0):
+                try:
+                    cumulative_volume = float(ext_volume_raw)
+                except (TypeError, ValueError):
+                    pass
         # Webull's snapshot endpoint does not return VWAP directly (confirmed
         # live -- the field is simply absent). Falling back to last_price
         # keeps distance_from_vwap_pct at a neutral 0 rather than fabricating
@@ -269,13 +331,13 @@ class WebullBrokerClient(BrokerClient):
         vwap = last_price
         return MarketSnapshot(
             symbol=raw.get("symbol", ""),
-            timestamp=timestamp or _epoch_ms_to_dt(raw.get("quote_time")),
+            timestamp=quote_timestamp,
             last_price=last_price,
             bid=float(raw.get("bid", 0) or 0),
             ask=float(raw.get("ask", 0) or 0),
             bid_size=float(raw.get("bid_size", 0) or 0),
             ask_size=float(raw.get("ask_size", 0) or 0),
-            cumulative_volume=float(raw.get("volume", 0) or 0),
+            cumulative_volume=cumulative_volume,
             vwap=vwap,
             high_of_day=float(raw.get("high", last_price)),
             low_of_day=float(raw.get("low", last_price)),

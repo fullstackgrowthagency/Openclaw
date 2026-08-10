@@ -1120,28 +1120,57 @@ Two non-obvious things worth knowing if you're debugging this client:
    invalid.`) -- that Python enum apparently isn't what the order-placement
    endpoint expects, despite looking like the obvious match. Confirmed by
    testing both live.
-3. **`get_snapshot`'s extended-hours price is opt-in and unverified.**
-   Passing `extend_hour_required=True` (now always set -- see
-   `WebullBrokerClient.get_snapshot`) is required for Webull to include
-   pre-market/after-hours pricing at all; without it, `last_price` silently
+3. **`get_snapshot`'s extended-hours price/volume are opt-in, unverified,
+   and time-gated.** Passing `extend_hour_required=True` (now always set --
+   see `WebullBrokerClient.get_snapshot`) is required for Webull to include
+   pre-market/after-hours data at all; without it, `last_price` silently
    stays pinned to the regular-session price for hours after the session
    ends, which is exactly the window the `PRE_MARKET`/`AFTER_MARKET`
-   discovery sources above are trying to catch movers in. The field this
-   code reads for that price (`ext_price` in `_snapshot_from_dict`) is
+   discovery sources above are trying to catch movers in. The fields this
+   code reads (`ext_price`/`ext_volume` in `_snapshot_from_dict`) are
    *inferred* from the SDK's protobuf streaming schema's naming convention
    (`ext_price`/`ext_high`/`ext_low`/`ext_volume` alongside the regular
    fields, in `webull/data/quotes/subscribe/message_pb2.py`), not confirmed
    against this REST endpoint's actual JSON body -- the SDK ships no
    schema for that body to check against, and this repo's own fixture
    (`_REAL_SNAPSHOT_ROW` in `tests/test_webull_broker_client.py`) predates
-   `extend_hour_required=True` and has no `ext_price` key to confirm from.
-   If the real key differs, this fails soft (falls back to the regular
-   `price`, same as today) rather than erroring -- but that also means a
-   wrong guess would go unnoticed without an explicit live check during a
-   real pre-market or after-hours session. There's also a separate
-   `overnight_required`/`ovn_price` pair for Webull's newer overnight
-   session, deliberately not requested here since only pre/after-market
-   was asked for.
+   `extend_hour_required=True` and has no `ext_price`/`ext_volume` keys to
+   confirm from. If a real key differs, this fails soft (falls back to the
+   regular `price`/`volume`, same as before this existed) rather than
+   erroring -- but that also means a wrong guess would go unnoticed without
+   an explicit live check during a real pre-market or after-hours session.
+   `ext_volume` matters beyond just the displayed price: `cumulative_volume`
+   feeds every volume-derived Momentum Ignition Score component (relative
+   volume, volume/dollar-volume acceleration, float velocity/turnover -- see
+   `metrics/rolling.py`), and the regular-session `volume` field is
+   legitimately 0 before 9:30am ET even during active pre-market trading,
+   so without `ext_volume` those components read a flat 0 all pre-market
+   long, for every candidate, regardless of real activity.
+
+   **Both fields are gated by `_is_outside_regular_session`** (the quote's
+   own timestamp, not wall-clock "now") rather than being preferred purely
+   because they're present and non-zero: it's unconfirmed whether Webull
+   actually zeroes `ext_price`/`ext_volume` out the instant the regular
+   session opens, or whether they keep echoing that morning's last
+   pre-market value all day. If it's the latter, trusting "field present"
+   alone would silently corrupt *regular-session* data with a stale
+   pre-market number -- gating on the quote's own timestamp removes that
+   risk regardless of which way Webull's real behavior turns out to be.
+   One known, self-healing edge case: a rolling metrics window that
+   straddles the 9:30am boundary sees `cumulative_volume` apparently drop
+   (pre-market's `ext_volume` total -> the regular session's near-zero
+   `volume` count), which `metrics/rolling.py`'s `_volume_since` clamps to
+   0 rather than negative -- one artificially-flat reading right at the
+   open that clears itself once the straddling snapshot ages out of the
+   window. There's also a separate `overnight_required`/`ovn_price`/
+   `ovn_volume` set for Webull's newer overnight session, deliberately not
+   requested here since only pre/after-market was asked for. Use
+   `scripts/verify_extended_hours_bars.py` as a template for writing an
+   analogous live check of `get_snapshot`'s `ext_price`/`ext_volume`
+   fields during a real pre-market/after-hours window -- that script
+   checks `get_raw_bars`' `trading_sessions` parameter specifically, not
+   this one, but the same "does the live response actually confirm the
+   inferred field/value" question applies here.
 
 Streaming (`subscribe_quotes`) intentionally raises `NotImplementedError`:
 `DataStreamingClient` needs an `mqtt_host`, and only the production value
