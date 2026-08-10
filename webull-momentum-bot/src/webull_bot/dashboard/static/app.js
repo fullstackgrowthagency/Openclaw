@@ -129,7 +129,8 @@ const COLUMN_INFO = {
       "• slippage_protection_triggered\n" +
       "• cooldown_active -- this symbol is still in its post-loss cooldown window\n" +
       "• kill_switch_engaged -- either a new trade was blocked because the kill switch is on, or this is the event logged the moment the switch itself gets engaged\n" +
-      "• min_risk_reward_not_met -- the signal's reward:risk ratio is below the \"Minimum reward:risk ratio\" setting\n\n" +
+      "• min_risk_reward_not_met -- the signal's reward:risk ratio is below the \"Minimum reward:risk ratio\" setting\n" +
+      "• outside_core_trading_hours -- new entries are only ever allowed 9:30am-4:00pm ET, Monday-Friday; this fires for a signal that triggered outside that window. Doesn't apply to exits -- a stop-loss or the automatic end-of-day flatten still fire any time.\n\n" +
       "Each row shows the timestamp, event type, symbol (\"--\" for switch-wide events like the kill switch), and a human-readable reason, e.g. \"Spread 1.20% exceeds max 0.50%.\" It's essentially a real-time audit trail of why a trade was or wasn't taken -- useful for tuning the risk settings in the Settings panel without digging through logs. Shows the most recent 20 events, newest first.",
   },
 };

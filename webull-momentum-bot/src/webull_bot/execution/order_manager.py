@@ -10,6 +10,7 @@ architecture is being bypassed -- don't do it.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Optional
 
 from ..config import Settings
@@ -42,7 +43,14 @@ class OrderManager:
             SignalAction.ENTER_SHORT: OrderSide.SELL_SHORT,
         }[action]
 
-    def submit_signal(self, signal: Signal, *, snapshot: MarketSnapshot, position: Optional[Position] = None) -> Order:
+    def submit_signal(
+        self,
+        signal: Signal,
+        *,
+        snapshot: MarketSnapshot,
+        position: Optional[Position] = None,
+        now: Optional[datetime] = None,
+    ) -> Order:
         """Runs a Signal through the risk engine and, if approved, places the order.
         Raises OrderRejected if the risk engine declines it -- callers must not
         retry by constructing their own Order and calling the broker directly.
@@ -50,7 +58,19 @@ class OrderManager:
         EXIT/SCALE_OUT signals deliberately skip the entry-sizing risk checks
         (spread/liquidity/exposure gates exist to control *new* risk, not to
         trap the bot in a losing position) and go straight to the broker to
-        close out `position`."""
+        close out `position`.
+
+        `now`: forwarded to RiskEngine.evaluate (entries only -- exits don't
+        call evaluate at all, see above), which needs it for the core-trading-
+        hours gate as well as its existing daily-rollover/cooldown checks.
+        Left as None defaults evaluate() to the real wall clock
+        (datetime.utcnow()), which is what every live call site wants and
+        historically got implicitly. Backtests and the live trading loop
+        both already compute a `now` per tick/per bar for their own state
+        transitions -- pass that same value here too, so e.g. a backtest
+        replaying historical bars gates entries against the *simulated*
+        bar's timestamp instead of the real wall-clock time the backtest
+        happens to be run at."""
 
         if self.broker.is_live:
             # Belt-and-suspenders: OrderManager itself refuses to route to a live
@@ -95,6 +115,7 @@ class OrderManager:
             account_buying_power=self.broker.get_buying_power(),
             open_positions=self.broker.get_positions(),
             snapshot=snapshot,
+            now=now,
         )
         if not decision.approved or not decision.max_shares:
             raise OrderRejected(decision)

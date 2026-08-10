@@ -255,6 +255,70 @@ def test_get_snapshot_requests_extended_hours_data():
     assert kwargs.get("extend_hour_required") is True
 
 
+# -- get_positions -- one bad/unexpected row must never take down every
+# other real position (a real production incident: see get_positions' and
+# _position_from_dict's docstrings) --------------------------------------
+
+def test_get_positions_maps_a_well_formed_row():
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeAccountV2:
+        def get_account_position(self, account_id):
+            return _FakeResponse([{"symbol": "AAPL", "quantity": "10", "cost_price": "150.5", "side": "BUY"}])
+
+    class _FakeTradeClient:
+        account_v2 = _FakeAccountV2()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    positions = client.get_positions()
+
+    assert len(positions) == 1
+    assert positions[0].symbol == "AAPL"
+    assert positions[0].quantity == 10.0
+    assert positions[0].avg_entry_price == 150.5
+
+
+def test_get_positions_skips_an_unparseable_row_but_keeps_the_rest():
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeAccountV2:
+        def get_account_position(self, account_id):
+            # First row has none of the recognized symbol keys (simulates a
+            # field-name guess in _position_from_dict being wrong); second
+            # row is well-formed. Both real positions -- the first must not
+            # silently take the second down with it.
+            return _FakeResponse([
+                {"unexpected_symbol_field": "GME", "quantity": "5"},
+                {"symbol": "AAPL", "quantity": "10", "cost_price": "150.5"},
+            ])
+
+    class _FakeTradeClient:
+        account_v2 = _FakeAccountV2()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    positions = client.get_positions()
+
+    assert len(positions) == 1
+    assert positions[0].symbol == "AAPL"
+
+
+def test_get_positions_empty_list_returns_empty():
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeAccountV2:
+        def get_account_position(self, account_id):
+            return _FakeResponse([])
+
+    class _FakeTradeClient:
+        account_v2 = _FakeAccountV2()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    assert client.get_positions() == []
+
+
 # -- get_snapshots (batch equivalent of get_snapshot) -- see its docstring for
 # why this exists: every get_snapshot-family call shares the same globally-
 # paced rate limiter, so batching many symbols into one call turns an N-call

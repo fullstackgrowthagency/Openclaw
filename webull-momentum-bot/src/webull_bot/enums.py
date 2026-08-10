@@ -81,6 +81,7 @@ class ExitReason(str, Enum):
     TIME_LIMIT = "time_limit"
     MANUAL = "manual"
     RISK_KILL_SWITCH = "risk_kill_switch"
+    END_OF_CORE_HOURS = "end_of_core_hours"
 
 
 class RiskEventType(str, Enum):
@@ -96,6 +97,7 @@ class RiskEventType(str, Enum):
     COOLDOWN_ACTIVE = "cooldown_active"
     KILL_SWITCH_ENGAGED = "kill_switch_engaged"
     MIN_RISK_REWARD_NOT_MET = "min_risk_reward_not_met"
+    OUTSIDE_CORE_TRADING_HOURS = "outside_core_trading_hours"
 
 
 class MomentumOutcome(str, Enum):

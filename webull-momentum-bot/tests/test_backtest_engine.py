@@ -36,7 +36,13 @@ def _snapshot(t, last_price, high_of_day, low_of_day, cumulative_volume, bid, as
 
 
 def _build_bars() -> list[MarketSnapshot]:
-    t0 = datetime(2026, 1, 5, 9, 31, 0)
+    # 14:31 UTC = 9:31am US/Eastern in January (EST, UTC-5) -- a real,
+    # deterministic weekday (Monday) time within core trading hours, needed
+    # now that a backtest's simulated bar timestamp (snapshot.timestamp) is
+    # what RiskEngine.evaluate's core-hours gate checks against (see
+    # backtest/engine.py's submit_signal(..., now=snapshot.timestamp)),
+    # rather than the real wall clock the backtest happens to run at.
+    t0 = datetime(2026, 1, 5, 14, 31, 0)
     bars = [
         _snapshot(t0, 5.00, 5.05, 4.95, 150_000, 4.99, 5.01, 5.00),
         _snapshot(t0 + timedelta(minutes=1), 5.10, 5.10, 4.95, 250_000, 5.09, 5.11, 5.05),

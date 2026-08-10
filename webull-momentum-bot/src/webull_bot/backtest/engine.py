@@ -136,7 +136,7 @@ class BacktestEngine:
             return
 
         try:
-            order = self.order_manager.submit_signal(signal, snapshot=snapshot)
+            order = self.order_manager.submit_signal(signal, snapshot=snapshot, now=snapshot.timestamp)
         except OrderRejected:
             transition(candidate, CandidateState.ARMED, now=snapshot.timestamp, reason="risk engine rejected entry signal")
             return

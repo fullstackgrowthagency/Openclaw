@@ -75,6 +75,36 @@ What's implemented and tested:
   bugs this fixes, not hypotheticals -- see `docs/ARCHITECTURE.md`'s
   "Daily trade counters vs. actual trades" and "`_submit_entry`'s catch-all
   exception handler" notes)
+- **Core trading hours entry gate**: `RiskEngine.evaluate` unconditionally
+  refuses any new entry signal outside 9:30am-4:00pm ET, Monday-Friday
+  (`market_hours.is_within_core_trading_hours`) -- added after a real
+  production report of an entry filling *during* core hours whose resulting
+  position then went untracked (see the position-tracking bullet below);
+  this gate closes a separate gap found while investigating that report --
+  there was no explicit guarantee anywhere that entries only ever happen in
+  core hours in the first place. Exits are never affected (a stop-loss or
+  the end-of-day auto-flatten below still fire any time) since
+  `OrderManager` never routes exits through `evaluate()` at all. Any open
+  position still open once core hours end is now automatically flattened
+  (`TradingLoop`'s end-of-core-hours auto-flatten, distinct from the manual
+  kill switch -- it never halts the *next* day's trading, it just closes
+  out today's) -- see `docs/ARCHITECTURE.md`'s "Core trading hours gate"
+  and "End-of-core-hours auto-flatten" sections.
+- **Position tracking can be lost on a broker-side fill reconciliation
+  failure -- fixed.** A real production incident: an entry filled during
+  core hours, but a field-name mismatch in `WebullBrokerClient.get_positions()`
+  (never verified against a real, populated position -- only an empty
+  response existed during integration) raised an exception partway through
+  recording the fill, so the position was open at the broker but the bot
+  never knew: no stop-loss management, not shown as an open position
+  anywhere, buying power silently consumed. Fixed at two layers: local
+  position tracking in `TradingLoop._confirm_entry_filled` no longer lets
+  *any* broker-lookup failure (not just "no matching position") block
+  recording the fill locally, and `get_positions()` itself now parses each
+  returned row independently, logging and skipping just the one row it
+  can't understand instead of losing every real position at once -- see
+  `docs/ARCHITECTURE.md`'s "Position tracking can be lost..." section for
+  the full mechanics and what the fix's logging captures for next time.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry
@@ -182,16 +212,21 @@ What's implemented and tested:
   `docs/ARCHITECTURE.md`'s "Webull integration" section. It fails soft: if
   a field name guess is wrong, or it's simply absent, pricing/volume just
   fall back to the regular-session fields as before.
-- **Extended-hours order execution**: `WebullBrokerClient._order_payload()`
-  now sets `support_trading_session` to `"ALL"` instead of `"CORE"`, so
-  orders placed during pre-market/after-hours are actually eligible to
-  fill instead of sitting queued until the next regular session opens. The
-  previous `"CORE"`-only value produced a real symptom: a candidate would
-  trigger and buying power would be reserved against the order, but no
-  fill and no open position ever appeared, because Webull won't execute a
-  CORE-flagged order outside 9:30am-4:00pm ET. Confirmed via Webull's
-  official API docs; not yet confirmed by a live extended-hours order fill
-  in the sandbox -- see `docs/ARCHITECTURE.md`'s "Webull integration"
+- **`support_trading_session` kept as `"ALL"`, but for a narrower reason
+  than first thought**: `WebullBrokerClient._order_payload()` sets this to
+  `"ALL"` instead of `"CORE"`. Originally changed on a since-corrected
+  diagnosis of a buying-power-reserved-with-no-position report (the actual
+  cause, confirmed directly by re-checking with production data, was the
+  entry firing *during* core hours with the fill going untracked -- see
+  the position-tracking bullet above); kept anyway because the
+  end-of-core-hours auto-flatten's closing order fires right at (or just
+  after) the 4:00pm ET boundary, where a `"CORE"`-flagged order risks the
+  same "accepted but won't execute" behavior. New entries no longer need
+  this leniency at all -- they're never attempted outside core hours in
+  the first place now (see the entry-gate bullet above). Confirmed via
+  Webull's official API docs; not yet confirmed by a live order fill right
+  at the close boundary in the sandbox -- see `docs/ARCHITECTURE.md`'s
+  "Webull integration"
   section for the full explanation and what to re-check if it doesn't fill.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,

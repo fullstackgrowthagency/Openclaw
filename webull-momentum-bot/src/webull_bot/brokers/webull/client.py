@@ -246,11 +246,19 @@ class WebullBrokerClient(BrokerClient):
         # snake_case convention seen on every other verified endpoint --
         # re-verify against a real populated get_account_position() response
         # (none existed during integration; the sandbox account had zero
-        # positions) and correct any mismatches.
+        # positions) and correct any mismatches. `symbol` in particular is
+        # read with a plain `.get()` + a few plausible fallbacks rather than
+        # `raw["symbol"]` (this used to be a bare KeyError on a first
+        # mismatch) precisely BECAUSE it's unverified -- see get_positions'
+        # docstring for the real production incident a hard failure here
+        # caused.
+        symbol = raw.get("symbol") or raw.get("ticker_symbol") or raw.get("instrument_symbol")
+        if not symbol:
+            raise KeyError("no recognized symbol field in position row")
         side_raw = raw.get("side", "BUY")
         side = OrderSide.SELL_SHORT if side_raw == "SHORT" else OrderSide.BUY
         return Position(
-            symbol=raw["symbol"],
+            symbol=symbol,
             side=side,
             quantity=float(raw.get("quantity", raw.get("qty", 0))),
             avg_entry_price=float(raw.get("cost_price", raw.get("avg_cost", 0))),
@@ -263,9 +271,30 @@ class WebullBrokerClient(BrokerClient):
         )
 
     def get_positions(self) -> list[Position]:
+        """Confirmed live against the sandbox as an empty JSON list only --
+        _position_from_dict's field-name guesses have never been checked
+        against a real populated row (see its docstring). A production
+        incident showed why that matters: a row this can't parse used to
+        raise straight out of this method entirely, which meant EVERY
+        caller lost EVERY position at once -- not just the one bad row --
+        including RiskEngine.evaluate's own open_positions lookup (so a
+        single unparseable row could silently block every future entry,
+        too) and TradingLoop._confirm_entry_filled's post-fill reconciliation
+        (a filled order at the broker never becoming a locally-tracked
+        position, with no error surfaced anywhere obvious). Skipping and
+        logging the one bad row instead keeps every other real position
+        visible, and the logged raw row is exactly the data needed to fix
+        _position_from_dict's field-name guesses the next time this actually
+        fires against a real account."""
         response = self._require_trade_client().account_v2.get_account_position(self.account_id)
         response.raise_for_status()
-        return [self._position_from_dict(row) for row in response.json()]
+        positions = []
+        for row in response.json():
+            try:
+                positions.append(self._position_from_dict(row))
+            except Exception:
+                logger.exception("Failed to parse a position row from get_account_position; raw row: %r", row)
+        return positions
 
     # -- market data ---------------------------------------------------------
 

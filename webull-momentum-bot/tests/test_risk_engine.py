@@ -6,6 +6,16 @@ from webull_bot.enums import OrderSide, SignalAction
 from webull_bot.models import MarketSnapshot, Position, Signal
 from webull_bot.risk.risk_engine import RiskConfig, RiskEngine
 
+# 15:00 UTC = 11:00am US/Eastern in August (EDT, UTC-4) on a real Monday --
+# a fixed, deterministic point safely inside core trading hours (9:30am-
+# 4:00pm ET), used as every test's default `now` below. Needed because
+# RiskEngine.evaluate now has a hard, unconditional core-hours gate: leaving
+# `now` to default all the way down to evaluate()'s own datetime.utcnow()
+# fallback would make almost this entire file's pass/fail outcome depend on
+# the real wall-clock time (and day of week) whenever the suite happens to
+# run, rather than on the actual behavior under test.
+_CORE_HOURS_NOW = datetime(2026, 8, 10, 15, 0, 0)
+
 
 def _snapshot(**overrides) -> MarketSnapshot:
     base = dict(
@@ -43,14 +53,15 @@ def _signal(**overrides) -> Signal:
 def _evaluate(engine, signal=None, *, account_equity=10_000, account_buying_power=None, open_positions=None, snapshot=None, now=None):
     # account_buying_power defaults to account_equity -- most tests don't
     # care about the equity/buying-power distinction and just want a
-    # consistent number for both.
+    # consistent number for both. `now` defaults to a fixed core-hours
+    # timestamp (not None/real wall-clock) -- see _CORE_HOURS_NOW above.
     return engine.evaluate(
         signal or _signal(),
         account_equity=account_equity,
         account_buying_power=account_buying_power if account_buying_power is not None else account_equity,
         open_positions=open_positions or [],
         snapshot=snapshot or _snapshot(),
-        now=now,
+        now=now if now is not None else _CORE_HOURS_NOW,
     )
 
 
@@ -107,6 +118,64 @@ def test_rejects_when_kill_switch_active():
     engine.engage_kill_switch("manual test halt")
     decision = _evaluate(engine)
     assert not decision.approved
+
+
+def test_rejects_new_entries_before_core_hours_open():
+    engine = RiskEngine()
+    pre_market = datetime(2026, 8, 10, 13, 0, 0)  # 9:00am ET (before 9:30am open)
+    decision = _evaluate(engine, now=pre_market)
+    assert not decision.approved
+    assert "core trading hours" in decision.reason.lower()
+
+
+def test_rejects_new_entries_after_core_hours_close():
+    engine = RiskEngine()
+    after_close = datetime(2026, 8, 10, 20, 30, 0)  # 4:30pm ET (after the 4:00pm close)
+    decision = _evaluate(engine, now=after_close)
+    assert not decision.approved
+    assert "core trading hours" in decision.reason.lower()
+
+
+def test_rejects_new_entries_on_a_weekend():
+    engine = RiskEngine()
+    saturday_midday = datetime(2026, 8, 15, 15, 0, 0)  # 11:00am ET on a Saturday
+    decision = _evaluate(engine, now=saturday_midday)
+    assert not decision.approved
+    assert "core trading hours" in decision.reason.lower()
+
+
+def test_approves_new_entries_during_core_hours():
+    engine = RiskEngine()
+    decision = _evaluate(engine, now=_CORE_HOURS_NOW)
+    assert decision.approved
+
+
+def test_core_hours_gate_has_no_action_type_carve_out_of_its_own():
+    # evaluate() itself doesn't distinguish entries from exits -- calling it
+    # directly with an EXIT signal outside core hours still rejects, exactly
+    # like an entry would. The reason a real stop-loss or the end-of-core-
+    # hours auto-flatten in TradingLoop is never blocked by this gate is
+    # architectural, not a carve-out in evaluate() itself:
+    # OrderManager.submit_signal never routes EXIT/SCALE_OUT signals through
+    # evaluate() at all (see its docstring), so this rejection path is
+    # simply never reached for a real exit. This test exists to make that
+    # division of responsibility explicit -- don't "fix" this by adding an
+    # action-type check inside evaluate() itself.
+    from webull_bot.enums import SignalAction
+
+    engine = RiskEngine()
+    exit_signal = _signal(action=SignalAction.EXIT)
+    after_close = datetime(2026, 8, 10, 20, 30, 0)
+    decision = engine.evaluate(
+        exit_signal,
+        account_equity=10_000,
+        account_buying_power=10_000,
+        open_positions=[],
+        snapshot=_snapshot(),
+        now=after_close,
+    )
+    assert not decision.approved
+    assert "core trading hours" in decision.reason.lower()
 
 
 def test_rejects_when_daily_loss_limit_hit():
@@ -196,7 +265,7 @@ def test_record_entry_order_failed_only_frees_the_affected_ticker():
 
 def test_cooldown_blocks_reentry_after_loss():
     engine = RiskEngine(RiskConfig(cooldown_minutes_after_loss=15, max_trades_per_ticker_per_day=10))
-    now = datetime.utcnow()
+    now = _CORE_HOURS_NOW
     engine.record_trade_closed("ABCD", pnl=-10.0, now=now)
     decision = _evaluate(engine, now=now + timedelta(minutes=5))
     assert not decision.approved

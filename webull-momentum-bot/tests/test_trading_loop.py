@@ -57,8 +57,24 @@ def _snapshot(t, last_price, high_of_day, cumulative_volume, bid, ask, vwap) -> 
     )
 
 
+# 15:00 UTC = 11:00am US/Eastern in August (EDT, UTC-4) on a real Monday --
+# fixed, deterministic, and safely inside core trading hours. Used in place
+# of datetime.utcnow() wherever a test feeds `now` into candidate/position
+# processing (run_once, _process_all_candidates): RiskEngine.evaluate's
+# core-hours gate and TradingLoop's end-of-core-hours auto-flatten both key
+# off that `now`, so leaving it as the real wall clock would make many of
+# this file's assertions about entries/positions depend on what time of day
+# (and day of week) the suite happens to run.
+_IN_HOURS_NOW = datetime(2026, 8, 10, 15, 0, 0)
+
+
 def _build_bars() -> list[MarketSnapshot]:
-    t0 = datetime(2026, 1, 5, 9, 31, 0)
+    # 14:31 UTC = 9:31am US/Eastern in January (EST, UTC-5) -- a real,
+    # deterministic weekday (Monday) time within core trading hours, needed
+    # now that RiskEngine.evaluate's core-hours gate is threaded through
+    # from this bar's own timestamp (via TradingLoop's `now`) rather than
+    # silently falling back to the real wall clock at test-run time.
+    t0 = datetime(2026, 1, 5, 14, 31, 0)
     return [
         _snapshot(t0, 5.00, 5.05, 150_000, 4.99, 5.01, 5.00),
         _snapshot(t0 + timedelta(minutes=1), 5.10, 5.10, 250_000, 5.09, 5.11, 5.05),
@@ -239,7 +255,7 @@ def test_entry_stays_triggered_while_order_pending_then_enters_on_fill():
     broker = _FakeBroker(fills_after_polls=2)
     loop, candidate = _armed_candidate_setup(broker)
 
-    snapshot = _snapshot(datetime.utcnow(), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     from webull_bot.models import Signal
     from webull_bot.enums import SignalAction
     from webull_bot.state_machine import transition
@@ -275,6 +291,55 @@ def test_entry_stays_triggered_while_order_pending_then_enters_on_fill():
     assert order_updates[-1].status.value == "filled"
     assert candidate.state.value == "managing"
     assert "TEST" in loop._positions
+
+
+def test_confirm_entry_filled_still_tracks_position_when_broker_get_positions_raises():
+    # Real production incident: WebullBrokerClient.get_positions() raised
+    # (a real, populated get_account_position() response hit a field-name
+    # mismatch never verified against a live row -- see that method's
+    # docstring) right as an entry order filled. The old code only caught
+    # StopIteration ("no matching position") around this lookup, so any
+    # other exception propagated out of _confirm_entry_filled *before*
+    # self._positions[symbol] was ever assigned -- the fill happened at the
+    # broker, but the bot never recorded it: no stop-loss management, not
+    # shown as an open position anywhere, buying power silently consumed.
+    # This proves the fallback now covers ANY exception, not just "no match".
+    class _BrokerPositionsBlowUp(_FakeBroker):
+        # First call is the risk engine's own open_positions lookup inside
+        # order_manager.submit_signal (must succeed, or the order is never
+        # even placed) -- only the SECOND call, _confirm_entry_filled's own
+        # post-fill reconciliation lookup, simulates the real incident.
+        _get_positions_calls: int = 0
+
+        def get_positions(self):
+            self._get_positions_calls += 1
+            if self._get_positions_calls == 1:
+                return []
+            raise KeyError("simulated _position_from_dict field-name mismatch")
+
+    broker = _BrokerPositionsBlowUp(fills_after_polls=1)
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.models import Signal
+    from webull_bot.enums import SignalAction, CandidateState
+    from webull_bot.state_machine import transition
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    transition(candidate, CandidateState.TRIGGERED)
+    signal = Signal(
+        symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
+        strategy_name="test", strategy_version="v1", reference_price=5.20, suggested_stop=5.00,
+    )
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+    loop._poll_pending_entry(candidate, snapshot.timestamp)  # fills_after_polls=1: fills on this poll
+
+    # Despite get_positions() raising, the fill must still be tracked
+    # locally (falling back to the signal's reference price / order
+    # quantity) and the candidate must reach MANAGING, not be left
+    # stranded in TRIGGERED or silently reverted to ARMED.
+    assert candidate.state.value == "managing"
+    assert "TEST" in loop._positions
+    assert loop._positions["TEST"].avg_entry_price == 5.20
     assert loop._positions["TEST"].avg_entry_price == 5.20  # from broker.get_positions()
 
 
@@ -304,7 +369,7 @@ def test_submit_entry_rolls_back_ticker_count_on_immediate_broker_rejection():
 
     broker = _ImmediatelyRejectingBroker()
     loop, candidate = _armed_candidate_setup(broker)
-    snapshot = _snapshot(datetime.utcnow(), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     signal = _trigger_and_build_signal(candidate, snapshot)
 
     loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
@@ -325,7 +390,7 @@ def test_poll_pending_entry_rolls_back_ticker_count_when_later_rejected():
 
     broker = _LaterRejectingBroker()
     loop, candidate = _armed_candidate_setup(broker)
-    snapshot = _snapshot(datetime.utcnow(), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     signal = _trigger_and_build_signal(candidate, snapshot)
 
     loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
@@ -351,7 +416,7 @@ def test_repeated_broker_rejections_never_exhaust_the_ticker_budget():
 
     broker = _AlwaysRejectingBroker()
     loop, candidate = _armed_candidate_setup(broker)
-    snapshot = _snapshot(datetime.utcnow(), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
 
     for _ in range(2):
         signal = _trigger_and_build_signal(candidate, snapshot)
@@ -384,7 +449,7 @@ def test_submit_entry_reverts_to_armed_on_unexpected_broker_exception():
 
     broker = _BrokenBroker()
     loop, candidate = _armed_candidate_setup(broker)
-    snapshot = _snapshot(datetime.utcnow(), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     signal = _trigger_and_build_signal(candidate, snapshot)
 
     loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
@@ -585,7 +650,7 @@ def test_run_once_stays_single_threaded_and_synchronous():
     broker.connect()
     loop = _build_loop(broker)
     threads_before = threading.active_count()
-    loop.run_once(now=datetime.utcnow())
+    loop.run_once(now=_IN_HOURS_NOW)
     assert threading.active_count() == threads_before
 
 
@@ -872,7 +937,7 @@ def test_engage_kill_switch_and_flatten_closes_open_position_on_next_tick():
     loop.engage_kill_switch_and_flatten("test halt")
     assert "TEST" in loop._positions  # not closed synchronously by the call itself
 
-    loop._process_all_candidates(datetime.utcnow())
+    loop._process_all_candidates(_IN_HOURS_NOW)
 
     assert "TEST" not in loop._positions
     assert candidate.state.value == "cooldown"
@@ -888,7 +953,7 @@ def test_engage_kill_switch_and_flatten_closes_multiple_positions():
     _managing_candidate_with_position(loop, broker, symbol="BBB", price=20.0)
 
     loop.engage_kill_switch_and_flatten("test halt")
-    loop._process_all_candidates(datetime.utcnow())
+    loop._process_all_candidates(_IN_HOURS_NOW)
 
     assert loop._positions == {}
     assert len(loop._trades) == 2
@@ -903,7 +968,7 @@ def test_disengage_kill_switch_does_not_touch_open_positions():
     loop.risk_engine.engage_kill_switch("test halt")
 
     loop.risk_engine.release_kill_switch()
-    loop._process_all_candidates(datetime.utcnow())
+    loop._process_all_candidates(_IN_HOURS_NOW)
 
     assert loop.risk_engine.kill_switch_active is False
     assert "TEST" in loop._positions  # untouched -- disengaging never flattens
@@ -931,7 +996,7 @@ def test_kill_switch_flatten_leaves_pending_when_broker_does_not_fill_synchronou
     )
 
     loop.engage_kill_switch_and_flatten("test halt")
-    loop._process_all_candidates(datetime.utcnow())
+    loop._process_all_candidates(_IN_HOURS_NOW)
 
     # _FakeBroker returns SUBMITTED first -- the close is pending, not
     # finalized yet, and the position is still tracked as open.
@@ -942,7 +1007,7 @@ def test_kill_switch_flatten_leaves_pending_when_broker_does_not_fill_synchronou
     # The very next tick's normal _manage_position path (not any kill-switch-
     # specific code) picks up and finalizes the pending exit, same as any
     # other exit order.
-    loop._process_all_candidates(datetime.utcnow())
+    loop._process_all_candidates(_IN_HOURS_NOW)
     assert "TEST" not in loop._pending_exit_orders
     assert "TEST" not in loop._positions
     assert candidate.state.value == "cooldown"
@@ -968,11 +1033,73 @@ def test_kill_switch_flatten_skips_symbol_on_snapshot_failure_without_crashing()
     )
 
     loop.engage_kill_switch_and_flatten("test halt")
-    loop._process_all_candidates(datetime.utcnow())  # must not raise
+    loop._process_all_candidates(_IN_HOURS_NOW)  # must not raise
 
     # The good symbol still closes even though the other one failed.
     assert "TEST" not in loop._positions
     assert "NOSNAPSHOT" in loop._positions
+
+
+# -- end-of-core-hours auto-flatten (distinct from the kill switch: no
+# risk_engine.kill_switch_active flip, just closes anything still open once
+# the regular 9:30am-4:00pm ET session ends) -------------------------------
+
+_AFTER_CLOSE_NOW = datetime(2026, 8, 10, 21, 0, 0)  # 5:00pm ET, well after the 4:00pm close
+
+
+def test_open_position_is_untouched_during_core_hours():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert "TEST" in loop._positions
+    assert loop.risk_engine.kill_switch_active is False
+
+
+def test_open_position_is_auto_flattened_after_core_hours_close():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+
+    loop._process_all_candidates(_AFTER_CLOSE_NOW)
+
+    assert "TEST" not in loop._positions
+    assert len(loop._trades) == 1
+    assert loop._trades[0].exit_reason == ExitReason.END_OF_CORE_HOURS
+    # Unlike the kill switch, this never halts future trading -- it's a
+    # one-time end-of-day flatten, not a sticky halt a human must clear.
+    assert loop.risk_engine.kill_switch_active is False
+
+
+def test_auto_flatten_closes_multiple_positions_after_close():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker, symbol="AAA", price=10.0)
+    _managing_candidate_with_position(loop, broker, symbol="BBB", price=20.0)
+
+    loop._process_all_candidates(_AFTER_CLOSE_NOW)
+
+    assert loop._positions == {}
+    assert {t.symbol for t in loop._trades} == {"AAA", "BBB"}
+    assert all(t.exit_reason == ExitReason.END_OF_CORE_HOURS for t in loop._trades)
+
+
+def test_auto_flatten_is_a_no_op_once_no_positions_remain():
+    # Cheap to call every tick after the close: once _positions is empty,
+    # this is just an empty loop, not a repeated no-op broker call.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+
+    loop._process_all_candidates(_AFTER_CLOSE_NOW)  # nothing open; must not raise
+
+    assert loop._positions == {}
+    assert loop._trades == []
 
 
 # -- scan_and_add_candidate (on-demand single-ticker scan, backs the
@@ -1105,7 +1232,7 @@ def test_process_all_candidates_uses_one_batched_call_for_multiple_candidates():
     broker = _BatchAwareBroker()
     loop = _two_candidate_loop(broker)
 
-    loop._process_all_candidates(datetime.utcnow())
+    loop._process_all_candidates(_IN_HOURS_NOW)
 
     assert broker.batch_calls == [["ONE", "TWO"]]
     assert broker.individual_calls == []  # neither candidate fell back to its own get_snapshot()
@@ -1119,7 +1246,7 @@ def test_process_all_candidates_falls_back_without_get_snapshots():
     broker = _FakeBroker()
     loop = _two_candidate_loop(broker)
 
-    loop._process_all_candidates(datetime.utcnow())
+    loop._process_all_candidates(_IN_HOURS_NOW)
 
     assert loop.candidates["ONE"].last_price == 5.20
     assert loop.candidates["TWO"].last_price == 5.20
@@ -1134,7 +1261,7 @@ def test_process_all_candidates_falls_back_when_batch_call_raises():
     broker = _FlakyBatchBroker()
     loop = _two_candidate_loop(broker)
 
-    loop._process_all_candidates(datetime.utcnow())
+    loop._process_all_candidates(_IN_HOURS_NOW)
 
     # The batch call was attempted (and failed), but candidates still got
     # processed via the per-candidate get_snapshot() fallback.
@@ -1156,6 +1283,6 @@ def test_process_all_candidates_skips_rejected_and_cooldown_symbols_in_batch():
     cooldown_candidate.last_updated_at = datetime.utcnow()
     loop.candidates["THREE"] = cooldown_candidate
 
-    loop._process_all_candidates(datetime.utcnow())
+    loop._process_all_candidates(_IN_HOURS_NOW)
 
     assert broker.batch_calls == [["ONE", "TWO"]]  # THREE (COOLDOWN) excluded

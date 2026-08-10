@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from ..enums import RiskEventType
+from ..market_hours import is_within_core_trading_hours
 from ..models import MarketSnapshot, Position, RiskDecision, RiskEvent, Signal
 
 
@@ -150,6 +151,24 @@ class RiskEngine:
 
         if self.kill_switch_active:
             return reject(RiskEventType.KILL_SWITCH_ENGAGED, "Kill switch is active; no new trades.")
+
+        # New entries only, by design -- OrderManager.submit_signal never
+        # routes EXIT/SCALE_OUT signals through evaluate() at all (see its
+        # docstring), so this can't block closing an existing position. This
+        # is a hard, unconditional gate (no config flag) fixing a real
+        # production case: a signal triggered and filled during core hours
+        # itself, but with no application-level check confirming that before
+        # ever attempting the order, a rejected/queued out-of-hours fill was
+        # only ever caught after the fact (or not at all) rather than
+        # prevented up front. Deliberately checked against `now` (the
+        # engine's own clock parameter, defaulted to datetime.utcnow() above)
+        # rather than the snapshot's timestamp, so a stale/replayed snapshot
+        # can't be used to slip a signal through outside real market hours.
+        if not is_within_core_trading_hours(now):
+            return reject(
+                RiskEventType.OUTSIDE_CORE_TRADING_HOURS,
+                "Outside core trading hours (9:30am-4:00pm ET, Mon-Fri); new entries are not permitted.",
+            )
 
         daily_loss_limit = -abs(self.config.max_daily_loss_pct) / 100.0 * account_equity
         if self._daily.realized_pnl <= daily_loss_limit:

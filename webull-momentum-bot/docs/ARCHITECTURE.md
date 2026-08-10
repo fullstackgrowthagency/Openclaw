@@ -889,6 +889,36 @@ button (top right -- see "Dashboard" below) via `GET`/`POST
 /api/risk-settings`, which mutate the running `RiskEngine.config` in place;
 changes apply to the very next `Signal` evaluated, no restart needed.
 
+**Core trading hours gate** (checked immediately after the kill switch, before
+any of the sizing math below, and not configurable): `evaluate()` refuses
+every entry signal outside 9:30am-4:00pm ET, Monday-Friday
+(`market_hours.is_within_core_trading_hours`), rejecting with
+`RiskEventType.OUTSIDE_CORE_TRADING_HOURS`. Added after a production report
+of trades filling *during* core hours whose resulting positions then went
+untracked (see "Position tracking can be lost on a broker-side fill
+reconciliation failure" below) -- investigating that report surfaced that
+there was no explicit application-level guarantee at all that entries only
+happen in core hours; this closes that gap outright rather than leaving it
+to whatever Webull itself does with an out-of-hours order (see the
+`support_trading_session` note in "Webull integration"). This only ever
+applies to entries: `OrderManager.submit_signal` never routes
+`EXIT`/`SCALE_OUT` signals through `evaluate()` at all (see its own
+docstring), so a stop-loss or the end-of-core-hours auto-flatten (see
+"Position management" below) is never blocked by this gate -- `evaluate()`
+itself has no action-type carve-out, it's simply never called for exits.
+
+`now` matters here as much as it does for the daily-rollover/cooldown logic
+already in this method, so it's threaded through properly rather than left
+to default: `OrderManager.submit_signal` now accepts an optional `now` and
+forwards it to `evaluate()`. `TradingLoop._submit_entry` passes its own
+per-tick `now` (so the live gate checks the real tick time); `backtest/engine.py`
+passes `snapshot.timestamp` (the *simulated* bar's time, not the real
+wall-clock time the backtest happens to be run at -- a backtest run at 2am
+replaying a 10am historical bar must gate against 10am, not 2am). Leaving
+`now` as `None` (every call site's implicit behavior before this) still
+falls back to `evaluate()`'s own `datetime.utcnow()`, which is what a
+caller with no natural notion of simulated time wants.
+
 **1. Minimum reward:risk ratio** (`min_risk_reward_ratio`, default 2.0) --
 checked first, before any sizing math. If a signal specifies a
 `suggested_target`, the distance from entry to target must be at least
@@ -1002,6 +1032,62 @@ rolls back the risk-engine counters via `record_entry_order_failed` (since
 `ARMED` immediately -- instead of relying on `_poll_pending_entry`'s
 fallback to eventually clean up a state it was never designed to be the
 primary path for.
+
+**Position tracking can be lost on a broker-side fill reconciliation
+failure.** `TradingLoop._confirm_entry_filled` is the *only* place a filled
+entry order becomes a locally-tracked position (`self._positions`), and by
+the time it runs, `_poll_pending_entry` has already popped the symbol out
+of `_entry_signals`/`_pending_entry_orders` -- so if anything inside it
+raises before `self._positions[symbol]` is assigned, the position that
+just filled at the broker becomes **permanently invisible to the bot**: no
+stop-loss/target management, not shown as an open position anywhere,
+buying power silently consumed with nothing to show for it, and the
+candidate reverts to `ARMED` on the very next tick via
+`_poll_pending_entry`'s `pending is None` fallback ("no pending order
+found for TRIGGERED candidate") since its pending-order record is already
+gone.
+
+This happened in production: a real, populated `get_account_position()`
+response hit a field-name mismatch inside `_position_from_dict` --
+verified only against an *empty* response during integration (see "Webull
+integration" below), the field names were always a best-effort guess --
+which raised a `KeyError`, and the old code here only caught
+`StopIteration` ("no matching position found") around this lookup, not
+that. Two fixes, at two different layers, because either alone leaves a
+real gap:
+
+1. **`_confirm_entry_filled` now catches any `Exception`** from the
+   `broker.get_positions()` reconciliation lookup, not just
+   `StopIteration`. That lookup is strictly a nice-to-have (a more accurate
+   `avg_entry_price`/`quantity` than the signal/order already give us) --
+   it must never be allowed to prevent local tracking from being recorded.
+   Any failure now falls back to `signal.reference_price`/`order.quantity`
+   exactly like the "no matching position" case always did, and
+   `self._positions[symbol]` plus the `ENTERED`/`MANAGING` transition
+   always happen regardless.
+2. **`WebullBrokerClient.get_positions()` no longer lets one bad row take
+   down every position at once.** Before this, a single row
+   `_position_from_dict` couldn't parse raised straight out of
+   `get_positions()` entirely -- which doesn't just affect fill
+   reconciliation above, it's also `RiskEngine.evaluate`'s own
+   `open_positions` lookup inside `OrderManager.submit_signal`, so one
+   unparseable row could have blocked *every future entry* the moment it
+   appeared, for every symbol, not just the one it belonged to.
+   `get_positions()` now parses each row in its own `try/except`, logs the
+   raw row (`logger.exception(..., "raw row: %r", row)`) and skips just
+   that one on failure, keeping every other real position visible.
+   `_position_from_dict`'s `symbol` field also gained the same
+   multi-key-fallback treatment every other field already had
+   (`raw.get("symbol") or raw.get("ticker_symbol") or
+   raw.get("instrument_symbol")`) instead of a bare `raw["symbol"]` --
+   the exact field name is still unverified against a real populated row
+   (unchanged from before), but a wrong guess now degrades to "this one
+   row is skipped and logged" instead of "every position vanishes."
+
+The logged raw row from fix #2 is exactly the data needed to correct
+`_position_from_dict`'s field-name guesses the next time this actually
+fires against a real, non-empty account -- check the logs for
+`"Failed to parse a position row"` after any live session with real fills.
 
 ## Position management (exits)
 
@@ -1488,30 +1574,39 @@ Four non-obvious things worth knowing if you're debugging this client:
    checks `get_raw_bars`' `trading_sessions` parameter specifically, not
    this one, but the same "does the live response actually confirm the
    inferred field/value" question applies here.
-4. **`support_trading_session` must be `"ALL"`, not `"CORE"`, or orders
-   placed outside 9:30am-4:00pm ET sit queued forever.** `_order_payload()`
-   (used for both entries and exits) previously hardcoded this field to
-   `"CORE"` with no comment explaining the choice -- Webull's own docs
+4. **`support_trading_session` is `"ALL"`, not `"CORE"`, so an exit order
+   fired right at (or a moment after) the 4:00pm ET close can still
+   execute.** `_order_payload()` (used for both entries and exits)
+   previously hardcoded this field to `"CORE"` with no comment explaining
+   the choice. First diagnosis (later corrected by direct user
+   confirmation) guessed this alone explained a report of buying power
+   being reserved with no resulting position; the user then confirmed the
+   actual trigger happened *during* core hours, which redirected the real
+   fix to the position-tracking bug below and to the new core-hours entry
+   gate instead. `"ALL"` is kept anyway, but for a narrower, still-real
+   reason: `runtime/trading_loop.py`'s end-of-core-hours auto-flatten (see
+   its own doc section) submits its closing MARKET order right at or just
+   after the 4:00pm boundary -- `market_hours.is_after_core_trading_hours`
+   is true starting exactly at 4:00pm -- and a `"CORE"`-flagged order
+   placed at that exact instant risks the same "accepted but won't execute
+   until next session" behavior this field was originally changed to
+   avoid. New entries never need this leniency at all: `RiskEngine.evaluate`
+   now unconditionally refuses any entry signal outside core hours (see
+   below), so an entry order is never even *attempted* outside that window
+   regardless of what this field says. Webull's docs
    (`developer.webull.com/apis/docs/trade-api/stock/`) list three values:
    `"CORE"` (regular session only), `"ALL"` (regular + pre-market +
    after-hours), and `"NIGHT"` (a separate overnight session, out of scope
    here for the same reason `overnight_required`/`ovn_price`/`ovn_volume`
-   are above -- only pre/after-market was asked for). The production
-   symptom this caused: a candidate would trigger and the dashboard would
-   show buying power reserved against it, but no fill and no open position
-   -- because Webull accepted the order but wouldn't execute a CORE-flagged
-   order until the next regular session opened, and by then the momentum
-   (and often the trigger conditions) were long gone. Confirmed via
-   Webull's official documentation that `"ALL"` is the correct value to
-   request pre/after-hours eligibility and that market orders carry no
-   documented restriction against it (trailing-stop and algorithmic orders
-   like TWAP/VWAP/POV remain core-hours-only regardless of this field) --
-   *not yet confirmed* by an actual live order placed with `"ALL"` in the
-   sandbox during an extended-hours window, since every prior live order
+   are above). Confirmed via Webull's official documentation that market
+   orders carry no documented restriction against `"ALL"` (trailing-stop
+   and algorithmic orders like TWAP/VWAP/POV remain core-hours-only
+   regardless of this field) -- *not yet confirmed* by an actual live order
+   placed with `"ALL"` right at the close, since every prior live order
    test happened on a weekend market close (see the module docstring note
-   above). If a live extended-hours order still doesn't fill after this
-   change, re-check whether Webull silently ignores `"ALL"` for the
-   specific order type/symbol rather than assuming the field name or
+   above). If the end-of-day auto-flatten's order still doesn't fill right
+   at the close after this change, re-check whether Webull silently ignores
+   `"ALL"` at that exact boundary rather than assuming the field name or
    values are wrong.
 
 Streaming (`subscribe_quotes`) intentionally raises `NotImplementedError`:
@@ -1590,3 +1685,38 @@ regardless.
 A `get_snapshot` failure for one symbol during a flatten is logged and
 skipped, not fatal to the rest -- one bad quote during an emergency stop
 shouldn't leave every other position uncautiously open.
+
+**End-of-core-hours auto-flatten** (distinct from the kill switch above,
+added at the same time as the core trading hours entry gate in "Risk
+sizing"): `_process_all_candidates` checks, every tick, whether
+`market_hours.is_after_core_trading_hours(now)` is true and
+`self._positions` is non-empty; if so it calls the exact same
+`_close_all_positions_now` the kill switch uses, just with
+`exit_reason=ExitReason.END_OF_CORE_HOURS` instead of the default
+`RISK_KILL_SWITCH` (`_close_all_positions_now` now takes that as a
+parameter for this reason). Two things make this deliberately *not* just
+"call `engage_kill_switch_and_flatten` on a timer":
+
+1. It never sets `risk_engine.kill_switch_active`. The kill switch is a
+   sticky, manual halt a human clears from the dashboard; forcing every
+   user to re-enable trading by hand every single morning would turn a
+   routine end-of-day flatten into a recurring manual chore, and isn't
+   what "close positions at the end of the day" was asked for. New entries
+   are already independently blocked outside core hours by `RiskEngine.evaluate`'s
+   own gate (see "Risk sizing"), so nothing else needs to hold that door
+   shut overnight.
+2. It's not a one-shot flag consumed once, unlike the kill-switch's
+   `_close_all_positions_requested`. It's a plain clock check re-evaluated
+   every tick, which is deliberately cheap to leave running forever: once
+   the day's positions are actually flattened, `self._positions` is empty
+   and the `if self._positions and ...` guard short-circuits before ever
+   touching the broker again, all the way until the next position opens
+   the following session.
+
+Ordering matters and is intentional: this check runs *after* the
+kill-switch-requested block in `_process_all_candidates`, so if both are
+somehow true on the same tick (kill switch engaged AND after hours), the
+kill-switch flatten runs first, empties `self._positions`, and the
+auto-flatten check that follows finds nothing left to do -- a closed
+position is never attributed to the wrong `ExitReason` by a second flatten
+attempt re-processing it.

@@ -57,6 +57,7 @@ from ..enums import CandidateState, ExitReason, OrderStatus, SignalAction
 from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
+from ..market_hours import is_after_core_trading_hours
 from ..models import Candidate, MarketSnapshot, MomentumEvent, MomentumScore, Order, Position, Signal, Trade
 from ..position.position_manager import PositionManager
 from ..risk.risk_engine import RiskEngine
@@ -227,18 +228,22 @@ class TradingLoop:
         self._close_all_positions_reason = reason
         self._close_all_positions_requested = True
 
-    def _close_all_positions_now(self, reason: str, now: datetime) -> None:
+    def _close_all_positions_now(
+        self, reason: str, now: datetime, exit_reason: ExitReason = ExitReason.RISK_KILL_SWITCH
+    ) -> None:
         """Force-closes every open position immediately at market,
         regardless of PositionManager's own exit conditions -- the kill
-        switch's "flatten everything" action. Runs exclusively on the main
-        processing thread (see _process_all_candidates), so this shares
-        the exact same submit -> fill-or-pending -> finalize path
-        _manage_position uses (_dispatch_exit_finalization,
-        _pending_exit_orders) with no extra cross-thread coordination
-        needed: a position that doesn't fill synchronously is left in
-        _pending_exit_orders and picked up by the very next tick's normal
-        _manage_position/_poll_pending_exit call for that symbol, same as
-        any other exit.
+        switch's "flatten everything" action, also reused as-is by the
+        end-of-core-hours auto-flatten (see _process_all_candidates), which
+        passes exit_reason=ExitReason.END_OF_CORE_HOURS instead of the
+        default. Runs exclusively on the main processing thread (see
+        _process_all_candidates), so this shares the exact same submit ->
+        fill-or-pending -> finalize path _manage_position uses
+        (_dispatch_exit_finalization, _pending_exit_orders) with no extra
+        cross-thread coordination needed: a position that doesn't fill
+        synchronously is left in _pending_exit_orders and picked up by the
+        very next tick's normal _manage_position/_poll_pending_exit call for
+        that symbol, same as any other exit.
 
         A get_snapshot or order failure for one symbol is logged and
         skipped rather than aborting the whole flatten -- one bad quote
@@ -251,7 +256,7 @@ class TradingLoop:
             try:
                 snapshot = self.broker.get_snapshot(symbol)
             except Exception:
-                logger.warning("get_snapshot failed for %s while force-closing for kill switch.", symbol, exc_info=True)
+                logger.warning("get_snapshot failed for %s while force-closing (%s).", symbol, exit_reason.value, exc_info=True)
                 continue
 
             exit_signal = Signal(
@@ -259,14 +264,14 @@ class TradingLoop:
                 action=SignalAction.EXIT,
                 generated_at=snapshot.timestamp,
                 strategy_name=position.strategy_name,
-                strategy_version="kill_switch",
+                strategy_version=exit_reason.value,
                 reference_price=snapshot.last_price,
-                metadata={"exit_reason": ExitReason.RISK_KILL_SWITCH.value, "reason": reason},
+                metadata={"exit_reason": exit_reason.value, "reason": reason},
             )
             try:
                 order = self.order_manager.submit_signal(exit_signal, snapshot=snapshot, position=position)
             except OrderRejected:
-                logger.exception("Unexpected OrderRejected while force-closing %s for kill switch.", symbol)
+                logger.exception("Unexpected OrderRejected while force-closing %s (%s).", symbol, exit_reason.value)
                 continue
             self._notify_order_update(order)
 
@@ -530,7 +535,7 @@ class TradingLoop:
         momentum_event: Optional[MomentumEvent] = None,
     ) -> None:
         try:
-            order = self.order_manager.submit_signal(signal, snapshot=snapshot)
+            order = self.order_manager.submit_signal(signal, snapshot=snapshot, now=now)
         except OrderRejected as exc:
             transition(candidate, CandidateState.ARMED, now=now, reason=f"risk engine rejected entry: {exc.decision.reason}")
             return
@@ -620,6 +625,26 @@ class TradingLoop:
         # else still pending: leave as TRIGGERED, check again next tick
 
     def _confirm_entry_filled(self, candidate: Candidate, signal: Signal, order: Order, now: datetime) -> None:
+        # This method is the ONLY place a filled entry order becomes a
+        # locally-tracked position (self._positions), and it's called after
+        # _poll_pending_entry has already popped candidate.symbol out of
+        # _entry_signals/_pending_entry_orders -- so if anything below raises
+        # before self._positions[candidate.symbol] is assigned, the position
+        # that just filled at the broker becomes permanently invisible to
+        # this bot: no stop-loss/target management, not shown as an open
+        # position anywhere, buying power silently consumed with nothing to
+        # show for it. This happened in production: broker.get_positions()
+        # raised (a real, populated get_account_position() response hit a
+        # field-name mismatch in _position_from_dict -- see that method's
+        # docstring, never verified against a non-empty response) partway
+        # through this method, and the `except StopIteration` here didn't
+        # catch it, so the position was filled at Webull but never entered
+        # self._positions at all. The broker lookup below is strictly a
+        # nice-to-have (a more accurate avg_entry_price/quantity than the
+        # signal/order already give us) -- it must never be allowed to
+        # prevent local tracking from being recorded, so ANY failure here
+        # (not just "no matching position") falls back to the signal/order's
+        # own values instead.
         avg_entry_price = signal.reference_price
         quantity = order.quantity
         try:
@@ -631,6 +656,14 @@ class TradingLoop:
                 "No broker position found for %s immediately after fill confirmation; "
                 "using signal reference price %.4f as avg_entry_price.",
                 candidate.symbol, avg_entry_price,
+            )
+        except Exception:
+            logger.exception(
+                "broker.get_positions() failed while confirming the fill for %s; "
+                "using signal reference price %.4f / order quantity %s instead of "
+                "the broker's own position -- local position tracking still "
+                "proceeds regardless so this fill is never silently lost.",
+                candidate.symbol, avg_entry_price, quantity,
             )
 
         self._positions[candidate.symbol] = Position(
@@ -820,6 +853,29 @@ class TradingLoop:
                 self._close_all_positions_now(self._close_all_positions_reason, now)
             except Exception:
                 logger.exception("Unhandled error force-closing all positions for kill switch.")
+
+        # End-of-core-hours auto-flatten: unlike the kill switch above, this
+        # doesn't set risk_engine.kill_switch_active (that's a manual,
+        # sticky halt meant to require a human to clear it -- see the
+        # dashboard's kill-switch toggle) and isn't a one-shot flag either.
+        # It just checks the clock every tick and calls the same
+        # _close_all_positions_now this method already uses for the kill
+        # switch, reusing its exact submit/pending/finalize path. Cheap to
+        # call on every tick once the session's closed: RiskEngine.evaluate
+        # already independently refuses any *new* entry outside core hours
+        # (see market_hours.is_within_core_trading_hours there), so
+        # self._positions only ever has something in it here if a position
+        # was still open right at the close -- after the first successful
+        # flatten each day, this is a no-op loop over an empty dict.
+        if self._positions and is_after_core_trading_hours(now):
+            try:
+                self._close_all_positions_now(
+                    "Auto-flattening open position(s) at end of core trading hours.",
+                    now,
+                    exit_reason=ExitReason.END_OF_CORE_HOURS,
+                )
+            except Exception:
+                logger.exception("Unhandled error auto-flattening positions at end of core trading hours.")
 
         candidates = self._snapshot_candidates()
 
