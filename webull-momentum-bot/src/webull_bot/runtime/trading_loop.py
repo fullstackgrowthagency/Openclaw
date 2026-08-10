@@ -53,7 +53,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from ..collection.event_recorder import MomentumEventTracker
-from ..enums import CandidateState, ExitReason, OrderStatus, SignalAction
+from ..enums import CandidateState, ExitReason, OrderSide, OrderStatus, SignalAction
 from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
@@ -64,7 +64,7 @@ from ..risk.risk_engine import RiskEngine
 from ..scanner.broad_scanner import BroadScanner
 from ..scanner.candidate_watcher import CandidateWatcher
 from ..scanner.trigger_engine import TriggerEngine
-from ..state_machine import transition
+from ..state_machine import new_candidate, transition
 
 logger = logging.getLogger(__name__)
 
@@ -819,6 +819,88 @@ class TradingLoop:
     def get_open_positions(self) -> dict[str, Position]:
         return dict(self._positions)
 
+    # -- startup reconciliation --------------------------------------------
+
+    def reconcile_positions_from_broker(self, now: Optional[datetime] = None) -> None:
+        """Adopts any position the broker reports that this process doesn't
+        already know about. Called once at the start of run_forever
+        (production's real entrypoint) specifically to close a gap
+        distinct from, but structurally identical in symptom to, the
+        get_positions()-parsing-failure incident documented in
+        _confirm_entry_filled: self._positions is a plain in-memory dict
+        with no persistence or reconciliation of its own, so EVERY process
+        restart -- a deploy, a crash, a VPS reboot -- previously wiped
+        tracking for any position that was genuinely open and correctly
+        tracked a moment before, with nothing to notice or recover it. The
+        position keeps existing at the broker; the bot just goes blind to
+        it, exactly like the original incident, until this existed.
+
+        An adopted position has no original strategy Signal to pull
+        stop_price/target_price from (that only exists at the moment a
+        Signal fires, and this position may have opened in a previous
+        process's lifetime), so it can't be given the same kind of
+        risk-accurate, entry-to-stop budgeted stop a real signal produces.
+        Deliberately conservative instead: `risk_engine.config.
+        risk_per_trade_pct` as a straight %-below-current-price line (long)
+        or %-above-current-price line (short) for the stop, no target at
+        all (rides on the breakeven/trailing-stop rules the same as any
+        position that's already had its target hit -- see
+        PositionManager). The point is "never left completely
+        unprotected," not "as precise as a real strategy's stop.\""""
+        now = now or datetime.utcnow()
+        try:
+            broker_positions = self.broker.get_positions()
+        except Exception:
+            logger.exception("reconcile_positions_from_broker: get_positions() failed; skipping this run.")
+            return
+
+        with self._candidates_lock:
+            existing_candidates = dict(self.candidates)
+
+        for position in broker_positions:
+            symbol = position.symbol
+            if symbol in self._positions:
+                continue  # already tracked this process's own lifetime -- nothing to adopt
+
+            try:
+                snapshot = self.broker.get_snapshot(symbol)
+            except Exception:
+                logger.warning(
+                    "reconcile_positions_from_broker: get_snapshot failed for %s; skipping adoption this run.",
+                    symbol, exc_info=True,
+                )
+                continue
+
+            stop_pct = self.risk_engine.config.risk_per_trade_pct / 100.0
+            if position.side == OrderSide.SELL_SHORT:
+                position.stop_price = snapshot.last_price * (1 + stop_pct)
+            else:
+                position.stop_price = snapshot.last_price * (1 - stop_pct)
+            position.target_price = None
+            position.strategy_name = "reconciled_at_startup"
+            self._positions[symbol] = position
+
+            candidate = existing_candidates.get(symbol)
+            if candidate is None:
+                candidate = new_candidate(symbol, now=now)
+                for state in (
+                    CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
+                    CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING,
+                ):
+                    transition(candidate, state, now=now)
+                with self._candidates_lock:
+                    self.candidates[symbol] = candidate
+            elif candidate.state not in (CandidateState.ENTERED, CandidateState.MANAGING):
+                transition(candidate, CandidateState.MANAGING, now=now, reason="adopted existing broker position at startup")
+
+            logger.warning(
+                "Adopted untracked broker position at startup: %s qty=%s side=%s synthetic "
+                "stop_price=%.4f (%.1f%% from current price %.4f) -- no target, rides "
+                "breakeven/trailing only.",
+                symbol, position.quantity, position.side.value, position.stop_price,
+                self.risk_engine.config.risk_per_trade_pct, snapshot.last_price,
+            )
+
     # -- main loop -------------------------------------------------------------
 
     def run_once(self, now: Optional[datetime] = None) -> None:
@@ -930,7 +1012,17 @@ class TradingLoop:
         poll_interval_seconds, with universe rescanning decoupled onto its
         own background thread so a slow rescan can never delay exit/stop-
         loss management -- see this module's docstring's "Concurrency
-        model" section. Runs until stop_flag() returns True (if provided)."""
+        model" section. Runs until stop_flag() returns True (if provided).
+
+        Calls reconcile_positions_from_broker once before entering the
+        loop -- this is the one and only place that runs, so a service
+        restart adopts whatever the broker reports as open instead of
+        starting blind to it (see that method's docstring)."""
+        try:
+            self.reconcile_positions_from_broker()
+        except Exception:
+            logger.exception("reconcile_positions_from_broker raised at startup; continuing without it.")
+
         rescan_thread = threading.Thread(
             target=self._universe_rescan_loop, args=(stop_flag,), daemon=True, name="universe-rescan",
         )

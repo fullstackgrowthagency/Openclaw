@@ -105,6 +105,21 @@ What's implemented and tested:
   can't understand instead of losing every real position at once -- see
   `docs/ARCHITECTURE.md`'s "Position tracking can be lost..." section for
   the full mechanics and what the fix's logging captures for next time.
+- **A service restart can orphan a position too -- also fixed.** Separate
+  from the fill-reconciliation bug above: `self._positions` is a plain
+  in-memory dict, so any deploy, crash, or VPS reboot previously wiped
+  tracking for a position that was genuinely open a moment before, landing
+  in the same "bot has zero record of a real open position" state by a
+  different route. `TradingLoop.run_forever` now calls the new
+  `reconcile_positions_from_broker()` once before its main loop, adopting
+  any position the broker reports that this process doesn't already know
+  about. Since there's no original strategy signal to pull a real stop from
+  for an adopted position, it's given a conservative synthetic one instead
+  of being left unprotected: `RiskConfig.risk_per_trade_pct` as a straight
+  %-below-current-price line (long) or %-above (short), no target -- it
+  rides on the breakeven/trailing-stop rules only. Tagged with
+  `strategy_name="reconciled_at_startup"` so it's always distinguishable
+  from a real signal-driven entry in the trade history.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry

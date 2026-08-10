@@ -1088,6 +1088,43 @@ The logged raw row from fix #2 is exactly the data needed to correct
 `_position_from_dict`'s field-name guesses the next time this actually
 fires against a real, non-empty account -- check the logs for
 `"Failed to parse a position row"` after any live session with real fills.
+(Update: this has since happened for real -- see the module docstring's
+"account_v2.get_account_position" entry for the confirmed real field names.)
+
+**A restart can orphan a position exactly the same way, for a completely
+different reason -- `reconcile_positions_from_broker` closes that gap
+too.** The fixes above make a *running* process robust to a broker-lookup
+failure, but `self._positions` is still just a plain in-memory dict with
+no persistence of its own. Every process restart -- a deploy, a crash, a
+VPS reboot -- previously wiped tracking for any position that was
+genuinely open and correctly tracked a moment before, landing in the exact
+same "position exists at the broker, bot has zero record of it" state as
+the parsing-failure incident, just reached a different way. `TradingLoop.
+run_forever` now calls `reconcile_positions_from_broker()` once before
+entering its main loop: it fetches `broker.get_positions()` and, for any
+symbol not already in `self._positions`, adopts it -- inserting it into
+`self._positions` and creating (or advancing) a `Candidate` straight to
+`MANAGING` via the same state-transition chain tests use
+(`WATCHING -> HEATING_UP -> ARMED -> TRIGGERED -> ENTERED -> MANAGING`) so
+`_process_all_candidates` picks it up on the very next tick like any other
+managed position.
+
+An adopted position has no originating `Signal` to pull a real
+`stop_price`/`target_price` from (that only ever exists at the moment a
+strategy fires, and this position may have opened in a previous process's
+lifetime) -- deliberately conservative synthetic values instead of leaving
+it unprotected: `stop_price` is set to `risk_engine.config.risk_per_trade_pct`
+below the *current* price for a long (above it for a short), a plain
+%-off-current-price line rather than a real entry-to-stop risk
+calculation, and `target_price` is left `None` entirely -- it rides on the
+breakeven/trailing-stop rules only, same as any position whose target has
+already been hit (see "Position management" below). `strategy_name` is set
+to the sentinel `"reconciled_at_startup"` so an adopted position is always
+distinguishable from a real signal-driven one in the trade history. A
+`get_positions()` or per-symbol `get_snapshot()` failure during
+reconciliation is logged and skipped, not fatal to the rest -- consistent
+with every other broker-loop failure mode in this file (kill-switch
+flatten, batched snapshot fetch, etc.).
 
 ## Position management (exits)
 

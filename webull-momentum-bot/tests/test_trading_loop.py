@@ -23,7 +23,7 @@ import pytest
 from webull_bot.brokers.paper.client import PaperBrokerClient
 from webull_bot.config import get_settings
 from webull_bot.data.universe import StaticUniverseProvider
-from webull_bot.enums import ExitReason, OrderSide, OrderStatus, OrderType
+from webull_bot.enums import CandidateState, ExitReason, OrderSide, OrderStatus, OrderType
 from webull_bot.execution.order_manager import OrderManager
 from webull_bot.interfaces.broker import BrokerClient
 from webull_bot.interfaces.float_provider import FloatDataProvider
@@ -1100,6 +1100,143 @@ def test_auto_flatten_is_a_no_op_once_no_positions_remain():
 
     assert loop._positions == {}
     assert loop._trades == []
+
+
+# -- reconcile_positions_from_broker (startup adoption of a position this
+# process doesn't already know about -- closes a restart-survivability gap
+# distinct from, but symptomatically identical to, the get_positions()
+# parsing-failure incident: either way the bot ends up blind to a position
+# that's genuinely open at the broker) --------------------------------------
+
+def test_reconcile_adopts_an_untracked_long_position():
+    broker = _FakeBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, _ = _armed_candidate_setup(broker)
+    # _armed_candidate_setup already inserted a "TEST" candidate in ARMED --
+    # simulate the real restart scenario more precisely: no candidate at all.
+    loop.candidates.clear()
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert "TEST" in loop._positions
+    position = loop._positions["TEST"]
+    assert position.strategy_name == "reconciled_at_startup"
+    assert position.target_price is None
+    # _FakeBroker.get_snapshot always returns last_price=5.20; default
+    # risk_per_trade_pct is 5.0 -- see _armed_candidate_setup's RiskEngine.
+    assert position.stop_price == pytest.approx(5.20 * (1 - 0.05))
+
+    assert "TEST" in loop.candidates
+    assert loop.candidates["TEST"].state == CandidateState.MANAGING
+
+
+def test_reconcile_computes_a_short_stop_above_current_price():
+    broker = _FakeBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.SELL_SHORT, quantity=50, avg_entry_price=6.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, _ = _armed_candidate_setup(broker)
+    loop.candidates.clear()
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert loop._positions["TEST"].stop_price == pytest.approx(5.20 * (1 + 0.05))
+
+
+def test_reconcile_never_overwrites_a_position_already_tracked_this_process():
+    broker = _FakeBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, _ = _armed_candidate_setup(broker)
+    loop.candidates.clear()
+    already_tracked = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=5.00, stop_price=4.75,
+        target_price=5.50, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="momentum_breakout",
+    )
+    loop._positions["TEST"] = already_tracked
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert loop._positions["TEST"] is already_tracked
+    assert loop._positions["TEST"].strategy_name == "momentum_breakout"
+
+
+def test_reconcile_leaves_an_already_managing_candidate_alone():
+    broker = _FakeBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition as _transition
+    for state in (CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
+        _transition(candidate, state)
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    # Still the exact same Candidate object, not replaced with a fresh one.
+    assert loop.candidates["TEST"] is candidate
+    assert candidate.state == CandidateState.MANAGING
+
+
+def test_reconcile_is_a_no_op_when_get_positions_fails():
+    class _BrokenBroker(_FakeBroker):
+        def get_positions(self):
+            raise RuntimeError("simulated broker outage")
+
+    broker = _BrokenBroker()
+    loop, _ = _armed_candidate_setup(broker)
+    loop.candidates.clear()
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)  # must not raise
+
+    assert loop._positions == {}
+    assert loop.candidates == {}
+
+
+def test_reconcile_skips_a_symbol_whose_snapshot_fails():
+    class _NoSnapshotBroker(_FakeBroker):
+        def get_snapshot(self, symbol):
+            raise RuntimeError("simulated quote failure")
+
+    broker = _NoSnapshotBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, _ = _armed_candidate_setup(broker)
+    loop.candidates.clear()
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)  # must not raise
+
+    assert loop._positions == {}
+    assert loop.candidates == {}
+
+
+def test_run_forever_reconciles_positions_before_entering_the_loop():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+
+    calls = []
+    loop.reconcile_positions_from_broker = lambda *a, **kw: calls.append(True)
+
+    stop_event = threading.Event()
+    runner = threading.Thread(target=loop.run_forever, kwargs={"stop_flag": stop_event.is_set})
+    runner.start()
+    try:
+        time_module.sleep(0.1)
+    finally:
+        stop_event.set()
+        runner.join(timeout=2)
+
+    assert calls == [True]
 
 
 # -- scan_and_add_candidate (on-demand single-ticker scan, backs the
