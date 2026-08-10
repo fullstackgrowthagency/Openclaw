@@ -962,17 +962,46 @@ been traded.
 
 `RiskEngine.record_entry_order_failed(symbol, now)` rolls back that
 optimistic increment (`trade_count` and `trades_per_ticker[symbol]`, both
-floored at 0) when this happens. `TradingLoop` calls it from both places an
-approved entry can still fail to become a real position:
+floored at 0) when this happens. `TradingLoop` calls it from all three
+places an approved entry can still fail to become a real position:
 `_submit_entry`'s immediate-non-fill branch (the broker rejected the order
-right away) and `_poll_pending_entry`'s `REJECTED`/`CANCELED`/`EXPIRED`
-branch (the order was briefly pending before failing). A genuine
-risk-engine-level rejection (`OrderRejected`, caught earlier in
-`_submit_entry`) never calls this -- `evaluate()` never incremented
-anything in that case, since the signal was rejected before reaching the
-increment at the bottom of the method. `record_trade_closed` (realized
-P&L, post-loss cooldown) is a separate, unrelated counter -- this only
-affects the two daily trade-count gates.
+right away), `_submit_entry`'s catch-all `except Exception` branch (see
+below -- the broker call itself raised, not just returned a rejected
+status), and `_poll_pending_entry`'s `REJECTED`/`CANCELED`/`EXPIRED` branch
+(the order was briefly pending before failing). A genuine risk-engine-level
+rejection (`OrderRejected`, caught earlier in `_submit_entry`) never calls
+this -- `evaluate()` never incremented anything in that case, since the
+signal was rejected before reaching the increment at the bottom of the
+method. `record_trade_closed` (realized P&L, post-loss cooldown) is a
+separate, unrelated counter -- this only affects the two daily
+trade-count gates.
+
+**`_submit_entry`'s catch-all exception handler** (distinct from the bug
+above, but discovered from the same real production report -- a candidate
+seen stuck in `TRIGGERED` for over a minute before self-resolving to
+`ARMED` with the reason "no pending order found for TRIGGERED candidate"):
+`TriggerEngine.on_snapshot` transitions a candidate ARMED -> TRIGGERED as a
+side effect *before* `_submit_entry` is ever called in the same tick. If
+`order_manager.submit_signal` raises anything other than the expected
+`OrderRejected` (a real broker/network error, a malformed response, a
+bug -- not a controlled risk-engine rejection), `_submit_entry` used to
+have no handler for it, so the exception propagated all the way up to
+`_process_all_candidates`'s generic `except Exception: logger.exception
+("Unhandled error processing candidate ...")` catch-all. The candidate was
+left sitting in `TRIGGERED` with **no order ever recorded** in
+`_pending_entry_orders`, since the failure happened before that dict ever
+got populated -- only `_poll_pending_entry`'s "shouldn't happen" fallback
+(`pending is None`) would eventually notice and revert it to `ARMED`,
+which could take a while if something else (e.g. `get_snapshot` also
+failing for that symbol) delayed `_poll_pending_entry` from even running.
+`_submit_entry` now has its own `except Exception` handler that logs the
+real traceback (much more specific than the generic catch-all's message),
+rolls back the risk-engine counters via `record_entry_order_failed` (since
+`evaluate()` already ran and approved the signal inside `submit_signal`
+*before* the broker call that failed), and reverts the candidate to
+`ARMED` immediately -- instead of relying on `_poll_pending_entry`'s
+fallback to eventually clean up a state it was never designed to be the
+primary path for.
 
 ## Position management (exits)
 

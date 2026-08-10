@@ -534,6 +534,40 @@ class TradingLoop:
         except OrderRejected as exc:
             transition(candidate, CandidateState.ARMED, now=now, reason=f"risk engine rejected entry: {exc.decision.reason}")
             return
+        except Exception:
+            # trigger_engine.on_snapshot already transitioned this candidate
+            # to TRIGGERED as a side effect before calling here -- if
+            # order_manager.submit_signal raises anything other than the
+            # expected OrderRejected (a real broker/network error, a bug),
+            # that leaves the candidate stuck in TRIGGERED with no order
+            # ever recorded in _pending_entry_orders, since we never got
+            # past this call. Without this handler, that exception
+            # propagates up to _process_all_candidates' generic catch-all,
+            # which just logs "Unhandled error processing candidate" and
+            # moves on -- the candidate then sits in TRIGGERED until
+            # _poll_pending_entry's "no pending order found for TRIGGERED
+            # candidate" safety net eventually notices and reverts it,
+            # which can take a while if compounded by other transient
+            # failures (e.g. get_snapshot also failing for this symbol on
+            # subsequent cycles). Confirmed as a real production case: a
+            # candidate sat TRIGGERED for over a minute with zero orders
+            # ever submitted before that fallback finally caught it. Log
+            # the real traceback here (the generic catch-all above logs a
+            # much less specific message) and revert immediately instead of
+            # relying on that fallback to eventually clean it up.
+            logger.exception(
+                "Unexpected error submitting entry order for %s; reverting to ARMED.", candidate.symbol
+            )
+            # risk_engine.evaluate() already ran (and approved/incremented
+            # the counters) inside order_manager.submit_signal BEFORE the
+            # broker call that just failed -- roll that back too, same as
+            # the other two record_entry_order_failed call sites, or an
+            # unexpected broker exception becomes yet another way to
+            # silently exhaust this symbol's daily entry budget with zero
+            # real positions ever opened.
+            self.risk_engine.record_entry_order_failed(candidate.symbol, now)
+            transition(candidate, CandidateState.ARMED, now=now, reason="unexpected error submitting entry order")
+            return
         if momentum_event is not None:
             # Mutating in place is enough -- the tracker holds this same
             # object and will persist the change on its next on_snapshot()

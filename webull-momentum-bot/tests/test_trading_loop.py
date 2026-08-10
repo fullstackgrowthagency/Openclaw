@@ -370,6 +370,32 @@ def test_repeated_broker_rejections_never_exhaust_the_ticker_budget():
     )
 
 
+def test_submit_entry_reverts_to_armed_on_unexpected_broker_exception():
+    # Confirmed real production case: order_manager.submit_signal raising
+    # anything other than OrderRejected (a real broker/network error, not a
+    # risk-engine rejection) used to leave the candidate stuck in TRIGGERED
+    # with no order ever recorded, relying on _poll_pending_entry's
+    # "shouldn't happen" fallback to eventually notice and revert it --
+    # which could take a long time. This must now be caught and reverted
+    # immediately instead.
+    class _BrokenBroker(_FakeBroker):
+        def place_order(self, order):
+            raise RuntimeError("simulated unexpected broker failure")
+
+    broker = _BrokenBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(datetime.utcnow(), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    # Reverted immediately -- not left stranded in TRIGGERED.
+    assert candidate.state.value == "armed"
+    assert candidate.symbol not in loop._pending_entry_orders
+    # The failed attempt must not have consumed a real trade slot either.
+    assert loop.risk_engine._daily.trades_per_ticker.get("TEST", 0) == 0
+
+
 def test_exit_stays_managing_while_pending_then_finalizes_on_fill():
     broker = _FakeBroker(fills_after_polls=1)
     loop, candidate = _armed_candidate_setup(broker)
