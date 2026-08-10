@@ -11,10 +11,11 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -61,6 +62,21 @@ def _last_transition_reason(notes: str) -> str | None:
         return None
     last_line = notes.rsplit("\n", 1)[-1]
     return last_line.split(": ", 1)[-1] if ": " in last_line else last_line
+
+
+# The four RiskConfig fields adjustable from the dashboard's Settings modal
+# -- deliberately a small, curated subset of RiskConfig (not every field),
+# matched to what the Settings UI actually exposes. All are percentages
+# except min_risk_reward_ratio (a ratio, e.g. 2.0 = "at least 2x reward for
+# every 1x risked").
+_ADJUSTABLE_RISK_FIELDS = ("risk_per_trade_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct")
+
+
+class RiskSettingsUpdate(BaseModel):
+    risk_per_trade_pct: Optional[float] = None
+    min_risk_reward_ratio: Optional[float] = None
+    max_position_size_pct: Optional[float] = None
+    max_total_risk_pct: Optional[float] = None
 
 
 def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session], trading_mode: str) -> FastAPI:
@@ -123,6 +139,37 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         a specific candidate's live score breakdown."""
         config = MISConfig.load()
         return {"weights_version": config.version, "weights": config.weights}
+
+    @app.get("/api/risk-settings")
+    def get_risk_settings():
+        """Live values of the RiskConfig fields the dashboard's Settings modal
+        exposes -- read straight off the running RiskEngine.config, so this
+        always reflects what's actually gating trades right now (including
+        any change made through POST /api/risk-settings below), not a static
+        default."""
+        config = trading_loop.risk_engine.config
+        return {field: getattr(config, field) for field in _ADJUSTABLE_RISK_FIELDS}
+
+    @app.post("/api/risk-settings")
+    def update_risk_settings(update: RiskSettingsUpdate):
+        """Mutates the live RiskEngine.config in place -- takes effect on the
+        very next Signal it evaluates, no restart needed. Only fields present
+        (non-None) in the request body are changed; omitted fields keep their
+        current value. All four fields are percentages/ratios that must be
+        positive, and the three percentage fields must not exceed 100."""
+        config = trading_loop.risk_engine.config
+        updates = update.model_dump(exclude_none=True)
+        errors = []
+        for field, value in updates.items():
+            if value <= 0:
+                errors.append(f"{field} must be greater than 0.")
+            elif field != "min_risk_reward_ratio" and value > 100:
+                errors.append(f"{field} must not exceed 100.")
+        if errors:
+            raise HTTPException(status_code=422, detail=" ".join(errors))
+        for field, value in updates.items():
+            setattr(config, field, value)
+        return {field: getattr(config, field) for field in _ADJUSTABLE_RISK_FIELDS}
 
     @app.get("/api/positions")
     def get_positions():

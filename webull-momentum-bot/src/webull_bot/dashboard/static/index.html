@@ -10,8 +10,11 @@
 
 <header>
   <h1>Webull Momentum Bot</h1>
-  <div class="status-bar" id="status-bar">
-    <span class="muted">Loading...</span>
+  <div class="header-right">
+    <div class="status-bar" id="status-bar">
+      <span class="muted">Loading...</span>
+    </div>
+    <button class="settings-btn" id="settings-btn" aria-label="Risk settings" title="Risk settings">&#9881;</button>
   </div>
 </header>
 
@@ -129,6 +132,38 @@
       <button class="info-modal-close" id="info-modal-close" aria-label="Close">&times;</button>
     </div>
     <p id="info-modal-body"></p>
+  </div>
+</div>
+
+<div class="info-modal-overlay" id="settings-modal-overlay">
+  <div class="info-modal-card" role="dialog" aria-modal="true">
+    <div class="info-modal-header">
+      <h3>Risk Settings</h3>
+      <button class="info-modal-close" id="settings-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <p class="hint">Changes apply immediately to the live risk engine -- no restart needed. Only affects new signals; open positions are left alone.</p>
+    <form id="settings-form">
+      <label class="settings-field">
+        <span>Risk per trade <span class="muted">(% of equity risked, entry-to-stop)</span></span>
+        <input type="number" id="setting-risk_per_trade_pct" step="0.1" min="0.1" max="100" required>
+      </label>
+      <label class="settings-field">
+        <span>Minimum reward:risk ratio <span class="muted">(e.g. 2 = at least 2x reward for every 1x risked)</span></span>
+        <input type="number" id="setting-min_risk_reward_ratio" step="0.1" min="0.1" required>
+      </label>
+      <label class="settings-field">
+        <span>Max position size <span class="muted">(% of buying power, single position)</span></span>
+        <input type="number" id="setting-max_position_size_pct" step="0.1" min="0.1" max="100" required>
+      </label>
+      <label class="settings-field">
+        <span>Max total assumed risk <span class="muted">(% of equity, across all open positions' stop-loss risk)</span></span>
+        <input type="number" id="setting-max_total_risk_pct" step="0.1" min="0.1" max="100" required>
+      </label>
+      <div class="status-bar" id="settings-result"></div>
+      <div class="settings-actions">
+        <button type="submit">Save</button>
+      </div>
+    </form>
   </div>
 </div>
 

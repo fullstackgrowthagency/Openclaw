@@ -53,9 +53,15 @@ What's implemented and tested:
   Ignition (volume/float-turnover surge, no resistance level needed --
   relies on the trailing-stop/VWAP-failure/time exits below instead of a
   fixed profit target)
-- Deterministic Risk Engine enforcing per-trade risk, position/exposure
-  caps, daily loss limit, per-ticker/per-day trade caps, spread/liquidity
-  gates, cooldowns, and a kill switch
+- Deterministic Risk Engine enforcing per-trade risk sizing (5% of equity,
+  entry-to-stop), a minimum 1:2 reward:risk ratio on any signal with a
+  target, a max single-position size (100% of buying power), a fleet-wide
+  cap on total assumed stop-loss risk (50% of equity, not just notional
+  exposure), daily loss limit, per-ticker/per-day trade caps,
+  spread/liquidity gates, cooldowns, and a kill switch -- the four sizing
+  metrics above are live-adjustable from the dashboard's Settings button
+  (top right), no restart required; see `docs/ARCHITECTURE.md`'s "Risk
+  sizing" section for the full mechanics
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager (stop/target/trailing/VWAP-failure/time exits)

@@ -118,6 +118,72 @@ function initInfoModal() {
   });
 }
 
+// Keys must match RiskSettingsUpdate's fields in dashboard/app.py and the
+// input ids ("setting-<key>") in index.html's settings modal.
+const RISK_SETTINGS_FIELDS = ["risk_per_trade_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct"];
+
+function openSettingsModal() {
+  const overlay = document.getElementById("settings-modal-overlay");
+  const resultBar = document.getElementById("settings-result");
+  if (!overlay) return;
+  resultBar.innerHTML = "";
+  overlay.classList.add("open");
+  fetchJSON("/api/risk-settings")
+    .then((current) => {
+      RISK_SETTINGS_FIELDS.forEach((f) => {
+        const input = document.getElementById(`setting-${f}`);
+        if (input) input.value = current[f];
+      });
+    })
+    .catch((e) => {
+      resultBar.innerHTML = `<span class="neg">Failed to load current settings: ${e.message}</span>`;
+    });
+}
+
+function closeSettingsModal() {
+  document.getElementById("settings-modal-overlay")?.classList.remove("open");
+}
+
+function initSettingsModal() {
+  const overlay = document.getElementById("settings-modal-overlay");
+  const btn = document.getElementById("settings-btn");
+  const closeBtn = document.getElementById("settings-modal-close");
+  const form = document.getElementById("settings-form");
+  if (!overlay || !btn || !form) return;
+
+  btn.addEventListener("click", openSettingsModal);
+  closeBtn.addEventListener("click", closeSettingsModal);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeSettingsModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeSettingsModal();
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const resultBar = document.getElementById("settings-result");
+    const payload = {};
+    for (const f of RISK_SETTINGS_FIELDS) {
+      const input = document.getElementById(`setting-${f}`);
+      if (input.value !== "") payload[f] = Number(input.value);
+    }
+    resultBar.innerHTML = `<span class="muted">Saving...</span>`;
+    try {
+      const res = await fetch("/api/risk-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
+      resultBar.innerHTML = `<span class="pos">Saved -- now live on the running risk engine.</span>`;
+    } catch (err) {
+      resultBar.innerHTML = `<span class="neg">${err.message}</span>`;
+    }
+  });
+}
+
 function fmtMoney(n) {
   if (n === null || n === undefined) return "--";
   return n.toLocaleString(undefined, { style: "currency", currency: "USD" });
@@ -500,6 +566,7 @@ async function refreshAll() {
 }
 
 initInfoModal();
+initSettingsModal();
 initScoreHistoryForm();
 initCandidateSelection();
 refreshAll();

@@ -334,6 +334,45 @@ def test_score_history_filters_by_symbol_and_returns_components(session_factory,
     assert rows[0]["components"]["relative_volume_score"] == 90
 
 
+def test_risk_settings_returns_current_config(loop, client):
+    resp = client.get("/api/risk-settings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["risk_per_trade_pct"] == loop.risk_engine.config.risk_per_trade_pct
+    assert body["min_risk_reward_ratio"] == loop.risk_engine.config.min_risk_reward_ratio
+    assert body["max_position_size_pct"] == loop.risk_engine.config.max_position_size_pct
+    assert body["max_total_risk_pct"] == loop.risk_engine.config.max_total_risk_pct
+
+
+def test_risk_settings_update_mutates_live_engine(loop, client):
+    resp = client.post("/api/risk-settings", json={"risk_per_trade_pct": 2.5})
+    assert resp.status_code == 200
+    assert resp.json()["risk_per_trade_pct"] == 2.5
+    assert loop.risk_engine.config.risk_per_trade_pct == 2.5
+    # Omitted fields are left untouched.
+    assert loop.risk_engine.config.max_total_risk_pct == 50.0
+
+
+def test_risk_settings_update_rejects_non_positive_values(loop, client):
+    resp = client.post("/api/risk-settings", json={"risk_per_trade_pct": 0})
+    assert resp.status_code == 422
+    assert loop.risk_engine.config.risk_per_trade_pct != 0
+
+
+def test_risk_settings_update_rejects_pct_field_over_100(loop, client):
+    resp = client.post("/api/risk-settings", json={"max_position_size_pct": 150})
+    assert resp.status_code == 422
+    assert loop.risk_engine.config.max_position_size_pct != 150
+
+
+def test_risk_settings_update_allows_ratio_field_over_100(loop, client):
+    # min_risk_reward_ratio isn't a percentage -- e.g. 5.0 ("5x reward for 1x
+    # risk") is a legitimate, if conservative, setting.
+    resp = client.post("/api/risk-settings", json={"min_risk_reward_ratio": 150})
+    assert resp.status_code == 200
+    assert loop.risk_engine.config.min_risk_reward_ratio == 150
+
+
 def test_index_and_static_assets_are_served(client):
     assert client.get("/").status_code == 200
     assert client.get("/style.css").status_code == 200

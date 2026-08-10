@@ -18,10 +18,23 @@ from ..models import MarketSnapshot, Position, RiskDecision, RiskEvent, Signal
 
 @dataclass
 class RiskConfig:
-    risk_per_trade_pct: float = 0.5          # % of account equity risked per trade (entry-to-stop)
-    max_position_size_pct: float = 10.0      # max notional as % of equity in a single position
+    risk_per_trade_pct: float = 5.0          # % of account equity risked per trade (entry-to-stop)
+    # Minimum reward:risk ratio required on any signal that specifies a
+    # suggested_target (e.g. 2.0 means the distance from entry to target
+    # must be at least 2x the distance from entry to stop). Signals with no
+    # target (e.g. VolumeIgnitionStrategy, which relies on a trailing stop
+    # instead of a fixed target) skip this check entirely -- there's no
+    # reward distance to compare against.
+    min_risk_reward_ratio: float = 2.0
+    max_position_size_pct: float = 100.0     # max notional as % of buying power in a single position
     max_daily_loss_pct: float = 3.0          # halts all new trades for the day once hit
-    max_account_exposure_pct: float = 50.0   # max total notional across all open positions
+    # Total $-at-risk ceiling: the sum of entry-to-stop risk across every
+    # open position, plus this trade's own budgeted risk, can't exceed this
+    # % of account equity. Distinct from a notional-exposure cap (the old
+    # max_account_exposure_pct) -- two positions with the same total dollar
+    # size but very different stop distances carry very different amounts
+    # of *risk*, and this is meant to bound the latter, not the former.
+    max_total_risk_pct: float = 50.0
     max_simultaneous_positions: int = 3
     max_trades_per_day: int = 15
     max_trades_per_ticker_per_day: int = 2
@@ -87,6 +100,7 @@ class RiskEngine:
         signal: Signal,
         *,
         account_equity: float,
+        account_buying_power: float,
         open_positions: list[Position],
         snapshot: MarketSnapshot,
         now: Optional[datetime] = None,
@@ -134,16 +148,43 @@ class RiskEngine:
         if self.config.stop_loss_required and signal.suggested_stop is None:
             return reject(RiskEventType.TRADE_REJECTED, "Signal has no stop-loss; stop_loss_required is enabled.")
 
-        current_exposure = sum(p.quantity * p.avg_entry_price for p in open_positions)
-        max_exposure = account_equity * self.config.max_account_exposure_pct / 100.0
-        if current_exposure >= max_exposure:
-            return reject(RiskEventType.MAX_EXPOSURE_HIT, "Max account exposure reached.")
+        if signal.suggested_target is not None and signal.suggested_stop is not None and signal.reference_price > signal.suggested_stop > 0:
+            risk_per_share = signal.reference_price - signal.suggested_stop
+            reward_per_share = signal.suggested_target - signal.reference_price
+            # A tiny epsilon avoids rejecting a signal that's exactly at the
+            # minimum ratio in theory but lands a hair below it in floating
+            # point (e.g. a strategy computing target = entry + risk * 2.0
+            # doesn't always reconstruct to a bit-identical 2.0x when
+            # re-divided here).
+            if risk_per_share > 0 and (reward_per_share / risk_per_share) < self.config.min_risk_reward_ratio - 1e-9:
+                return reject(
+                    RiskEventType.MIN_RISK_REWARD_NOT_MET,
+                    f"Reward:risk ratio {reward_per_share / risk_per_share:.2f} is below the required minimum {self.config.min_risk_reward_ratio}.",
+                )
+
+        # Total assumed risk across every open position (entry-to-stop $ risk,
+        # not notional size -- see RiskConfig.max_total_risk_pct's docstring
+        # for why this is a materially different cap than a plain notional
+        # exposure ceiling).
+        total_open_risk = sum(
+            max(0.0, p.avg_entry_price - p.stop_price) * p.quantity
+            for p in open_positions
+            if p.stop_price is not None
+        )
+        max_total_risk = account_equity * self.config.max_total_risk_pct / 100.0
+        remaining_risk_room = max_total_risk - total_open_risk
+        if remaining_risk_room <= 0:
+            return reject(RiskEventType.MAX_EXPOSURE_HIT, "Max total assumed risk across open positions reached.")
 
         # Position sizing from $ risk between entry and stop (never fall back to a
-        # position size that ignores the stop distance).
+        # position size that ignores the stop distance). The risk actually
+        # budgeted for this trade is capped by whatever total-risk room is
+        # left, so one trade can't single-handedly blow through the fleet-wide
+        # ceiling even if its own risk_per_trade_pct budget would allow it.
         entry_price = signal.reference_price
         stop_price = signal.suggested_stop
-        risk_amount = account_equity * self.config.risk_per_trade_pct / 100.0
+        budgeted_risk = account_equity * self.config.risk_per_trade_pct / 100.0
+        risk_amount = min(budgeted_risk, remaining_risk_room)
         max_shares_by_risk = None
         if stop_price is not None and entry_price > stop_price > 0:
             per_share_risk = entry_price - stop_price
@@ -151,12 +192,10 @@ class RiskEngine:
         elif self.config.stop_loss_required:
             return reject(RiskEventType.TRADE_REJECTED, "Stop price must be below entry price for a long signal.")
 
-        max_notional = account_equity * self.config.max_position_size_pct / 100.0
+        max_notional = account_buying_power * self.config.max_position_size_pct / 100.0
         max_shares_by_notional = int(max_notional // entry_price) if entry_price > 0 else 0
 
         max_shares = min(v for v in (max_shares_by_risk, max_shares_by_notional) if v is not None)
-        remaining_exposure_room = max_exposure - current_exposure
-        max_shares = min(max_shares, int(remaining_exposure_room // entry_price)) if entry_price > 0 else 0
 
         if max_shares <= 0:
             return reject(RiskEventType.TRADE_REJECTED, "Computed position size is zero given current risk/exposure limits.")

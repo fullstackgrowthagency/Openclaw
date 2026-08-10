@@ -80,6 +80,7 @@ class OrderManager:
         decision = self.risk_engine.evaluate(
             signal,
             account_equity=self.broker.get_account_equity(),
+            account_buying_power=self.broker.get_buying_power(),
             open_positions=self.broker.get_positions(),
             snapshot=snapshot,
         )

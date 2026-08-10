@@ -94,6 +94,7 @@ class RiskEventType(str, Enum):
     SLIPPAGE_PROTECTION_TRIGGERED = "slippage_protection_triggered"
     COOLDOWN_ACTIVE = "cooldown_active"
     KILL_SWITCH_ENGAGED = "kill_switch_engaged"
+    MIN_RISK_REWARD_NOT_MET = "min_risk_reward_not_met"
 
 
 class MomentumOutcome(str, Enum):

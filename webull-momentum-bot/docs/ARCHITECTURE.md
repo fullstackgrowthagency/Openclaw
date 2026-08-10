@@ -563,6 +563,71 @@ have been backtested or run live yet -- their config defaults are
 unvalidated starting points (same framing as `scoring/weights.yaml`), not
 tuned thresholds.
 
+## Risk sizing
+
+Once a `Strategy` emits a `Signal`, `RiskEngine.evaluate()` (`risk/risk_engine.py`)
+decides both *whether* to trade it and, if so, *how many shares*. Four of
+its `RiskConfig` fields are adjustable live from the dashboard's Settings
+button (top right -- see "Dashboard" below) via `GET`/`POST
+/api/risk-settings`, which mutate the running `RiskEngine.config` in place;
+changes apply to the very next `Signal` evaluated, no restart needed.
+
+**1. Minimum reward:risk ratio** (`min_risk_reward_ratio`, default 2.0) --
+checked first, before any sizing math. If a signal specifies a
+`suggested_target`, the distance from entry to target must be at least
+`min_risk_reward_ratio` times the distance from entry to stop, or the
+signal is rejected outright (`MIN_RISK_REWARD_NOT_MET`). Signals with no
+target at all (e.g. `VolumeIgnitionStrategy`, which manages the trade with
+a trailing stop instead of a fixed target) skip this check entirely --
+there's no reward distance to compare against. A small epsilon tolerance
+guards against a signal that's exactly at the minimum ratio in theory
+getting rejected by floating-point noise from reconstructing the target
+price.
+
+**2. Total assumed risk ceiling** (`max_total_risk_pct`, default 50% of
+equity) -- summed across every open position as `(entry_price -
+stop_price) * quantity`, i.e. what would actually be lost if every open
+position's stop got hit simultaneously, not their combined notional size.
+This is deliberately a *risk* cap, not an *exposure* cap: two positions
+with identical dollar size but very different stop distances carry very
+different amounts of real risk, and a notional-only cap (the old
+`max_account_exposure_pct`) couldn't tell them apart. If the existing
+positions alone already consume the full ceiling, the new signal is
+rejected (`MAX_EXPOSURE_HIT`). Otherwise, whatever risk-room remains
+becomes a ceiling on this trade's own budgeted risk (see #3) -- shrinking
+it rather than rejecting outright, so one trade can't single-handedly blow
+through the fleet-wide ceiling even when its own per-trade budget would
+otherwise allow more.
+
+**3. Risk-based position sizing** (`risk_per_trade_pct`, default 5% of
+equity) -- the primary sizing driver. Budgeted risk = `equity *
+risk_per_trade_pct / 100`, capped by whatever room #2 left; shares = that
+dollar amount divided by the entry-to-stop distance. A tighter stop lets
+this budget buy more shares (same dollar risk, smaller per-share risk); a
+wider stop buys fewer. `RiskDecision.risk_amount` reports the actual
+(post-cap) dollar amount budgeted, for transparency into what really drove
+the sizing.
+
+**4. Position-size ceiling** (`max_position_size_pct`, default 100% of
+**buying power**, not equity) -- an independent cap on any single
+position's notional size (`shares * entry_price`), regardless of how
+favorable the stop distance made #3's math. Buying power (`broker.get_buying_power()`)
+is used rather than equity specifically so this reflects capital actually
+available to deploy right now, not total account value that may already
+be committed to other open positions.
+
+**Final sizing**: `max_shares = min(shares from #3, shares from #4)`. If
+that comes out to zero (e.g. no risk-room left after #2, or a
+degenerate stop distance), the trade is rejected
+(`Computed position size is zero...`) rather than silently shrunk to
+something nonsensical.
+
+**Verification status**: `tests/test_risk_engine.py` covers all four
+mechanics above (including the shrink-not-reject behavior of #2 and the
+buying-power-vs-equity distinction in #4), but -- like every other
+threshold in this codebase -- these defaults are unvalidated starting
+points, not backtested or run live yet.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right
@@ -711,6 +776,19 @@ and no external dependencies (no CDN scripts) -- it polls the REST
 endpoints every 5s. Keep it that way unless there's a real reason to add a
 frontend toolchain; a monitoring dashboard for a single operator doesn't
 need one.
+
+**Settings (top-right gear button)**: the only panel that writes, not just
+reads -- `GET`/`POST /api/risk-settings` expose four `RiskConfig` fields
+(see "Risk sizing" above) for live editing. `POST` mutates
+`trading_loop.risk_engine.config` directly (a plain dataclass instance, no
+extra indirection needed) and takes effect on the very next `Signal`
+evaluated -- no restart, and nothing persisted to disk or the database, so
+a restart reverts to `RiskConfig`'s hardcoded defaults. Deliberately a
+small, curated subset of `RiskConfig` (`_ADJUSTABLE_RISK_FIELDS` in
+`dashboard/app.py`), not every field on it -- matched to what's actually
+useful to tune without restarting versus what's a rarer, more structural
+decision (e.g. `max_simultaneous_positions`) better made by editing the
+config in code.
 
 ## Full persistence: state transitions, MIS scores, momentum events
 
