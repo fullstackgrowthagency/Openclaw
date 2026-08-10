@@ -67,6 +67,20 @@ const COLUMN_INFO = {
       "If it passes, it's added to the live Candidates table above and starts being watched on the bot's normal cadence. If it's rejected, you'll see why (e.g. price out of range, float too large, or all three volume floors missed). If it's already being tracked, its current real state is shown instead of re-scanning it.\n\n" +
       "Below the result, any recorded Momentum Ignition Score history for that symbol is also shown -- one row per tick it's been scored, most recent first, with its top 3 highest-contributing raw sub-scores that tick. This will be empty right after a fresh scan (scoring only starts once CandidateWatcher ticks it) but fills in on the next poll cycle.",
   },
+  "entry-strategies": {
+    title: "Entry Strategies",
+    body:
+      "The bot runs 8 entry strategies at once. Every tick, each ARMED candidate is checked against all 8 in the order below; whichever one fires first for that tick places the trade. They're ordered most selective/confirmed first, most permissive last, so a broad catch-all never crowds out a stricter, more reliable setup that would also have fired.\n\n" +
+      "1. Refined Breakout -- price breaks above the resistance level, but only within a narrow window: 0% to 3% above it. Catches a breakout while it's actually happening, not one that already ran far past resistance hours ago. Stop sits just below resistance.\n\n" +
+      "2. Opening Range Breakout -- watches the high of the first 5 minutes of the session and enters once price clears it. Works even for a stock with no real resistance history yet, like a recent IPO.\n\n" +
+      "3. VWAP Reclaim Continuation -- waits for a meaningful dip below VWAP, then enters once price reclaims VWAP with fresh volume. Catches the \"second leg\" of a move after a shakeout. Stop sits just under VWAP itself, since VWAP holding as support is exactly what this entry is betting on.\n\n" +
+      "4. Momentum Breakout -- the original breakout above resistance, with no upper cap (unlike #1). Still fires for breakouts that Refined Breakout's 3% window has already passed.\n\n" +
+      "5. Breakout Pullback -- after a resistance breakout, waits for a controlled pullback on fading volume, then enters once price reclaims the pullback high. Avoids buying the very first spike; targets a steadier, less exhausted move.\n\n" +
+      "6. Ignition Pullback -- the same pullback-then-reclaim pattern as #5, but anchored to a volume/float-turnover surge instead of a resistance level, so it works even when there's no nearby resistance to react to.\n\n" +
+      "7. Volatility Contraction (\"flag/pennant\") -- looks for price tightening into a narrow range after an initial move, then enters once that range expands again with volume. A classic continuation setup for a stock that's \"coiling\" before its next leg.\n\n" +
+      "8. Volume Ignition -- the broadest strategy, placed last on purpose so it only fires when none of the above already did. Triggers on a sudden volume acceleration or a float-turnover surge, combined with rising price above VWAP, with no resistance level or fixed profit target required. This is what catches a stock whose resistance is too far away to be a useful reference at all -- it relies on the trailing stop (and VWAP-failure/time exits) to manage the trade instead of a fixed target.\n\n" +
+      "Every strategy still flows through the same risk checks (position sizing, per-trade risk, daily loss limit, spread/liquidity gates, cooldowns) before an order is placed -- a strategy signal never bypasses risk management. None of these have been backtested or run live yet; their exact thresholds are starting points, not tuned values.",
+  },
 };
 
 function initInfoModal() {
@@ -89,7 +103,7 @@ function initInfoModal() {
   }
 
   document.addEventListener("click", (e) => {
-    const btn = e.target.closest(".info-btn");
+    const btn = e.target.closest(".info-btn, .guide-btn");
     if (btn) {
       open(btn.dataset.info);
     }
