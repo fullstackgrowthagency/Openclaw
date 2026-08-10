@@ -16,6 +16,13 @@ volume is spread evenly across its [low, high] range rather than assigned
 to a single price (e.g. its close), since a bar's volume did not all trade
 at one price.
 
+get_raw_bars requests pre-market and after-hours bars in addition to the
+regular session (see its docstring for exactly how, and the caveat that the
+session-selection values are inferred, not confirmed live), so the volume
+profile built here reflects a name's pre/after-market activity too, not
+just 9:30am-4:00pm ET -- important for a low-float mover whose real
+resistance level may have formed entirely outside regular hours.
+
 Unvalidated starting point, same spirit as scoring/weights.yaml's
 "v1-initial-unvalidated": bucket count, node significance threshold, and
 lookback window are reasonable defaults, not backtested values.

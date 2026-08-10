@@ -430,6 +430,27 @@ across every price bucket its `[low, high]` range touches, and
 significance threshold (a fraction of the single largest bucket's volume,
 to separate a real cluster from background noise).
 
+**Pre-market/after-hours bars are included, deliberately**: `get_raw_bars`
+requests `trading_sessions=["PRE", "RTH", "ATH"]` rather than leaving the
+SDK's regular-session-only default, so the volume profile reflects a name's
+full pre-market/after-hours activity, not just 9:30am-4:00pm ET -- a
+low-float mover's real resistance level can easily form entirely in
+pre-market. The three session-code strings themselves are **inferred, not
+confirmed live**: `get_history_bar`'s own SDK docstring documents the
+`trading_sessions` parameter without listing accepted values, and `"RTH"`/
+`"PRE"`/`"ATH"` are only spelled out on a *different* endpoint in the same
+SDK (`get_footprint`). Re-verify live during an actual pre-market or
+after-hours session (confirm returned bar timestamps actually fall outside
+the regular-session window) before fully trusting this -- see the docstring
+in `brokers/webull/client.py`'s `get_raw_bars` for the full reasoning. This
+change is scoped to `get_raw_bars` only: `get_bars()`/`_snapshots_from_bars()`
+(VWAP, Momentum Ignition Score ticks) still uses the regular-session
+default deliberately, since extending sessions there would change VWAP/MIS
+behavior beyond resistance detection. It's also safe to share with
+`opening_range_high` (below), which already time-filters its own bars down
+to the 9:30am regular-session window, so the extra pre/after-market bars
+simply fall outside that filter rather than corrupting it.
+
 **A real data-shape finding worth knowing**: `get_raw_bars` returns the
 last `count` bars that actually have data, not the last `count` calendar
 time-slots. Confirmed live (2026-08-09): 100 5-minute bars for a liquid

@@ -384,13 +384,38 @@ class WebullBrokerClient(BrokerClient):
         Not part of the BrokerClient interface (see interfaces/broker.py):
         this is a Webull-specific capability with no real backing data in
         paper/backtest mode, so callers (BroadScanner) check for it with
-        getattr rather than requiring every broker to implement it."""
+        getattr rather than requiring every broker to implement it.
+
+        trading_sessions=["PRE", "RTH", "ATH"]: get_history_bar's own SDK
+        docstring says "By default, only intraday [regular-session] candlestick
+        data is returned" and documents a trading_sessions param to change
+        that, but doesn't spell out the accepted values -- those are only
+        written out on a sibling endpoint in the same SDK, get_footprint:
+        "RTH: During trading hours, PRE: Before trading hours, ATH: After
+        trading hours. Default: RTH." Reusing those three strings here is
+        inferred by analogy across two endpoints of the same SDK, not
+        confirmed against a real get_history_bar response that actually
+        contains pre/after-market bars -- re-verify live during an actual
+        pre-market or after-hours session (check returned bar timestamps
+        fall outside 9:30am-4:00pm ET) before fully trusting this. Requesting
+        all three sessions here (rather than leaving the RTH-only default)
+        is what lets _compute_static_resistance_levels' volume profile
+        (metrics/volume_profile.py) reflect pre/after-market activity, not
+        just the regular session -- see BroadScanner._fetch_raw_bars. This
+        is safe to share with _compute_opening_range_high (metrics/opening_range.py),
+        which already time-filters to the 9:30am regular-session window on
+        its own, so the extra pre/after-market bars just fall outside that
+        window rather than corrupting it. get_bars()/_snapshots_from_bars()
+        above (VWAP, momentum-score ticks) deliberately still uses the
+        RTH-only default -- extending sessions there would change VWAP and
+        MIS calculations beyond what was asked for."""
         timespan = _INTERVAL_TO_TIMESPAN.get(interval)
         if timespan is None:
             raise ValueError(f"Unsupported interval {interval!r}; supported: {sorted(_INTERVAL_TO_TIMESPAN)}")
         response = call_with_retry(
             lambda: self._require_data_client().market_data.get_history_bar(
-                symbol, Category.US_STOCK.name, timespan, count=str(count)
+                symbol, Category.US_STOCK.name, timespan, count=str(count),
+                trading_sessions=["PRE", "RTH", "ATH"],
             )
         )
         response.raise_for_status()

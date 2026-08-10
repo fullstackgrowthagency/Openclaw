@@ -214,6 +214,37 @@ def test_snapshots_from_bars_running_high_low_are_monotonic():
     assert snapshots[-1].high_of_day == max(float(b["high"]) for b in _REAL_BARS_MOST_RECENT_FIRST)
 
 
+def test_get_raw_bars_requests_all_trading_sessions():
+    # See get_raw_bars' docstring for why "PRE"/"RTH"/"ATH" is inferred by
+    # analogy from a sibling SDK endpoint (get_footprint), not confirmed
+    # against a real get_history_bar response -- this locks in the request
+    # shape so a regression is caught even before that live re-verification.
+    client = _client()
+    calls = []
+
+    class _FakeMarketData:
+        def get_history_bar(self, symbol, category, timespan, **kwargs):
+            calls.append((symbol, category, timespan, kwargs))
+
+            class _Resp:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return list(_REAL_BARS_MOST_RECENT_FIRST)
+            return _Resp()
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    client.get_raw_bars("AAPL", "5m", 780)
+
+    assert len(calls) == 1
+    _, _, _, kwargs = calls[0]
+    assert kwargs.get("trading_sessions") == ["PRE", "RTH", "ATH"]
+
+
 def test_get_bars_rejects_unsupported_interval():
     client = _client()
     with pytest.raises(ValueError):

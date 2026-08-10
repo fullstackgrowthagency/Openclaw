@@ -145,9 +145,12 @@ What's implemented and tested:
   reject a candidate).
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
-  `BroadScanner` fetches recent intraday bars and builds a volume-at-price
-  histogram, keeping the biggest clusters ("high volume nodes") as static
-  resistance levels -- a more general stand-in for hand-picked levels like
+  `BroadScanner` fetches recent intraday bars -- including pre-market and
+  after-hours, not just the regular 9:30am-4:00pm ET session, so a
+  low-float mover's real resistance level is caught even when it formed
+  entirely outside regular hours -- and builds a volume-at-price histogram,
+  keeping the biggest clusters ("high volume nodes") as static resistance
+  levels. This is a more general stand-in for hand-picked levels like
   prior-day-high or round numbers, since those usually show up as volume
   clusters anyway, plus this gives a real strength signal a flat list of
   price points can't. `CandidateWatcher` merges the nearest still-untested
@@ -155,7 +158,10 @@ What's implemented and tested:
   periodically **refreshed** on later universe rescans (every 5 minutes by
   default) for any candidate that hasn't entered a position yet, so a
   candidate discovered early in the session isn't stuck with a volume
-  profile that's missing everything that formed afterward. See
+  profile that's missing everything that formed afterward. The exact
+  pre-market/after-hours request parameter is inferred from a sibling
+  Webull SDK endpoint's docs, not confirmed live -- see
+  `brokers/webull/client.py`'s `get_raw_bars` docstring. See
   `docs/ARCHITECTURE.md`'s "Resistance detection" section for the full
   design, the refresh mechanics, and an important data-shape caveat
   (Webull's raw bars reach back as far as needed to find real data for
