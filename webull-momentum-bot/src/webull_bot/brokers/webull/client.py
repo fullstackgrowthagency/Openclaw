@@ -36,6 +36,14 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     get_history_bar(symbol, "US_STOCK", "M1", count=...) -> confirmed field
     names used in _snapshot_from_dict / _snapshots_from_bars. Note: neither
     endpoint returns VWAP directly -- see the comment in _snapshot_from_dict.
+    NOT covered by this 2026-08-08 verification: get_snapshot is now called
+    with extend_hour_required=True (added later) so pre-market/after-hours
+    prices aren't silently stale, and _snapshot_from_dict prefers an
+    `ext_price` field when present. Both the flag's effect on the REST body
+    and the `ext_price` key name itself are inferred from the SDK's
+    protobuf streaming schema, not confirmed against a real sandbox
+    response -- re-verify live during an actual pre-market/after-hours
+    session before trusting the exact field name.
   - Streaming (DataStreamingClient, MQTT-based) is NOT implemented here.
     Its constructor needs an http_host/mqtt_host; the production values are
     documented (data-api.webull.com) but no sandbox equivalent was found or
@@ -226,6 +234,33 @@ class WebullBrokerClient(BrokerClient):
 
     def _snapshot_from_dict(self, raw: dict, timestamp: Optional[datetime] = None) -> MarketSnapshot:
         last_price = float(raw["price"])
+        # Prefer the extended-hours trade price when the API actually
+        # populated one -- `price` alone is the regular-session price and
+        # goes stale the moment the regular session ends, which would make
+        # every candidate's displayed/traded-on price silently lag by hours
+        # during pre-market or after-hours activity (exactly the window
+        # PRE_MARKET/AFTER_MARKET discovery below is meant to catch).
+        # get_snapshot() is called with extend_hour_required=True
+        # specifically so Webull includes this field at all -- per that
+        # method's docstring, it's omitted by default. Field name
+        # (`ext_price`) is inferred from the SDK's protobuf streaming
+        # schema's naming convention (webull/data/quotes/subscribe/message_pb2.py:
+        # ext_price/ext_high/ext_low/ext_volume alongside the regular
+        # price/high/low/volume), NOT confirmed against this REST endpoint's
+        # actual JSON body -- the SDK has no schema/fixture for that body to
+        # check against. If the real key differs, this silently falls back
+        # to the regular-session `price`, same fail-soft handling as every
+        # other optional field here; re-verify live during a real pre-market
+        # or after-hours session before trusting this blindly. (Webull also
+        # exposes a separate `overnight_required` flag / `ovn_price` field
+        # for its newer overnight session -- deliberately not requested
+        # here, since only pre/after-market was asked for.)
+        ext_price_raw = raw.get("ext_price")
+        if ext_price_raw not in (None, "", "0", 0, 0.0):
+            try:
+                last_price = float(ext_price_raw)
+            except (TypeError, ValueError):
+                pass
         # Webull's snapshot endpoint does not return VWAP directly (confirmed
         # live -- the field is simply absent). Falling back to last_price
         # keeps distance_from_vwap_pct at a neutral 0 rather than fabricating
@@ -250,8 +285,15 @@ class WebullBrokerClient(BrokerClient):
         )
 
     def get_snapshot(self, symbol: str) -> MarketSnapshot:
+        # extend_hour_required=True: per the SDK's own docstring, extended-
+        # hours data (pre-market/after-hours) is NOT included by default --
+        # without this, _snapshot_from_dict's ext_price handling above would
+        # never see anything to prefer, and every candidate's price would
+        # silently lag by hours during pre-market or after-hours trading.
         response = call_with_retry(
-            lambda: self._require_data_client().market_data.get_snapshot([symbol], Category.US_STOCK.name)
+            lambda: self._require_data_client().market_data.get_snapshot(
+                [symbol], Category.US_STOCK.name, extend_hour_required=True,
+            )
         )
         response.raise_for_status()
         rows = response.json()

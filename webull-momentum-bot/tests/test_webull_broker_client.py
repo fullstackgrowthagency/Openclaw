@@ -108,6 +108,73 @@ def test_snapshot_from_dict_maps_real_fields():
     assert snapshot.premarket_high is None
 
 
+# -- extended-hours price preference (ext_price) -- see get_snapshot's
+# extend_hour_required=True and _snapshot_from_dict's docstring for why the
+# exact REST field name here is inferred, not confirmed live -----------------
+
+def test_snapshot_from_dict_falls_back_to_price_without_ext_price():
+    # _REAL_SNAPSHOT_ROW has no ext_price key at all (captured before
+    # extend_hour_required=True was added) -- must not raise or misbehave.
+    client = _client()
+    snapshot = client._snapshot_from_dict(_REAL_SNAPSHOT_ROW)
+    assert snapshot.last_price == 313.33
+
+
+def test_snapshot_from_dict_prefers_ext_price_when_present():
+    client = _client()
+    row = dict(_REAL_SNAPSHOT_ROW, ext_price="320.00")
+    snapshot = client._snapshot_from_dict(row)
+    assert snapshot.last_price == 320.00
+    # VWAP's fallback-to-last_price should follow the extended-hours price too.
+    assert snapshot.vwap == 320.00
+
+
+def test_snapshot_from_dict_ignores_zero_or_empty_ext_price():
+    client = _client()
+    for zero_ish in ("0", 0, 0.0, ""):
+        row = dict(_REAL_SNAPSHOT_ROW, ext_price=zero_ish)
+        snapshot = client._snapshot_from_dict(row)
+        assert snapshot.last_price == 313.33
+
+
+def test_snapshot_from_dict_ignores_unparseable_ext_price():
+    client = _client()
+    row = dict(_REAL_SNAPSHOT_ROW, ext_price="not-a-number")
+    snapshot = client._snapshot_from_dict(row)
+    assert snapshot.last_price == 313.33
+
+
+class _FakeResponse:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._rows
+
+
+def test_get_snapshot_requests_extended_hours_data():
+    client = _client()
+    calls = []
+
+    class _FakeMarketData:
+        def get_snapshot(self, symbols, category, **kwargs):
+            calls.append((symbols, category, kwargs))
+            return _FakeResponse([dict(_REAL_SNAPSHOT_ROW)])
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    client.get_snapshot("AAPL")
+
+    assert len(calls) == 1
+    _, _, kwargs = calls[0]
+    assert kwargs.get("extend_hour_required") is True
+
+
 # -- bar mapping (real field names, verified live; most-recent-first input) -
 
 _REAL_BARS_MOST_RECENT_FIRST = [

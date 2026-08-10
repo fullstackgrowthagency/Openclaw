@@ -88,11 +88,12 @@ What's implemented and tested:
   `WebullBrokerClient.place_order` returning `SUBMITTED` rather than
   `FILLED` (confirmed live) via pending-order polling for both entries and
   exits, rather than assuming synchronous fills like the backtest engine
-  can. Universe discovery in sandbox/live mode combines **four
-  independent, verified Webull screener sources** (`data/universe.py`),
-  unioned via `MultiSourceUniverseProvider` rather than a priority fallback
-  chain -- a symbol only needs to show up on one list, and `BroadScanner`
-  vets every symbol the same way regardless of which list(s) surfaced it:
+  can. Universe discovery in sandbox/live mode combines **seven
+  independent Webull screener sources** (`data/universe.py`), unioned via
+  `MultiSourceUniverseProvider` rather than a priority fallback chain -- a
+  symbol only needs to show up on one list, and `BroadScanner` vets every
+  symbol the same way regardless of which list(s) surfaced it. The first
+  four are live-verified:
   `get_most_active(rank_type="RELATIVE_VOLUME_10D")` (high relative
   volume), `get_most_active(rank_type="TURNOVER_RATE")` (% of float traded
   today -- directly analogous to the float_turnover metric the MIS already
@@ -100,16 +101,36 @@ What's implemented and tested:
   movers), and `get_gainers_losers(rank_type="MIN_5")` (the last 5
   minutes' top % price movers -- Webull's real equivalent of "most active
   last 5 minutes" for price; there is no equivalent 5-minute *volume*
-  ranking anywhere in the API, confirmed live). Each source paginates
-  instead of taking a single fixed-size page, stopping at a data-driven
-  threshold or a generous safety valve rather than an arbitrary result
-  count -- see `docs/ARCHITECTURE.md` for the exact stopping rule. Price
-  range is $0.40-$25.00. There is no cap on how many symbols get scanned
-  per cycle -- every symbol every source returns gets checked, so
-  full-scan duration scales with universe size rather than being bounded
-  by a fixed number; see `docs/ARCHITECTURE.md` for the measured
-  per-symbol timing this implies (noting those numbers predate this wider
-  price range/pagination/4th source and now understate real scan time).
+  ranking anywhere in the API, confirmed live). Three more sources are
+  wired in but **not yet live-verified** (their `rank_type` strings and
+  the value field each pagination threshold checks are inferred, not
+  confirmed against a real response -- see `docs/ARCHITECTURE.md`'s
+  "Production run-loop" section):
+  `get_gainers_losers(rank_type="PRE_MARKET")` and
+  `get_gainers_losers(rank_type="AFTER_MARKET")` (today's top % movers
+  during the pre-market and after-hours sessions), and
+  `get_most_active(rank_type="AMPLITUDE")` (today's most active names by
+  high-low price range). Each source paginates instead of taking a single
+  fixed-size page, stopping at a data-driven threshold or a generous
+  safety valve rather than an arbitrary result count -- see
+  `docs/ARCHITECTURE.md` for the exact stopping rule. Price range is
+  $0.40-$25.00. There is no cap on how many symbols get scanned per cycle
+  -- every symbol every source returns gets checked, so full-scan duration
+  scales with universe size rather than being bounded by a fixed number;
+  see `docs/ARCHITECTURE.md` for the measured per-symbol timing this
+  implies (noting those numbers predate this wider price
+  range/pagination/more sources and now understate real scan time).
+- **Extended-hours pricing**: `WebullBrokerClient.get_snapshot()` now
+  requests extended-hours data (`extend_hour_required=True`) and prefers an
+  `ext_price` field over the regular-session `price` when present, so a
+  candidate's displayed/used price reflects the latest pre-market or
+  after-hours trade instead of going stale the moment the regular session
+  ends. The exact `ext_price` field name is inferred from the SDK's
+  protobuf streaming schema, not confirmed against a real sandbox response
+  -- see the module docstring in `brokers/webull/client.py` and
+  `docs/ARCHITECTURE.md`'s "Webull integration" section. It fails soft: if
+  the field name guess is wrong, or it's simply absent, pricing just falls
+  back to the regular-session `price` as before.
   Dollar volume is an informational `Candidate` field, not a discovery
   gate. Average-daily, previous-day, and current-day (today's
   volume-so-far) volume, however, ARE a structural gate again

@@ -94,8 +94,10 @@ in place, and the broker returns a fresh object on every call -- refetching
 every tick would silently discard the running trailing-stop/MFE/MAE state
 computed on prior ticks.
 
-`data/universe.py` feeds the scanner from **four** independent, live-verified
-Webull screener sources, combined by `MultiSourceUniverseProvider`:
+`data/universe.py` feeds the scanner from **seven** independent Webull
+screener sources, combined by `MultiSourceUniverseProvider`. The first
+four are live-verified; the last three (pre-market, after-hours, and
+amplitude) are not -- see the note after them.
 
 - `WebullUniverseProvider` with `rank_type="RELATIVE_VOLUME_10D"` -- the
   project's "high relative volume" criterion directly.
@@ -124,6 +126,25 @@ Webull screener sources, combined by `MultiSourceUniverseProvider`:
   symbol is already being watched (`MomentumMetrics.volume_5m`/
   `float_velocity_5m` in `metrics/rolling.py`), rather than invented from
   a screener endpoint that doesn't exist.
+- **5th/6th sources, added later, NOT live-verified**: the same
+  `WebullGainersLosersUniverseProvider` class again with
+  `rank_type="PRE_MARKET"` and `rank_type="AFTER_MARKET"` -- catches a
+  name already igniting before the regular session opens or after it
+  closes, which none of the four sources above can see at all (they only
+  rank regular-session activity). `PRE_MARKET`/`AFTER_MARKET` are
+  documented Webull `rank_type` values for this endpoint but this specific
+  pull was never confirmed live the way `DAY_1`/`MIN_5` were -- treat the
+  field names/behavior as inferred from the shared response shape, not
+  verified.
+- **7th source, added later, NOT live-verified**: `WebullUniverseProvider`
+  again with `rank_type="AMPLITUDE"` -- today's price amplitude (high-low
+  range), a volatility-based ranking distinct from every volume/turnover/
+  change-ratio source above. Catches a name whipsawing in a wide range
+  even if its net change or relative volume alone wouldn't stand out yet.
+  Same caveat: `AMPLITUDE` is a documented `rank_type` on `get_most_active`,
+  but neither this specific rank_type nor the `amplitude` field name
+  assumed for its pagination threshold (`_page_below_rank_threshold`) have
+  been confirmed against a live response.
 
 Each source **paginates** rather than taking a single fixed-size page
 (confirmed live: both endpoints accept `page_index`/`page_size` and return
@@ -162,6 +183,18 @@ time, not an explosion. These three new thresholds are first-pass
 estimates from the live decay curves observed that day, not backtested --
 treat them the same as `scoring/weights.yaml`'s "unvalidated starting
 point" framing, not settled values.
+
+**The PRE_MARKET/AFTER_MARKET/AMPLITUDE thresholds (0.15/0.15/10.0) carry
+the same warning, one level further removed**: they weren't set from an
+observed live decay curve at all (unlike the four above), since the
+sources themselves were never live-tested -- they're a first guess at
+"probably high enough to avoid the same max_pages-firing-as-normal-
+operating-point problem," reasoned from the pattern of the four verified
+ones, not measured. Live-test these three the same way the original four
+were before trusting the exact cutoffs, and don't be surprised if the
+`amplitude` field-name guess for the 7th source's pagination threshold
+turns out wrong (in which case it just falls back to the `max_pages`
+safety valve, per that source's own comment in `main.py`).
 
 `MultiSourceUniverseProvider` is a plain union (every source queried every
 cycle, not a priority fallback chain) with per-source failure isolation --
@@ -1066,6 +1099,28 @@ Two non-obvious things worth knowing if you're debugging this client:
    invalid.`) -- that Python enum apparently isn't what the order-placement
    endpoint expects, despite looking like the obvious match. Confirmed by
    testing both live.
+3. **`get_snapshot`'s extended-hours price is opt-in and unverified.**
+   Passing `extend_hour_required=True` (now always set -- see
+   `WebullBrokerClient.get_snapshot`) is required for Webull to include
+   pre-market/after-hours pricing at all; without it, `last_price` silently
+   stays pinned to the regular-session price for hours after the session
+   ends, which is exactly the window the `PRE_MARKET`/`AFTER_MARKET`
+   discovery sources above are trying to catch movers in. The field this
+   code reads for that price (`ext_price` in `_snapshot_from_dict`) is
+   *inferred* from the SDK's protobuf streaming schema's naming convention
+   (`ext_price`/`ext_high`/`ext_low`/`ext_volume` alongside the regular
+   fields, in `webull/data/quotes/subscribe/message_pb2.py`), not confirmed
+   against this REST endpoint's actual JSON body -- the SDK ships no
+   schema for that body to check against, and this repo's own fixture
+   (`_REAL_SNAPSHOT_ROW` in `tests/test_webull_broker_client.py`) predates
+   `extend_hour_required=True` and has no `ext_price` key to confirm from.
+   If the real key differs, this fails soft (falls back to the regular
+   `price`, same as today) rather than erroring -- but that also means a
+   wrong guess would go unnoticed without an explicit live check during a
+   real pre-market or after-hours session. There's also a separate
+   `overnight_required`/`ovn_price` pair for Webull's newer overnight
+   session, deliberately not requested here since only pre/after-market
+   was asked for.
 
 Streaming (`subscribe_quotes`) intentionally raises `NotImplementedError`:
 `DataStreamingClient` needs an `mqtt_host`, and only the production value

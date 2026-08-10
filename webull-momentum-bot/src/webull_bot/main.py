@@ -82,14 +82,15 @@ def build_trading_loop(
     broad_scanner = BroadScanner(broker, float_provider)
 
     if isinstance(broker, WebullBrokerClient):
-        # Four independent discovery sources, unioned (not a priority
+        # Seven independent discovery sources, unioned (not a priority
         # fallback chain) -- each catches a different kind of momentum:
-        # relative volume, float turnover, today's raw price change, and
-        # the last 5 minutes' raw price change. A symbol only needs to
-        # show up on ONE list; BroadScanner vets every symbol the same way
-        # regardless of which list(s) surfaced it.
+        # relative volume, float turnover, today's raw price change, the
+        # last 5 minutes' raw price change, pre-market movers, after-hours
+        # movers, and today's price amplitude (high-low range). A symbol
+        # only needs to show up on ONE list; BroadScanner vets every symbol
+        # the same way regardless of which list(s) surfaced it.
         #
-        # All four sources set rank_value_field/min_rank_value -- pagination
+        # All seven sources set rank_value_field/min_rank_value -- pagination
         # WITHOUT one was confirmed live (2026-08-09) to be a real problem,
         # not a theoretical one: each of TURNOVER_RATE/DAY_1/MIN_5 paginated
         # all the way to max_pages (2000 raw results) and still hadn't
@@ -107,6 +108,17 @@ def build_trading_loop(
         # thresholds are first-pass estimates from the live decay curves
         # observed that day, not backtested -- tune them with real data
         # before trusting the exact cutoff.
+        #
+        # PRE_MARKET/AFTER_MARKET/AMPLITUDE (added later) have NOT been
+        # live-verified the way the first four were: their rank_type
+        # strings and rank_value_field names ("change_ratio" for the former
+        # two, "amplitude" for the third) are inferred from the same shared
+        # response shape the verified sources use, not confirmed against a
+        # real response. If a field name guess is wrong, _page_below_rank_threshold
+        # simply never trips for that source and it falls back to the
+        # max_pages safety valve instead of the intended threshold --
+        # bounded, just less precisely, not unbounded. Re-verify live
+        # before trusting these three the way the first four are trusted.
         universe_provider = MultiSourceUniverseProvider([
             WebullUniverseProvider.from_broker(broker, WebullUniverseConfig(
                 # Reuses scoring/weights.yaml's min_relative_volume_for_watch.
@@ -134,6 +146,31 @@ def build_trading_loop(
             WebullGainersLosersUniverseProvider.from_broker(broker, WebullGainersLosersConfig(
                 rank_type="MIN_5", sort_by="CHANGE_RATIO", direction="DESC",
                 rank_value_field="change_ratio", min_rank_value=0.05,
+            )),
+            # 5th/6th sources: pre-market and after-hours movers -- these
+            # catch a name that's already igniting before/after the regular
+            # session even opens/closes, which none of the four sources
+            # above can see at all (they only rank regular-session activity).
+            # Threshold set higher than DAY_1's regular-session 0.10: extended-
+            # hours volume is much thinner, so a given % move there is
+            # backed by less real conviction than the same move intraday --
+            # 0.15 is a first-pass attempt to filter out thin-volume noise,
+            # not a calibrated number.
+            WebullGainersLosersUniverseProvider.from_broker(broker, WebullGainersLosersConfig(
+                rank_type="PRE_MARKET", sort_by="CHANGE_RATIO", direction="DESC",
+                rank_value_field="change_ratio", min_rank_value=0.15,
+            )),
+            WebullGainersLosersUniverseProvider.from_broker(broker, WebullGainersLosersConfig(
+                rank_type="AFTER_MARKET", sort_by="CHANGE_RATIO", direction="DESC",
+                rank_value_field="change_ratio", min_rank_value=0.15,
+            )),
+            # 7th source: today's price amplitude (high-low range), a
+            # volatility-based ranking distinct from all the volume/turnover/
+            # change-ratio sources above -- catches a name whipsawing in a
+            # wide range even if its net change or relative volume alone
+            # wouldn't stand out yet.
+            WebullUniverseProvider.from_broker(broker, WebullUniverseConfig(
+                rank_type="AMPLITUDE", rank_value_field="amplitude", min_rank_value=10.0,
             )),
         ])
     else:
