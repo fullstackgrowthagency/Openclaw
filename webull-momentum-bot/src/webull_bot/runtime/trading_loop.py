@@ -273,6 +273,19 @@ class TradingLoop:
             except OrderRejected:
                 logger.exception("Unexpected OrderRejected while force-closing %s (%s).", symbol, exit_reason.value)
                 continue
+            except Exception:
+                # Same gap, same fix as _manage_position's own exit
+                # submission below -- a real broker.place_order failure
+                # here must not silently take down the rest of the flatten
+                # (the existing "one bad symbol shouldn't block every other
+                # position" contract this method already documents), and
+                # must be loud about exactly which symbol/exit_reason
+                # failed rather than surfacing only in a generic catch-all.
+                logger.exception(
+                    "broker.place_order raised while force-closing %s (%s) -- position remains open, "
+                    "will retry on this symbol's normal _manage_position tick.", symbol, exit_reason.value,
+                )
+                continue
             self._notify_order_update(order)
 
             if order.status == OrderStatus.FILLED:
@@ -703,6 +716,26 @@ class TradingLoop:
             # Exits aren't supposed to be rejectable (see order_manager.py),
             # but don't crash the loop if something unexpected happens.
             logger.exception("Unexpected OrderRejected on an exit signal for %s.", candidate.symbol)
+            return
+        except Exception:
+            # Mirrors _submit_entry's own catch-all below, added for the
+            # same reason: a real incident where a stop-loss failed to fire
+            # on a position sitting well past its stop, with the only trace
+            # of why buried inside _process_all_candidates' generic
+            # per-candidate "Unhandled error processing candidate" catch --
+            # useful enough to notice something failed, not specific enough
+            # to see AT WHICH STEP or WHY without re-reading this whole
+            # method's call chain under time pressure. This still just
+            # returns (check_exit re-evaluates fresh next tick, same as
+            # the OrderRejected branch above -- no candidate/position state
+            # needs to change here, unlike _submit_entry reverting TRIGGERED
+            # back to ARMED), but now logs specifically that IT WAS THE
+            # EXIT SUBMISSION that failed, for this symbol, with the real
+            # traceback, the instant it happens.
+            logger.exception(
+                "broker.place_order raised submitting an exit (%s) for %s -- position remains open, "
+                "will retry next tick.", exit_signal.action.value, candidate.symbol,
+            )
             return
         self._notify_order_update(order)
 

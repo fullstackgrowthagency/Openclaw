@@ -1033,6 +1033,32 @@ rolls back the risk-engine counters via `record_entry_order_failed` (since
 fallback to eventually clean up a state it was never designed to be the
 primary path for.
 
+**The exit-submission side of the same gap -- a stop-loss that silently
+never fires.** `_submit_entry`'s catch-all above only covers *entries*.
+`_manage_position`'s own exit submission (`order_manager.submit_signal`
+for the `EXIT`/`SCALE_OUT` signal `PositionManager.check_exit` produces)
+and `_close_all_positions_now`'s equivalent (shared by the kill switch and
+the end-of-core-hours auto-flatten) both had the identical narrow
+`except OrderRejected` and nothing else. Confirmed as a real incident, not
+just a theoretical gap: a position sat well past its `stop_price` with the
+stop never firing, because whatever `broker.place_order` raised wasn't
+`OrderRejected` and so propagated out of `_manage_position` entirely,
+landing only in `_process_all_candidates`'s generic per-candidate
+`except Exception` -- which kept the loop alive (so `check_exit` *did*
+get a fair retry every subsequent tick) but gave no specific signal about
+which step failed or why, making this materially harder to diagnose under
+time pressure than the entry-side version of the same class of bug. Both
+call sites now also catch `Exception` broadly and log specifically that
+the *exit submission* failed for that symbol, with the real traceback,
+before returning/continuing exactly as the `OrderRejected` branch already
+did -- no position/candidate state changes here (unlike `_submit_entry`
+reverting `TRIGGERED` back to `ARMED`), since `check_exit` re-evaluates
+fresh from scratch every tick regardless of what happened on the previous
+one. This does NOT retry with backoff or alert anyone by itself --
+persistent, per-tick log noise for a genuinely stuck exit is the current
+behavior, and the dashboard/logs are still where a human has to notice a
+position that keeps failing to close every single tick.
+
 **Position tracking can be lost on a broker-side fill reconciliation
 failure.** `TradingLoop._confirm_entry_filled` is the *only* place a filled
 entry order becomes a locally-tracked position (`self._positions`), and by

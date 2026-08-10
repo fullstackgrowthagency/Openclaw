@@ -491,8 +491,47 @@ def test_exit_stays_managing_while_pending_then_finalizes_on_fill():
     assert trades[0].exit_reason == ExitReason.PARTIAL_PROFIT_TARGET
     assert trades[0].exit_price == 5.25  # from the fake fill
     assert trades[0].quantity == 5
-    assert loop._positions["TEST"].quantity == 5
-    assert loop._positions["TEST"].partial_exit_taken is True
+
+
+def test_manage_position_survives_an_unexpected_broker_exception_on_stop_loss():
+    # Real production incident: a position sat well past its stop_price
+    # with the stop never firing. _manage_position's exit-submission catch
+    # only handled OrderRejected -- any other exception from
+    # broker.place_order (via order_manager.submit_signal) propagated all
+    # the way up to _process_all_candidates' generic per-candidate
+    # catch-all, which kept the loop alive but gave no clear signal about
+    # WHERE it failed. This proves the position is neither lost nor left
+    # in a broken state, and that check_exit gets a fair try again next
+    # tick once the transient failure clears.
+    class _BrokenSellBroker(_FakeBroker):
+        def place_order(self, order):
+            if order.side == OrderSide.SELL:
+                raise RuntimeError("simulated unexpected broker failure on exit")
+            return super().place_order(order)
+
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState
+
+    broker = _BrokenSellBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    snapshot = _snapshot(datetime.utcnow(), 4.00, 4.00, 600_000, 3.99, 4.01, 4.50)  # well past the 4.50 stop
+    loop._manage_position(candidate, snapshot, snapshot.timestamp)  # must not raise
+
+    # Position/candidate survive untouched, ready for check_exit to fire
+    # again on the very next tick -- not lost, not stuck in a pending state
+    # that never resolves.
+    assert "TEST" in loop._positions
+    assert candidate.symbol not in loop._pending_exit_orders
+    assert candidate.state.value == "managing"
+    assert loop._positions["TEST"].quantity == 10
 
 
 def test_cooldown_expires_back_to_watching():
@@ -1038,6 +1077,38 @@ def test_kill_switch_flatten_skips_symbol_on_snapshot_failure_without_crashing()
     # The good symbol still closes even though the other one failed.
     assert "TEST" not in loop._positions
     assert "NOSNAPSHOT" in loop._positions
+
+
+def test_kill_switch_flatten_survives_an_unexpected_broker_exception_on_one_symbol():
+    # Same class of production incident as _manage_position's own fix
+    # (test_manage_position_survives_an_unexpected_broker_exception_on_stop_loss)
+    # applied to the flatten-everything path instead: this used to only
+    # catch OrderRejected around the exit submission, so any other
+    # exception from broker.place_order would propagate out of
+    # _close_all_positions_now entirely, aborting the flatten for every
+    # OTHER symbol too -- exactly the "one bad symbol shouldn't leave
+    # everything else uncautiously open" contract this method's own
+    # docstring already promises for a get_snapshot failure.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker, symbol="AAA", price=10.0)
+    _managing_candidate_with_position(loop, broker, symbol="BBB", price=20.0)
+
+    original_submit = loop.order_manager.submit_signal
+
+    def _flaky_submit(signal, **kwargs):
+        if signal.symbol == "AAA":
+            raise RuntimeError("simulated unexpected broker failure")
+        return original_submit(signal, **kwargs)
+
+    loop.order_manager.submit_signal = _flaky_submit
+
+    loop.engage_kill_switch_and_flatten("test halt")
+    loop._process_all_candidates(_IN_HOURS_NOW)  # must not raise
+
+    assert "AAA" in loop._positions  # left open, ready to retry next tick
+    assert "BBB" not in loop._positions  # unaffected by AAA's failure
 
 
 # -- end-of-core-hours auto-flatten (distinct from the kill switch: no

@@ -75,6 +75,21 @@ What's implemented and tested:
   bugs this fixes, not hypotheticals -- see `docs/ARCHITECTURE.md`'s
   "Daily trade counters vs. actual trades" and "`_submit_entry`'s catch-all
   exception handler" notes)
+- **A stop-loss can silently fail to fire -- fixed.** The exit-side
+  counterpart to the entry catch-all above: `_manage_position`'s exit
+  submission and the shared kill-switch/end-of-day flatten path
+  (`_close_all_positions_now`) both only caught `OrderRejected`, same gap
+  as the entry side used to have. Confirmed as a real incident, not just a
+  theoretical one: a position sat well past its `stop_price` with the stop
+  never firing, because `broker.place_order` raised something else, which
+  surfaced only in a generic per-candidate catch-all with no specific
+  indication of what failed. Both call sites now also catch `Exception`
+  broadly and log specifically that the exit submission failed for that
+  symbol -- `check_exit` still gets a fair retry every subsequent tick
+  either way (that part already worked), this just makes it possible to
+  actually diagnose a stuck exit instead of guessing -- see
+  `docs/ARCHITECTURE.md`'s "The exit-submission side of the same gap"
+  section.
 - **Core trading hours entry gate**: `RiskEngine.evaluate` unconditionally
   refuses any new entry signal outside 9:30am-4:00pm ET, Monday-Friday
   (`market_hours.is_within_core_trading_hours`) -- added after a real
