@@ -278,6 +278,98 @@ def test_entry_stays_triggered_while_order_pending_then_enters_on_fill():
     assert loop._positions["TEST"].avg_entry_price == 5.20  # from broker.get_positions()
 
 
+def _trigger_and_build_signal(candidate, snapshot):
+    from webull_bot.enums import CandidateState, SignalAction
+    from webull_bot.models import Signal
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    return Signal(
+        symbol=candidate.symbol, action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
+        strategy_name="test", strategy_version="v1", reference_price=5.20, suggested_stop=5.00,
+    )
+
+
+# -- RiskEngine.record_entry_order_failed rollback -- see that method's
+# docstring for the real production bug this fixes: a broker-rejected order
+# (no position ever opened) was permanently consuming a real trade's slot,
+# eventually exhausting max_trades_per_ticker_per_day with zero actual trades
+
+def test_submit_entry_rolls_back_ticker_count_on_immediate_broker_rejection():
+    class _ImmediatelyRejectingBroker(_FakeBroker):
+        def place_order(self, order):
+            order.status = OrderStatus.REJECTED
+            order.broker_order_id = order.client_order_id
+            return order
+
+    broker = _ImmediatelyRejectingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(datetime.utcnow(), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    assert candidate.symbol not in loop._pending_entry_orders
+    assert candidate.state.value == "armed"
+    # The approval's optimistic increment must be rolled back -- no
+    # position ever opened, so this must not count against the ticker.
+    assert loop.risk_engine._daily.trades_per_ticker.get("TEST", 0) == 0
+
+
+def test_poll_pending_entry_rolls_back_ticker_count_when_later_rejected():
+    class _LaterRejectingBroker(_FakeBroker):
+        def get_order_status(self, broker_order_id):
+            order = self._orders[broker_order_id]
+            order.status = OrderStatus.REJECTED
+            return order
+
+    broker = _LaterRejectingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(datetime.utcnow(), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+    assert candidate.symbol in loop._pending_entry_orders  # SUBMITTED initially
+    assert loop.risk_engine._daily.trades_per_ticker.get("TEST", 0) == 1  # approved so far
+
+    loop._poll_pending_entry(candidate, snapshot.timestamp)
+
+    assert candidate.symbol not in loop._pending_entry_orders
+    assert candidate.state.value == "armed"
+    assert loop.risk_engine._daily.trades_per_ticker.get("TEST", 0) == 0
+
+
+def test_repeated_broker_rejections_never_exhaust_the_ticker_budget():
+    # RiskConfig's default max_trades_per_ticker_per_day is 2 -- before this
+    # fix, two consecutive broker-level rejections alone (zero real
+    # positions ever opened) would have exhausted it.
+    class _AlwaysRejectingBroker(_FakeBroker):
+        def place_order(self, order):
+            order.status = OrderStatus.REJECTED
+            order.broker_order_id = order.client_order_id
+            return order
+
+    broker = _AlwaysRejectingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(datetime.utcnow(), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+
+    for _ in range(2):
+        signal = _trigger_and_build_signal(candidate, snapshot)
+        loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+        assert candidate.state.value == "armed"
+
+    # A third attempt must still be risk-approved -- the two failed
+    # attempts above never actually consumed the ticker's real budget.
+    signal = _trigger_and_build_signal(candidate, snapshot)
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    from webull_bot.enums import RiskEventType
+
+    assert not any(
+        e.event_type == RiskEventType.MAX_TRADES_PER_TICKER_HIT.value for e in loop.risk_engine.events
+    )
+
+
 def test_exit_stays_managing_while_pending_then_finalizes_on_fill():
     broker = _FakeBroker(fills_after_polls=1)
     loop, candidate = _armed_candidate_setup(broker)

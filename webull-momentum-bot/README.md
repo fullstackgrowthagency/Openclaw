@@ -63,7 +63,15 @@ What's implemented and tested:
   spread/liquidity gates, cooldowns, and a kill switch -- the four sizing
   metrics above are live-adjustable from the dashboard's Settings button
   (top right), no restart required; see `docs/ARCHITECTURE.md`'s "Risk
-  sizing" section for the full mechanics
+  sizing" section for the full mechanics. Approving a signal optimistically
+  increments the daily/per-ticker trade counters immediately, before the
+  broker has confirmed anything -- `RiskEngine.record_entry_order_failed`
+  rolls that back if the resulting order is later rejected/canceled/expired
+  by the broker without ever filling, so a broker-side rejection (e.g.
+  outside trading hours) can't silently exhaust a symbol's daily entry
+  budget with zero real positions ever opened (a real bug this fixes, not
+  a hypothetical one -- see `docs/ARCHITECTURE.md`'s "Daily trade counters
+  vs. actual trades" note)
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry

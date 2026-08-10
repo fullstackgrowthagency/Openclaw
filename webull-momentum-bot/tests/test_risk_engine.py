@@ -141,6 +141,59 @@ def test_enforces_max_trades_per_ticker_per_day():
     assert not second.approved
 
 
+# -- record_entry_order_failed: rolling back an approved-but-never-filled
+# entry -- see TradingLoop._submit_entry/_poll_pending_entry, and the real
+# production bug this fixes: a broker-rejected order (e.g. outside trading
+# hours) was silently consuming a real trade's slot despite no position ever
+# opening, eventually exhausting max_trades_per_ticker_per_day with zero
+# actual trades ------------------------------------------------------------
+
+def test_record_entry_order_failed_frees_up_the_ticker_slot():
+    engine = RiskEngine(RiskConfig(max_trades_per_ticker_per_day=1, cooldown_minutes_after_loss=0))
+    first = _evaluate(engine)
+    assert first.approved
+
+    # The order this approval led to never actually filled (broker
+    # rejected it) -- roll back the optimistic increment.
+    engine.record_entry_order_failed("ABCD")
+
+    second = _evaluate(engine)
+    assert second.approved  # slot was freed, not permanently consumed
+
+
+def test_record_entry_order_failed_frees_up_the_daily_trade_count():
+    engine = RiskEngine(RiskConfig(max_trades_per_day=1, max_trades_per_ticker_per_day=10))
+    first = _evaluate(engine, signal=_signal(symbol="AAAA"))
+    assert first.approved
+
+    engine.record_entry_order_failed("AAAA")
+
+    second = _evaluate(engine, signal=_signal(symbol="BBBB"), snapshot=_snapshot(symbol="BBBB"))
+    assert second.approved  # daily slot was freed too, not just the ticker one
+
+
+def test_record_entry_order_failed_does_not_go_negative():
+    engine = RiskEngine(RiskConfig())
+    # No prior approval at all -- must not underflow into a negative count
+    # that would then let extra approvals sneak through the daily cap.
+    engine.record_entry_order_failed("ABCD")
+    assert engine._daily.trade_count == 0
+    assert engine._daily.trades_per_ticker.get("ABCD", 0) == 0
+
+
+def test_record_entry_order_failed_only_frees_the_affected_ticker():
+    engine = RiskEngine(RiskConfig(max_trades_per_ticker_per_day=1, cooldown_minutes_after_loss=0))
+    _evaluate(engine, signal=_signal(symbol="AAAA"))
+    _evaluate(engine, signal=_signal(symbol="BBBB"), snapshot=_snapshot(symbol="BBBB"))
+
+    engine.record_entry_order_failed("AAAA")
+
+    # AAAA's slot was freed...
+    assert _evaluate(engine, signal=_signal(symbol="AAAA")).approved
+    # ...but BBBB's real approval is untouched and still counts against it.
+    assert not _evaluate(engine, signal=_signal(symbol="BBBB"), snapshot=_snapshot(symbol="BBBB")).approved
+
+
 def test_cooldown_blocks_reentry_after_loss():
     engine = RiskEngine(RiskConfig(cooldown_minutes_after_loss=15, max_trades_per_ticker_per_day=10))
     now = datetime.utcnow()

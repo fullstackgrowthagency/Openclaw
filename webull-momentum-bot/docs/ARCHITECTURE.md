@@ -945,6 +945,35 @@ buying-power-vs-equity distinction in #4), but -- like every other
 threshold in this codebase -- these defaults are unvalidated starting
 points, not backtested or run live yet.
 
+**Daily trade counters vs. actual trades**: `max_trades_per_day` and
+`max_trades_per_ticker_per_day` (default 2) are incremented at the very
+end of `evaluate()`, the instant a signal is approved -- but approval only
+means the signal passed risk criteria, not that a real position ever
+opened. `OrderManager.submit_signal` still has to hand the resulting order
+to the broker, which can reject it immediately, or accept it and later
+resolve it to `REJECTED`/`CANCELED`/`EXPIRED` without ever filling (a
+symbol rejected for being outside trading hours, a transient broker-side
+rejection, etc.) -- confirmed as a real production bug: two such
+broker-level rejections on the same symbol, with zero positions ever
+opened, silently exhausted that symbol's entire `max_trades_per_ticker_per_day`
+budget for the rest of the session, later surfacing as a confusing
+`max_trades_per_ticker_hit` risk event on a symbol that had never actually
+been traded.
+
+`RiskEngine.record_entry_order_failed(symbol, now)` rolls back that
+optimistic increment (`trade_count` and `trades_per_ticker[symbol]`, both
+floored at 0) when this happens. `TradingLoop` calls it from both places an
+approved entry can still fail to become a real position:
+`_submit_entry`'s immediate-non-fill branch (the broker rejected the order
+right away) and `_poll_pending_entry`'s `REJECTED`/`CANCELED`/`EXPIRED`
+branch (the order was briefly pending before failing). A genuine
+risk-engine-level rejection (`OrderRejected`, caught earlier in
+`_submit_entry`) never calls this -- `evaluate()` never incremented
+anything in that case, since the signal was rejected before reaching the
+increment at the bottom of the method. `record_trade_closed` (realized
+P&L, post-loss cooldown) is a separate, unrelated counter -- this only
+affects the two daily trade-count gates.
+
 ## Position management (exits)
 
 **Important, easy to assume otherwise: `RiskEngine` never sets or

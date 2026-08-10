@@ -548,6 +548,12 @@ class TradingLoop:
             self._pending_entry_orders[candidate.symbol] = order
             # trigger_engine already moved this candidate to TRIGGERED.
         else:
+            # Risk-approved but the broker itself rejected/failed the order
+            # immediately (e.g. outside trading hours) -- no position ever
+            # opened, so this must not permanently consume this symbol's
+            # daily entry budget. See RiskEngine.record_entry_order_failed's
+            # docstring for the real production case this fixes.
+            self.risk_engine.record_entry_order_failed(candidate.symbol, now)
             transition(candidate, CandidateState.ARMED, now=now, reason=f"entry order {order.status.value}")
 
     def _poll_pending_entry(self, candidate: Candidate, now: datetime) -> None:
@@ -571,6 +577,11 @@ class TradingLoop:
         elif status_order.status in (OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED):
             self._entry_signals.pop(candidate.symbol, None)
             self._pending_entry_orders.pop(candidate.symbol, None)
+            # Same rollback as _submit_entry's immediate-failure branch --
+            # this order was risk-approved and briefly pending, but never
+            # actually filled, so it must not count against this symbol's
+            # daily entry budget either.
+            self.risk_engine.record_entry_order_failed(candidate.symbol, now)
             transition(candidate, CandidateState.ARMED, now=now, reason=f"entry order {status_order.status.value}")
         # else still pending: leave as TRIGGERED, check again next tick
 

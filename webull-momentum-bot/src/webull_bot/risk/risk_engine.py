@@ -81,6 +81,42 @@ class RiskEngine:
         if pnl < 0:
             self._last_loss_at[symbol] = now
 
+    def record_entry_order_failed(self, symbol: str, now: Optional[datetime] = None) -> None:
+        """Rolls back the optimistic trade_count/trades_per_ticker increment
+        `evaluate()` makes the moment it approves an entry signal (see the
+        bottom of that method) -- risk *approval* only means the signal
+        passed risk criteria, not that a real position ever opened. If the
+        resulting order is later confirmed REJECTED/CANCELED/EXPIRED by the
+        broker without ever filling (e.g. a symbol rejected outside trading
+        hours, a transient broker-side rejection), that attempt created no
+        real market exposure and must not permanently consume a slot
+        against max_trades_per_day/max_trades_per_ticker_per_day the same
+        way an actual trade would -- confirmed as a real bug in production:
+        two broker-rejected entry attempts on the same symbol, zero
+        positions ever opened, silently exhausted that symbol's entire
+        daily entry budget for the rest of the session.
+
+        Called from TradingLoop._submit_entry (an immediate non-fill,
+        non-pending order status) and _poll_pending_entry (a pending order
+        that later resolves to REJECTED/CANCELED/EXPIRED) -- never for a
+        risk-engine-level rejection (OrderRejected), since evaluate() never
+        incremented anything in that case to begin with.
+
+        Floored at 0 via max(), and re-rolls the day first like every other
+        _daily mutator: if the failure is somehow confirmed after a day
+        boundary has already passed (evaluate() ran right before midnight,
+        the broker's rejection arrives just after), _daily is already a
+        fresh, zeroed state for the new day at that point, so this is a
+        harmless no-op on it rather than corrupting the new day's counts --
+        the stale prior day's inflated counters are simply gone regardless,
+        same as any other day-rollover, not something this needs to chase."""
+        now = now or datetime.utcnow()
+        self._roll_day_if_needed(now)
+        self._daily.trade_count = max(0, self._daily.trade_count - 1)
+        ticker_count = self._daily.trades_per_ticker.get(symbol, 0)
+        if ticker_count > 0:
+            self._daily.trades_per_ticker[symbol] = ticker_count - 1
+
     def engage_kill_switch(self, reason: str, now: Optional[datetime] = None) -> None:
         self.kill_switch_active = True
         self._log_event(RiskEventType.KILL_SWITCH_ENGAGED, None, reason, now)
