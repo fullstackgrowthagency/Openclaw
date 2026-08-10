@@ -625,32 +625,30 @@ class WebullBrokerClient(BrokerClient):
             "quantity": str(order.quantity),
             "side": side,
             "time_in_force": tif,
-            # "ALL" (regular + pre-market + after-hours), not "CORE" (regular
-            # hours only -- the prior value here, and a real production bug):
-            # this project actively discovers and prices candidates during
-            # pre/after-market (PRE_MARKET/AFTER_MARKET universe sources,
-            # ext_price/ext_volume in _snapshot_from_dict), so a signal can
-            # legitimately trigger outside regular hours. An order submitted
-            # with "CORE" during those windows doesn't fill or get rejected --
-            # it just sits queued at Webull until the next regular session,
-            # reserving buying power the whole time with nothing to show for
-            # it. Confirmed via a real production case: multiple candidates
-            # stuck in TRIGGERED with reduced buying power and zero open
-            # positions, all during a pre-market window. This matters even
-            # more for EXIT orders (this payload is shared by both): a
-            # stop-loss that can't execute during after-hours because of
-            # "CORE" would leave an open position exposed to further
-            # downside with no way to close it until the next session opens.
-            # Third documented value, "NIGHT" (a separate overnight session),
-            # is not requested here -- only pre/after-market was asked for,
-            # same scope as extend_hour_required elsewhere in this file.
-            # Values confirmed via Webull's official OpenAPI documentation
-            # (developer.webull.com/apis/docs/trade-api/stock/), NOT yet
-            # verified against an actual live order placed with "ALL" in the
-            # sandbox -- re-verify the next time an order is placed outside
-            # regular hours (confirm it actually fills instead of silently
-            # queuing) before fully trusting this.
-            "support_trading_session": "ALL",
+            # "CORE" -- confirmed live on 2026-08-10 that this account/
+            # endpoint REJECTS "ALL" outright: OAUTH_OPENAPI_PARAM_ERR
+            # ("Parameter error, invalid support_trading_session, value:
+            # ALL"), HTTP 417. This directly contradicts Webull's own public
+            # OpenAPI docs (developer.webull.com/apis/docs/trade-api/stock/),
+            # which list "ALL" as a documented value -- a real API response
+            # overrides that documentation, not the other way around. This
+            # was briefly changed to "ALL" to fix a different real incident
+            # (candidates stuck in TRIGGERED with reserved buying power and
+            # no fill, believed at the time to be an extended-hours ordering
+            # issue) -- that diagnosis was itself later corrected by direct
+            # confirmation that the actual trigger happened during core
+            # hours, and the live 417 above confirms "ALL" was never usable
+            # here regardless. Do not change this back to "ALL" without a
+            # successful live order proving the account/endpoint actually
+            # accepts it -- the docs alone are not sufficient evidence, this
+            # is now the second time they've disagreed with the live API.
+            # Since RiskEngine.evaluate already refuses every entry outside
+            # core hours (see market_hours.py), "CORE" costs entries nothing;
+            # the still-open question is whether the end-of-core-hours
+            # auto-flatten's exit order, fired right at the 4:00pm ET
+            # boundary, can execute under "CORE" -- watch for that
+            # specifically the next time a position is still open at close.
+            "support_trading_session": "CORE",
             "entrust_type": "QTY",
             "client_order_id": client_order_id,
         }

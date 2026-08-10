@@ -1574,40 +1574,38 @@ Four non-obvious things worth knowing if you're debugging this client:
    checks `get_raw_bars`' `trading_sessions` parameter specifically, not
    this one, but the same "does the live response actually confirm the
    inferred field/value" question applies here.
-4. **`support_trading_session` is `"ALL"`, not `"CORE"`, so an exit order
-   fired right at (or a moment after) the 4:00pm ET close can still
-   execute.** `_order_payload()` (used for both entries and exits)
-   previously hardcoded this field to `"CORE"` with no comment explaining
-   the choice. First diagnosis (later corrected by direct user
-   confirmation) guessed this alone explained a report of buying power
-   being reserved with no resulting position; the user then confirmed the
-   actual trigger happened *during* core hours, which redirected the real
-   fix to the position-tracking bug below and to the new core-hours entry
-   gate instead. `"ALL"` is kept anyway, but for a narrower, still-real
-   reason: `runtime/trading_loop.py`'s end-of-core-hours auto-flatten (see
-   its own doc section) submits its closing MARKET order right at or just
-   after the 4:00pm boundary -- `market_hours.is_after_core_trading_hours`
-   is true starting exactly at 4:00pm -- and a `"CORE"`-flagged order
-   placed at that exact instant risks the same "accepted but won't execute
-   until next session" behavior this field was originally changed to
-   avoid. New entries never need this leniency at all: `RiskEngine.evaluate`
-   now unconditionally refuses any entry signal outside core hours (see
-   below), so an entry order is never even *attempted* outside that window
-   regardless of what this field says. Webull's docs
-   (`developer.webull.com/apis/docs/trade-api/stock/`) list three values:
-   `"CORE"` (regular session only), `"ALL"` (regular + pre-market +
-   after-hours), and `"NIGHT"` (a separate overnight session, out of scope
-   here for the same reason `overnight_required`/`ovn_price`/`ovn_volume`
-   are above). Confirmed via Webull's official documentation that market
-   orders carry no documented restriction against `"ALL"` (trailing-stop
-   and algorithmic orders like TWAP/VWAP/POV remain core-hours-only
-   regardless of this field) -- *not yet confirmed* by an actual live order
-   placed with `"ALL"` right at the close, since every prior live order
-   test happened on a weekend market close (see the module docstring note
-   above). If the end-of-day auto-flatten's order still doesn't fill right
-   at the close after this change, re-check whether Webull silently ignores
-   `"ALL"` at that exact boundary rather than assuming the field name or
-   values are wrong.
+4. **`support_trading_session` is `"CORE"` -- `"ALL"` was tried, and
+   directly confirmed live to be rejected outright by this account/endpoint.**
+   `_order_payload()` (used for both entries and exits) briefly changed
+   this from `"CORE"` to `"ALL"` mid-session, on the strength of Webull's
+   own public docs (`developer.webull.com/apis/docs/trade-api/stock/`),
+   which document three values -- `"CORE"` (regular session only), `"ALL"`
+   (regular + pre/after-hours), `"NIGHT"` (a separate overnight session,
+   out of scope here same as `overnight_required`/`ovn_price`/`ovn_volume`
+   above) -- with no stated restriction against `"ALL"` for market orders.
+   That change was live-tested closing a real position and got an
+   immediate, unambiguous rejection: `OAUTH_OPENAPI_PARAM_ERR` / "Parameter
+   error, invalid support_trading_session, value: ALL" (HTTP 417). **A live
+   API response overrides documentation, full stop** -- reverted back to
+   `"CORE"` the moment this was observed, not left in place pending further
+   research. Two separate diagnoses touched this field this session and
+   both turned out to be based on incomplete information: the first assumed
+   an out-of-hours trigger explained a buying-power-reserved-with-no-fill
+   report (the user directly corrected this -- the real trigger was during
+   core hours, redirected to the position-tracking fix below and the new
+   core-hours entry gate); the second assumed the documented `"ALL"` value
+   would actually work here. Do not re-attempt `"ALL"` again without a
+   successful live order proving this specific account/endpoint accepts it
+   -- the docs have now disagreed with the live API once and are not
+   sufficient evidence on their own. Practical consequence:
+   `RiskEngine.evaluate`'s core-hours entry gate (see "Risk sizing" above)
+   means `"CORE"` costs entries nothing, since one's never attempted outside
+   that window anyway -- but the end-of-core-hours auto-flatten's exit
+   order fires right at the 4:00pm ET close boundary, and it's not yet
+   confirmed whether a `"CORE"`-flagged order placed at that exact instant
+   executes cleanly or risks the original "accepted but won't execute"
+   symptom this field was first changed to fix. Watch for that specifically
+   the next time a position is still open at the close.
 
 Streaming (`subscribe_quotes`) intentionally raises `NotImplementedError`:
 `DataStreamingClient` needs an `mqtt_host`, and only the production value

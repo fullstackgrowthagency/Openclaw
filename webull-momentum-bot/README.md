@@ -212,22 +212,22 @@ What's implemented and tested:
   `docs/ARCHITECTURE.md`'s "Webull integration" section. It fails soft: if
   a field name guess is wrong, or it's simply absent, pricing/volume just
   fall back to the regular-session fields as before.
-- **`support_trading_session` kept as `"ALL"`, but for a narrower reason
-  than first thought**: `WebullBrokerClient._order_payload()` sets this to
-  `"ALL"` instead of `"CORE"`. Originally changed on a since-corrected
-  diagnosis of a buying-power-reserved-with-no-position report (the actual
-  cause, confirmed directly by re-checking with production data, was the
-  entry firing *during* core hours with the fill going untracked -- see
-  the position-tracking bullet above); kept anyway because the
-  end-of-core-hours auto-flatten's closing order fires right at (or just
-  after) the 4:00pm ET boundary, where a `"CORE"`-flagged order risks the
-  same "accepted but won't execute" behavior. New entries no longer need
-  this leniency at all -- they're never attempted outside core hours in
-  the first place now (see the entry-gate bullet above). Confirmed via
-  Webull's official API docs; not yet confirmed by a live order fill right
-  at the close boundary in the sandbox -- see `docs/ARCHITECTURE.md`'s
-  "Webull integration"
-  section for the full explanation and what to re-check if it doesn't fill.
+- **`support_trading_session` is `"CORE"` -- `"ALL"` was tried and directly
+  confirmed live to be rejected outright** (`OAUTH_OPENAPI_PARAM_ERR`,
+  HTTP 417, "invalid support_trading_session, value: ALL"), despite being a
+  documented value in Webull's own public API docs -- a live rejection
+  overrides documentation, so this was reverted the moment it was observed,
+  not left in place pending further research. `"ALL"` had briefly replaced
+  `"CORE"` mid-session on a since-corrected diagnosis of a
+  buying-power-reserved-with-no-position report (the actual cause,
+  confirmed directly by the user, was the entry firing *during* core hours
+  with the fill going untracked -- see the position-tracking bullet above).
+  New entries don't need `"ALL"` regardless -- they're never attempted
+  outside core hours in the first place now (see the entry-gate bullet
+  above). Still open: whether a `"CORE"`-flagged order fired right at the
+  4:00pm ET close by the end-of-core-hours auto-flatten executes cleanly --
+  see `docs/ARCHITECTURE.md`'s "Webull integration" section for the full
+  history and what to watch for.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

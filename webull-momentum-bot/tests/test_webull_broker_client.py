@@ -42,11 +42,11 @@ def test_order_payload_maps_market_buy_correctly():
     assert payload["quantity"] == "10"
     assert payload["client_order_id"] == "test-id-123"
     assert "limit_price" not in payload
-    # "ALL" (regular + pre/after-market), not "CORE" (regular-hours-only,
-    # the real production bug this fixes) -- see _order_payload's comment.
-    # Applies to every order (entries AND exits) since this payload builder
-    # is shared by both.
-    assert payload["support_trading_session"] == "ALL"
+    # "CORE" -- "ALL" was tried and confirmed live to be REJECTED by this
+    # account/endpoint (417 OAUTH_OPENAPI_PARAM_ERR), contradicting Webull's
+    # own public docs. See _order_payload's comment for the full history;
+    # don't change this back to "ALL" without a live order proving it works.
+    assert payload["support_trading_session"] == "CORE"
 
 
 def test_order_payload_includes_limit_price_when_set():
