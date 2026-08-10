@@ -448,6 +448,121 @@ enforces some rolling quota tracked server-side, independent of any local
 pacing. Re-verify the full pipeline live once quota recovers (or during
 real market hours on the VPS) before trusting its output blindly.
 
+## Entry strategies
+
+Resistance-breakout alone doesn't fit every candidate this bot finds: for a
+lot of low-float movers the nearest resistance level is far enough above
+the current price that waiting for it gives up most of the move, while for
+others there's no meaningful resistance at all (e.g. a recent IPO with no
+volume-profile history). Rather than one entry condition, `TriggerEngine`
+is handed a list of independent `Strategy` instances -- each reads
+`candidate`/`snapshot` state and either returns a `Signal` or doesn't; the
+first one to fire for a given tick wins (see `scanner/trigger_engine.py`).
+All of them still flow through the same unchanged pipeline downstream
+(`Strategy -> RiskEngine -> OrderManager -> BrokerClient`), so none of this
+touches position sizing, stop enforcement, or order placement.
+
+Registered in `main.py`'s `build_trading_loop()`, in this order (most
+selective/confirmed pattern first, most permissive last -- since only the
+first match per tick fires, a broad catch-all placed early would prevent
+more specific patterns from ever getting a chance):
+
+1. **`RefinedBreakoutStrategy`** (`strategy/refined_breakout.py`) -- a
+   stricter breakout: price must be between the resistance level and
+   `resistance * 1.03` (3% above it, configurable via
+   `max_breakout_extension_pct`). Plain `MomentumBreakoutStrategy` has no
+   upper bound and will "confirm" a breakout of a level price ran past
+   hours ago; this is reserved for a genuinely fresh, in-progress break.
+2. **`OpeningRangeBreakoutStrategy`** (`strategy/opening_range_breakout.py`)
+   -- fires on a break of `candidate.opening_range_high`, the high of the
+   first `opening_range_minutes` (default 5) of the session. Computed once
+   at discovery time (`BroadScanner._compute_opening_range_high`,
+   `metrics/opening_range.py`) from the same raw bars already fetched for
+   `static_resistance_levels` -- no extra network call. DST-correct market
+   open via `zoneinfo`, not a hardcoded UTC offset. `None` (strategy never
+   fires) whenever the fetched bars didn't cover market open -- e.g.
+   discovered well after the open, or no `get_raw_bars` capability. Catches
+   candidates the resistance-based strategies structurally can't: a name
+   with no meaningful volume-profile cluster still has an opening range
+   every session. Stop is `min(opening_range_high, flat-pct stop)` -- a
+   structural ceiling, not "whichever is tighter."
+3. **`VWAPReclaimStrategy`** (`strategy/vwap_reclaim.py`) -- catches a
+   candidate that dipped meaningfully below VWAP
+   (`distance_from_vwap_pct <= below_vwap_threshold_pct`) and is now
+   reclaiming it with fresh volume. The "second leg" of a move that
+   breakout and ignition entries both miss (ignition requires already being
+   above VWAP; breakout requires a specific price level). Needs one bit of
+   per-symbol state ("was this recently below VWAP?") to distinguish a
+   fresh reclaim from having been above VWAP for hours -- kept in a private
+   `dict` on the strategy instance, not on `Candidate` (see state-isolation
+   note below). Stop is VWAP-anchored (`vwap * (1 - stop_buffer_pct/100)`),
+   not a flat %, since VWAP-holding-as-support is exactly what this entry
+   bets on.
+4. **`MomentumBreakoutStrategy`** (`strategy/momentum_breakout.py`) -- the
+   original plain breakout-above-resistance strategy, unbounded above (no
+   3% cap). Kept registered alongside the stricter variants above it.
+5. **`BreakoutPullbackStrategy`** (`strategy/breakout_pullback.py`) --
+   waits for the initial resistance breakout, then requires a controlled
+   pullback on declining volume before entering on reclaim. Targets entries
+   further from short-term exhaustion than a bare breakout. State
+   (`breakout_price`/`pullback_low`) lives on the shared `Candidate`
+   object -- the original design, predating the state-isolation rule below,
+   and safe because it's the only strategy that still uses those particular
+   `Candidate` fields.
+6. **`IgnitionPullbackStrategy`** (`strategy/ignition_pullback.py`) -- the
+   same pullback-then-reclaim pattern as #5, but anchored to a *volume
+   ignition* move (see #8 below) instead of a resistance breakout, so it
+   works on any candidate seeing a real volume+price surge, not just ones
+   near a known resistance level.
+7. **`VolatilityContractionBreakoutStrategy`**
+   (`strategy/volatility_contraction.py`) -- the "flag/pennant" pattern:
+   price tightens into a narrow range after an initial move, then expands
+   out of it with volume. Measured as the ratio of a tight window's price
+   range to a broader context window's (`price_range_pct_3m /
+   price_range_pct_15m`, both computed by `metrics/rolling.py` alongside
+   the other per-tick metrics -- nothing new fetched). A low ratio means
+   the last 3 minutes were much quieter than the last 15; `min_broader_range_pct`
+   guards against mistaking a generally-dead name (quiet on both windows)
+   for a real contraction. Deliberately simplified vs. genuine
+   swing-high-based consolidation tracking -- worth revisiting if it
+   underperforms in practice.
+8. **`VolumeIgnitionStrategy`** (`strategy/volume_ignition.py`) -- the
+   broadest/most permissive strategy, registered last on purpose. Fires on
+   a volume acceleration surge (`volume_accel_1m_3m >=
+   min_volume_acceleration`) **or** a float-turnover-specific ignition
+   (`float_velocity_5m >= min_float_velocity_5m`), combined with rising
+   price and price above VWAP as anti-dump confirmation. No resistance
+   level and no fixed profit target needed -- `suggested_target=None` is
+   deliberate (confirmed safe: `RiskEngine.evaluate()` never reads
+   `suggested_target`, only `suggested_stop`), relying on
+   `PositionManager`'s existing trailing-stop/VWAP-failure/time-limit exits
+   to let winners run instead of capping them at a fixed R-multiple. This
+   is the entry for a symbol whose resistance is too far away to be a
+   useful reference at all -- the original motivating case for this whole
+   batch of strategies.
+
+**State isolation**: with several pullback/phase-tracking strategies now
+registered simultaneously, any *new* stateful strategy added here keeps its
+state in a private `dict[str, ...]` on the strategy instance itself, keyed
+by symbol (`VWAPReclaimStrategy._was_below_vwap`,
+`IgnitionPullbackStrategy._phase`/`_ignition_price`/`_pullback_low`) --
+**not** on the shared `Candidate` object. Two stateful strategies sharing
+`Candidate` fields (the way `BreakoutPullbackStrategy` uses
+`breakout_price`/`pullback_low`) would silently clobber each other's
+tracking every tick, since `TriggerEngine` runs every registered strategy
+against the same `Candidate` instance.
+
+**Not implemented**: relative strength vs. SPY/QQQ was considered and
+explicitly deferred -- it needs a new market-data feed this bot doesn't
+have wired up yet, unlike every strategy above, which only reads
+already-computed `MomentumMetrics`/`Candidate` fields.
+
+**Verification status**: all 8 strategies have dedicated unit tests
+(`tests/test_<strategy_name>.py`) covering their entry conditions, but none
+have been backtested or run live yet -- their config defaults are
+unvalidated starting points (same framing as `scoring/weights.yaml`), not
+tuned thresholds.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right

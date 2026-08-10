@@ -44,7 +44,14 @@ from webull_bot.runtime.trading_loop import TradingLoop
 from webull_bot.scanner.broad_scanner import BroadScanner
 from webull_bot.scanner.candidate_watcher import CandidateWatcher
 from webull_bot.scanner.trigger_engine import TriggerEngine
+from webull_bot.strategy.breakout_pullback import BreakoutPullbackStrategy
+from webull_bot.strategy.ignition_pullback import IgnitionPullbackStrategy
 from webull_bot.strategy.momentum_breakout import MomentumBreakoutStrategy
+from webull_bot.strategy.opening_range_breakout import OpeningRangeBreakoutStrategy
+from webull_bot.strategy.refined_breakout import RefinedBreakoutStrategy
+from webull_bot.strategy.volatility_contraction import VolatilityContractionBreakoutStrategy
+from webull_bot.strategy.volume_ignition import VolumeIgnitionStrategy
+from webull_bot.strategy.vwap_reclaim import VWAPReclaimStrategy
 
 _PAPER_MODE_PLACEHOLDER_WATCHLIST = ["AAPL"]  # replace with symbols you intend to feed snapshots for
 
@@ -133,7 +140,22 @@ def build_trading_loop(
         universe_provider = StaticUniverseProvider(_PAPER_MODE_PLACEHOLDER_WATCHLIST)
 
     watcher = CandidateWatcher()
-    trigger_engine = TriggerEngine(strategies=[MomentumBreakoutStrategy()])
+    # Ordered most-selective/confirmed first, most-permissive last -- the
+    # first strategy to return a Signal for a given tick wins (see
+    # TriggerEngine), so a broad catch-all placed early would pre-empt
+    # more specific patterns from ever getting a chance to fire. See
+    # docs/ARCHITECTURE.md's "Entry strategies" section for what each one
+    # catches and why it's ordered here the way it is.
+    trigger_engine = TriggerEngine(strategies=[
+        RefinedBreakoutStrategy(),
+        OpeningRangeBreakoutStrategy(),
+        VWAPReclaimStrategy(),
+        MomentumBreakoutStrategy(),
+        BreakoutPullbackStrategy(),
+        IgnitionPullbackStrategy(),
+        VolatilityContractionBreakoutStrategy(),
+        VolumeIgnitionStrategy(),
+    ])
     risk_engine = RiskEngine()
     order_manager = OrderManager(broker, risk_engine, settings)
     position_manager = PositionManager()

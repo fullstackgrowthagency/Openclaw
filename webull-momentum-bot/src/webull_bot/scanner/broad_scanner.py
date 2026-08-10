@@ -68,10 +68,12 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Optional
+from datetime import datetime
+from typing import Callable, Optional
 
 from ..interfaces.broker import BrokerClient
 from ..interfaces.float_provider import FloatDataProvider
+from ..metrics.opening_range import compute_opening_range_high
 from ..metrics.volume_profile import compute_volume_profile, filter_bars_by_lookback, high_volume_node_levels
 from ..models import Candidate
 from ..state_machine import CandidateState, new_candidate, transition
@@ -116,6 +118,11 @@ class BroadScannerConfig:
     # to count as a real high-volume node rather than background noise --
     # unvalidated starting point, same spirit as scoring/weights.yaml.
     volume_profile_min_node_pct: float = 0.3
+    # Opening-range breakout reference (metrics/opening_range.py) -- the
+    # high of the first N minutes of the regular session, computed from
+    # the SAME raw bars fetched for the volume profile above, no extra
+    # network call. See strategy/opening_range_breakout.py.
+    opening_range_minutes: int = 5
     # Webull's own throughput ceiling is enforced globally by webull_market_data_limiter
     # (brokers/webull/retry.py), not by this value -- see module docstring. 10 just gives
     # enough overlap for FMP float lookups without spinning up needless idle threads.
@@ -123,10 +130,22 @@ class BroadScannerConfig:
 
 
 class BroadScanner:
-    def __init__(self, broker: BrokerClient, float_provider: FloatDataProvider, config: BroadScannerConfig | None = None):
+    def __init__(
+        self,
+        broker: BrokerClient,
+        float_provider: FloatDataProvider,
+        config: BroadScannerConfig | None = None,
+        *,
+        now_fn: Callable[[], datetime] = datetime.utcnow,
+    ):
         self.broker = broker
         self.float_provider = float_provider
         self.config = config or BroadScannerConfig()
+        # Injectable for tests -- see _compute_opening_range_high, which
+        # needs "now" to resolve today's market-open window. Defaults to
+        # the real clock, same injection pattern as FMPFloatProvider's
+        # http_get / YFinanceFloatProvider's info_fetcher.
+        self.now_fn = now_fn
 
     def _check_symbol(self, symbol: str) -> Optional[Candidate]:
         """Used by scan()'s bulk per-cycle path, which only cares about the
@@ -196,12 +215,18 @@ class BroadScanner:
                     f"min_current_day_volume={self.config.min_current_day_volume:,.0f})."
                 )
 
+        # Fetched once and shared between static_resistance_levels and
+        # opening_range_high below -- both are derived from the same raw
+        # bars, so there's no reason to pay for get_raw_bars twice.
+        bars = self._fetch_raw_bars(symbol)
+
         candidate = new_candidate(symbol, now=snapshot.timestamp)
         candidate.float_data = float_data
         candidate.dollar_volume_today = snapshot.last_price * snapshot.cumulative_volume
         candidate.average_daily_volume = average_volume
         candidate.previous_day_volume = previous_day_volume
-        candidate.static_resistance_levels = self._compute_static_resistance_levels(symbol)
+        candidate.static_resistance_levels = self._compute_static_resistance_levels(bars)
+        candidate.opening_range_high = self._compute_opening_range_high(bars)
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate, None
 
@@ -259,13 +284,29 @@ class BroadScanner:
         previous_day_volume = volumes[0]  # most-recent-first, per get_daily_volumes' contract
         return (average_volume, previous_day_volume)
 
-    def _compute_static_resistance_levels(self, symbol: str) -> list[float]:
+    def _fetch_raw_bars(self, symbol: str) -> Optional[list[dict]]:
+        """Returns None (not an empty list) on any failure or missing
+        capability, so _compute_static_resistance_levels/
+        _compute_opening_range_high below can tell "no bars available"
+        apart from "bars fetched but empty" -- not that either currently
+        treats them differently, but it keeps the fail-soft contract
+        explicit rather than overloading an empty list with two meanings."""
+        get_raw_bars = getattr(self.broker, "get_raw_bars", None)
+        if get_raw_bars is None:
+            return None
+        try:
+            return get_raw_bars(symbol, self.config.volume_profile_bar_interval, self.config.volume_profile_bar_count)
+        except Exception:
+            return None
+
+    def _compute_static_resistance_levels(self, bars: Optional[list[dict]]) -> list[float]:
         """High-volume-node price levels from recent volume-profile
         analysis (see metrics/volume_profile.py's module docstring for why
         this is preferred over hand-picked special levels). Computed once
         at discovery, not refreshed on every tick -- like float_data above,
         this is a one-time enrichment of the candidate, not a per-snapshot
-        recomputation.
+        recomputation. `bars` is whatever _fetch_raw_bars returned (shared
+        with _compute_opening_range_high, one network call for both).
 
         A failure or missing capability here returns an empty list rather
         than failing the candidate: this only affects how
@@ -273,12 +314,7 @@ class BroadScanner:
         of the running high of day, it isn't a pass/fail discovery gate,
         so there's nothing to reject -- same fail-soft contract as
         _compute_average_volume_info above."""
-        get_raw_bars = getattr(self.broker, "get_raw_bars", None)
-        if get_raw_bars is None:
-            return []
-        try:
-            bars = get_raw_bars(symbol, self.config.volume_profile_bar_interval, self.config.volume_profile_bar_count)
-        except Exception:
+        if not bars:
             return []
         recent_bars = filter_bars_by_lookback(bars, lookback_days=self.config.volume_profile_lookback_days)
         nodes = compute_volume_profile(recent_bars, num_buckets=self.config.volume_profile_num_buckets)
@@ -287,6 +323,18 @@ class BroadScanner:
             top_n=self.config.volume_profile_top_n_nodes,
             min_volume_pct_of_max=self.config.volume_profile_min_node_pct,
         )
+
+    def _compute_opening_range_high(self, bars: Optional[list[dict]]) -> Optional[float]:
+        """The high of the first opening_range_minutes of the session, from
+        the same bars as _compute_static_resistance_levels above -- see
+        metrics/opening_range.py. Returns None (not a discovery-gate
+        failure) when bars are unavailable or don't cover market open --
+        same fail-soft contract as the rest of this enrichment step;
+        strategy/opening_range_breakout.py simply never fires for a
+        candidate whose opening_range_high is None."""
+        if not bars:
+            return None
+        return compute_opening_range_high(bars, opening_range_minutes=self.config.opening_range_minutes, now=self.now_fn())
 
     def scan(self, symbol_universe: list[str]) -> list[Candidate]:
         if not symbol_universe:

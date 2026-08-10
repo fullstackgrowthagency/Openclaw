@@ -416,6 +416,72 @@ def test_scan_leaves_static_resistance_levels_empty_without_get_raw_bars():
     assert candidates[0].static_resistance_levels == []
 
 
+# -- opening_range_high (shares the same raw bars as static_resistance_levels,
+# see metrics/opening_range.py and strategy/opening_range_breakout.py) -------
+
+def test_scan_populates_opening_range_high_from_raw_bars():
+    # 2026-08-03 is EDT (UTC-4) -- 9:30am ET == 13:30 UTC. Bar at 13:32 UTC
+    # falls inside the default 5-minute opening range.
+    bars = [_bar(5, 6.5, 1000, time="2026-08-03T13:32:00.000+0000")]
+    broker = _RawBarsAwareBroker({"OPEN": bars}, prices={"OPEN": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider(), now_fn=lambda: datetime(2026, 8, 3, 15, 0, 0))
+
+    candidates = scanner.scan(["OPEN"])
+
+    assert candidates[0].opening_range_high == 6.5
+
+
+def test_scan_leaves_opening_range_high_none_when_bars_predate_market_open():
+    # _bar()'s default time (12:00 UTC) is before 13:30 UTC market open on
+    # that date, so it should never count towards the opening range.
+    bars = [_bar(5, 6.5, 1000)]
+    broker = _RawBarsAwareBroker({"ANY": bars}, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider(), now_fn=lambda: datetime(2026, 8, 3, 15, 0, 0))
+
+    candidates = scanner.scan(["ANY"])
+
+    assert candidates[0].opening_range_high is None
+
+
+def test_scan_leaves_opening_range_high_none_without_get_raw_bars():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    assert candidates[0].opening_range_high is None
+
+
+def test_scan_leaves_opening_range_high_none_on_raw_bars_failure():
+    class _FlakyRawBarsBroker(_RawBarsAwareBroker):
+        def get_raw_bars(self, symbol, interval, count):
+            raise RuntimeError("simulated Webull failure")
+
+    broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    assert len(candidates) == 1
+    assert candidates[0].opening_range_high is None
+
+
+def test_scan_fetches_raw_bars_only_once_per_symbol():
+    # static_resistance_levels and opening_range_high both derive from raw
+    # bars -- get_raw_bars must be called once per symbol, not twice.
+    class _CountingRawBarsBroker(_RawBarsAwareBroker):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.call_count = 0
+
+        def get_raw_bars(self, symbol, interval, count):
+            self.call_count += 1
+            return super().get_raw_bars(symbol, interval, count)
+
+    broker = _CountingRawBarsBroker({"ONE": [_bar(5, 6, 100)]}, prices={"ONE": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+
+    scanner.scan(["ONE"])
+
+    assert broker.call_count == 1
+
+
 # -- check_symbol_verbose (used by the dashboard's on-demand single-ticker
 # scan, dashboard/app.py's POST /api/scan-symbol) -- same structural checks
 # as _check_symbol/scan(), but also explains a rejection instead of

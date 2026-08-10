@@ -101,3 +101,19 @@ def dollar_volume_from_avg_price(volume: float, price_start: float, price_end: f
 def trade_velocity(trade_count: int, seconds: float) -> float:
     """Trades per second over a short window -- requires tick/trade data."""
     return safe_div(trade_count, seconds)
+
+
+def price_range_pct(prices: Sequence[float]) -> float:
+    """High-low range of a list of prices as a % of their average -- a
+    coarse volatility proxy for detecting a tightening/consolidating range
+    (see strategy/volatility_contraction.py). Deliberately built from
+    snapshot-level last_price samples, not true intra-window OHLC (Webull's
+    snapshot API doesn't expose that at sub-minute granularity), consistent
+    with how price_velocity_pct/price_acceleration above already operate
+    on boundary snapshot prices rather than tick data. Returns 0.0 for an
+    empty or single-price window (no range to measure)."""
+    if not prices:
+        return 0.0
+    high, low = max(prices), min(prices)
+    avg = sum(prices) / len(prices)
+    return safe_div(high - low, avg) * 100.0

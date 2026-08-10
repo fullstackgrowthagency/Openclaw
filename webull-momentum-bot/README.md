@@ -44,7 +44,15 @@ What's implemented and tested:
   (`scoring/weights.yaml`) -- **not tuned**, meant to be improved from
   backtest/paper-trading data
 - Three-tier scanner (BroadScanner -> CandidateWatcher -> TriggerEngine)
-- Two entry strategies: Momentum Breakout and Breakout Pullback
+- **Eight entry strategies**, registered together on `TriggerEngine` (most
+  selective/confirmed first, most permissive last -- see
+  `docs/ARCHITECTURE.md`'s "Entry strategies" section): Refined Breakout
+  (breakout bounded to within 3% above resistance), Opening Range Breakout,
+  VWAP Reclaim Continuation, Momentum Breakout, Breakout Pullback,
+  Ignition Pullback, Volatility Contraction ("flag/pennant"), and Volume
+  Ignition (volume/float-turnover surge, no resistance level needed --
+  relies on the trailing-stop/VWAP-failure/time exits below instead of a
+  fixed profit target)
 - Deterministic Risk Engine enforcing per-trade risk, position/exposure
   caps, daily loss limit, per-ticker/per-day trade caps, spread/liquidity
   gates, cooldowns, and a kill switch

@@ -111,6 +111,15 @@ class MomentumMetrics:
     spread_abs: float
     spread_pct: float
     dollar_volume: float               # today's cumulative dollar volume (i.e. dollar_volume_today)
+    # High-low range of last_price samples as a % of their average, over a
+    # tight recent window and a broader context window -- see
+    # calculations.price_range_pct's docstring for why this is a coarse,
+    # snapshot-level proxy rather than true intra-window OHLC. Used by
+    # strategy/volatility_contraction.py to detect a recent range
+    # contraction (price_range_pct_3m much smaller than price_range_pct_15m)
+    # ahead of a volume-backed expansion.
+    price_range_pct_3m: float = 0.0
+    price_range_pct_15m: float = 0.0
     trade_velocity: Optional[float] = None  # trades/sec, once tick data is wired up
 
 
@@ -170,6 +179,14 @@ class Candidate:
     static_resistance_levels: list[float] = field(default_factory=list)
     breakout_price: Optional[float] = None      # price at which the initial breakout occurred
     pullback_low: Optional[float] = None        # for breakout-pullback strategy tracking
+    # High of the first opening_range_minutes of the trading session,
+    # computed once at discovery from the same raw bars already fetched
+    # for static_resistance_levels (see BroadScanner._compute_opening_range_high)
+    # -- no extra network call. None if bars didn't cover market open (e.g.
+    # discovered well after the open, or no get_raw_bars capability) or
+    # opening_range_minutes couldn't be resolved from what was returned.
+    # See strategy/opening_range_breakout.py.
+    opening_range_high: Optional[float] = None
     state_history: list[tuple[CandidateState, datetime]] = field(default_factory=list)
     notes: str = ""
 

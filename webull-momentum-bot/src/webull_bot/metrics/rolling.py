@@ -26,6 +26,7 @@ from .calculations import (
     dollar_volume_from_avg_price,
     float_velocity,
     price_acceleration,
+    price_range_pct,
     price_velocity_pct,
     relative_volume,
     volume_acceleration,
@@ -113,6 +114,12 @@ def compute_metrics(
 
     spread_abs, spread_pct = bid_ask_spread(latest.bid, latest.ask)
 
+    # Reuses w3/w15 (already sliced above for price_velocity) rather than
+    # adding new windows -- see strategy/volatility_contraction.py for how
+    # the ratio between these two detects a recent range contraction.
+    range_pct_3m = price_range_pct([s.last_price for s in w3])
+    range_pct_15m = price_range_pct([s.last_price for s in w15])
+
     return MomentumMetrics(
         symbol=latest.symbol,
         timestamp=now,
@@ -148,4 +155,6 @@ def compute_metrics(
         spread_abs=spread_abs,
         spread_pct=spread_pct,
         dollar_volume=dollar_volume(latest.last_price, latest.cumulative_volume),
+        price_range_pct_3m=range_pct_3m,
+        price_range_pct_15m=range_pct_15m,
     )
