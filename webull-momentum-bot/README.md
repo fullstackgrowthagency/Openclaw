@@ -219,7 +219,18 @@ What's implemented and tested:
   `BroadScanner.check_symbol_verbose`, which explains *why* a rejected
   symbol was rejected rather than just dropping it silently the way the
   bulk per-cycle scan path does. An already-tracked symbol is shown as-is
-  (its real current state) rather than being re-scanned.
+  (its real current state) rather than being re-scanned. A **Chart** panel
+  above Candidates embeds TradingView's Advanced Real-Time Chart widget for
+  whichever candidate row is currently selected, collapsed by default
+  behind a "Show Chart" toggle so the third-party widget (a live connection
+  to TradingView's servers) isn't loaded on every dashboard visit --
+  collapsing it again fully tears the widget down rather than just hiding
+  it. Re-renders only when the selected symbol actually changes, not on
+  the normal 5s poll cycle. The symbol is passed to TradingView as a bare
+  ticker (e.g. `AAPL`, no exchange prefix) since `Candidate` doesn't track
+  which exchange a symbol lists on; TradingView resolves that to the
+  primary listing on its own for the NASDAQ/NYSE/AMEX names this bot
+  trades, unconfirmed for anything OTC-only or otherwise ambiguous.
 - **Full DB persistence** (`db/repository.py`, wired through `TradingLoop`'s
   `on_trade_closed` / `on_order_update` / `on_state_transition` /
   `on_score_computed` hooks and an optional `momentum_event_tracker`

@@ -1060,10 +1060,44 @@ section above) and `OrderRecord.client_order_id` has a uniqueness
 constraint.
 
 The frontend (`dashboard/static/`) is plain HTML/CSS/JS with no build step
-and no external dependencies (no CDN scripts) -- it polls the REST
-endpoints every 5s. Keep it that way unless there's a real reason to add a
-frontend toolchain; a monitoring dashboard for a single operator doesn't
-need one.
+and no bundled/npm dependencies -- it polls the REST endpoints every 5s.
+Keep it that way unless there's a real reason to add a frontend toolchain;
+a monitoring dashboard for a single operator doesn't need one. The one
+exception, as of the **Chart panel** below, is a single CDN script loaded
+on demand from TradingView -- everything else on the page still has zero
+external dependencies.
+
+**Chart panel** (above Candidates): embeds TradingView's Advanced
+Real-Time Chart widget (the standard "embed-widget-advanced-chart.js"
+snippet from TradingView's own widget generator) for whichever candidate
+row is currently selected in the Candidates table below, reusing the same
+`selectedCandidateSymbol` state `refreshScoreBreakdown`'s live-per-
+candidate view already tracks -- selecting a candidate updates both at
+once. Collapsed by default behind a "Show Chart" toggle button
+(`initChartPanel`/`updateChartPanel` in `app.js`): this is a real,
+ongoing connection to TradingView's own servers (not a static image), so
+it isn't loaded unless explicitly opened, and collapsing it again fully
+tears the widget's DOM down (`teardownTradingViewChart`) rather than just
+CSS-hiding it, so it stops costing bandwidth/a live connection the moment
+it's closed. Because TradingView's embed snippet only initializes when its
+`<script>` tag is actually present in the DOM at insertion time (a
+`<script>` written into `innerHTML` never executes), changing symbols
+means destroying and rebuilding the whole widget container from scratch
+via `renderTradingViewChart(symbol)` -- there's no simpler "just update the
+symbol" API available through this embed method, only through TradingView's
+heavier Charting Library integration, which this project deliberately
+doesn't need. Guarded to only re-render on an actual symbol change
+(`chartRenderedSymbol !== selectedCandidateSymbol`), so the independent 5s
+poll cycle (`refreshCandidates`) never forces a reload of a chart nobody
+touched. The symbol is passed as a bare ticker (e.g. `AAPL`, no exchange
+prefix) since `Candidate` has no exchange field to draw one from --
+TradingView resolves a bare symbol to its primary listing on its own,
+which works for ordinary NASDAQ/NYSE/AMEX names but is unconfirmed for an
+OTC-only or otherwise ambiguous ticker. Loading the widget necessarily
+reveals to TradingView which ticker is being viewed (an ordinary
+consequence of embedding any third-party widget, not a project-specific
+privacy hole) -- worth knowing since this is a trading tool, even though
+it's opt-in per open of the panel.
 
 **Settings (top-right gear button)**: writes, not just reads (see the
 Safety section's kill-switch button for the dashboard's other write path).

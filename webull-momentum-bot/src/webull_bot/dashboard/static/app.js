@@ -413,6 +413,117 @@ function initCandidateSelection() {
     selectedCandidateSymbol = symbol === selectedCandidateSymbol ? null : symbol;
     document.querySelectorAll(".candidate-row").forEach(r => r.classList.toggle("selected-row", r.dataset.symbol === selectedCandidateSymbol));
     refreshScoreBreakdown(lastCandidateRows);
+    updateChartPanel();
+  });
+}
+
+// -- TradingView Advanced Real-Time Chart (loaded on demand, torn down when
+// collapsed so it doesn't hold an open connection to TradingView's servers
+// while nobody's looking at it) ---------------------------------------------
+
+let chartPanelOpen = false;
+let chartRenderedSymbol = null;
+
+function tradingViewWidgetConfig(symbol) {
+  return {
+    allow_symbol_change: true,
+    calendar: false,
+    details: true,
+    hide_side_toolbar: true,
+    hide_top_toolbar: false,
+    hide_legend: false,
+    hide_volume: false,
+    hotlist: false,
+    interval: "15",
+    locale: "en",
+    save_image: true,
+    style: "1",
+    // Bare ticker, no exchange prefix -- Candidate has no exchange field to
+    // draw one from, and TradingView's widget resolves a bare symbol to its
+    // primary listing on its own. Works for the NASDAQ/NYSE/AMEX-listed
+    // names this bot trades; unconfirmed for anything with an ambiguous or
+    // OTC-only listing.
+    symbol: symbol,
+    theme: "dark",
+    timezone: "Etc/UTC",
+    backgroundColor: "#0F0F0F",
+    gridColor: "rgba(255, 255, 255, 0.2)",
+    watchlist: [],
+    withdateranges: false,
+    compareSymbols: [],
+    studies: [],
+    autosize: true,
+  };
+}
+
+function renderTradingViewChart(symbol) {
+  const container = document.getElementById("chart-widget-container");
+  if (!container) return;
+  container.innerHTML = `
+    <div class="tradingview-widget-container" style="height:100%;width:100%">
+      <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div>
+      <div class="tradingview-widget-copyright">
+        <a href="https://www.tradingview.com/symbols/${encodeURIComponent(symbol)}/" rel="noopener nofollow" target="_blank">
+          <span class="blue-text">${symbol} stock chart</span>
+        </a><span class="trademark"> by TradingView</span>
+      </div>
+    </div>`;
+  // TradingView's embed snippet only initializes when its <script> tag is
+  // actually inserted into the DOM via appendChild -- a <script> written as
+  // part of an innerHTML string (like the container markup above) never
+  // executes, so it has to be created and appended separately here.
+  const script = document.createElement("script");
+  script.type = "text/javascript";
+  script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+  script.async = true;
+  script.textContent = JSON.stringify(tradingViewWidgetConfig(symbol));
+  container.querySelector(".tradingview-widget-container").appendChild(script);
+  chartRenderedSymbol = symbol;
+}
+
+function teardownTradingViewChart() {
+  const container = document.getElementById("chart-widget-container");
+  if (container) container.innerHTML = "";
+  chartRenderedSymbol = null;
+}
+
+function updateChartPanel() {
+  const container = document.getElementById("chart-widget-container");
+  const hint = document.getElementById("chart-hint");
+  if (!container || !hint) return;
+
+  if (!chartPanelOpen) {
+    container.style.display = "none";
+    teardownTradingViewChart();
+    hint.style.display = "";
+    hint.textContent = "Click \"Show Chart\" to load a live TradingView chart for the selected candidate.";
+    return;
+  }
+
+  container.style.display = "";
+  if (!selectedCandidateSymbol) {
+    teardownTradingViewChart();
+    hint.style.display = "";
+    hint.textContent = "Click a candidate below to load its chart here.";
+    return;
+  }
+
+  hint.style.display = "none";
+  // Only re-render on an actual symbol change -- refreshCandidates() runs
+  // every 5s independently of this and must never force a chart reload.
+  if (chartRenderedSymbol !== selectedCandidateSymbol) {
+    renderTradingViewChart(selectedCandidateSymbol);
+  }
+}
+
+function initChartPanel() {
+  const btn = document.getElementById("chart-toggle-btn");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    chartPanelOpen = !chartPanelOpen;
+    btn.textContent = chartPanelOpen ? "Hide Chart" : "Show Chart";
+    btn.setAttribute("aria-expanded", String(chartPanelOpen));
+    updateChartPanel();
   });
 }
 
@@ -700,5 +811,6 @@ initSettingsModal();
 initKillSwitchModal();
 initScoreHistoryForm();
 initCandidateSelection();
+initChartPanel();
 refreshAll();
 setInterval(refreshAll, REFRESH_MS);
