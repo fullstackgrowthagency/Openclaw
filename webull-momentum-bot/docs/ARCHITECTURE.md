@@ -647,47 +647,72 @@ match `RiskConfig`'s default `min_risk_reward_ratio` today, but the two
 are not wired together, so changing one does not change the other.
 
 Once a position is open, `PositionManager.check_exit` (`position/position_manager.py`)
-runs once per poll tick and checks, in this order -- first match wins:
+runs once per poll tick. Two stop-ratcheting updates happen first (both
+only ever tighten `stop_price`, never loosen it), then four conditions are
+checked in order -- first match wins:
 
-1. **Stop hit** -- `price <= stop_price`.
-2. **Target hit** -- `price >= target_price` (only if the strategy set one).
-3. **VWAP failure** -- `price` drops more than `vwap_failure_buffer_pct`
-   (default 0.5%) below VWAP, regardless of where the stop sits.
-4. **Time limit** -- position has been open `>= time_limit_minutes`
-   (default 30) with none of the above triggered.
+1. **Breakeven** (`PositionManagementConfig.breakeven_trigger_pct`, default
+   5%) -- once `price >= avg_entry_price * 1.05`, `stop_price` jumps to at
+   least `avg_entry_price` (a guaranteed no-loss floor) if it wasn't
+   already there or better. This is a deliberate, explicit guarantee,
+   distinct from the trailing stop below: at a shallow `trailing_stop_pct`
+   or right after entry, the flat trailing calculation alone might not
+   have reached breakeven yet even though price already has.
+2. **Trailing stop** (`trailing_stop_pct`, default 3%) -- recomputed every
+   tick as `current_price * (1 - 3%)`, replacing `stop_price` whenever
+   that's tighter (higher) than whatever breakeven left it at.
 
-Before that check, a **trailing stop** (`PositionManagementConfig.trailing_stop_pct`,
-default 3%) recomputes every tick as `current_price * (1 - 3%)` and
-replaces `stop_price` whenever that's *tighter* (higher) than the current
-stop -- never looser. This is universal: every open position gets the
-exact same trailing-stop treatment regardless of which of the 8 strategies
-triggered its entry. It is not, today, a separate mechanism from #1 above
--- it just continuously raises the bar #1 checks against.
+Both apply identically to every open position regardless of which of the 8
+strategies triggered its entry -- this is universal position management,
+not per-strategy.
 
-**The real consequence of this ordering, worth calling out explicitly**:
-for the 7 strategies that set a `target_price` (everything except
-`VolumeIgnitionStrategy`), check #2 fires the moment price reaches that
-target -- which typically happens *before* the trailing stop has ratcheted
-much past the target level, since a strategy's own stop distance and
-2R target tend to land in a similar zone to where a 3% trailing stop
-first becomes meaningful. In practice, that means gains on those 7
-strategies are effectively capped near their target today, even though
-the trailing-stop code exists and would otherwise let the trade run
-further. Only `VolumeIgnitionStrategy` (no target at all) currently lets a
-winning trade run past that point, managed purely by the trailing stop
-(plus VWAP-failure/time-limit as backstops) -- this was a deliberate
-choice for that one strategy, not a general policy.
+3. **① Stop hit** -- `price <= stop_price` (whatever breakeven/trailing
+   ratcheted it to). Exits the *entire* remaining position
+   (`STOP_LOSS`/`TRAILING_STOP`).
+4. **② Target hit -- PARTIAL exit** -- `price >= target_price` (only if the
+   strategy set one, and only the *first* time -- see
+   `Position.partial_exit_taken` below). Unlike every other check here,
+   this does **not** close the whole position: it emits a `SCALE_OUT`
+   signal that sells half (`OrderManager` floors to a whole share count),
+   leaving the rest open to keep riding the breakeven/trailing-stop rules
+   above rather than being fully capped at the target. This was a
+   deliberate choice among three options considered (retire the hard
+   target entirely; partial exit; leave as a full exit) -- partial exit
+   banks some profit at a known level while still letting the remainder
+   run. If the position is too small to split into two whole-share halves
+   (`quantity < 2`), this falls back to a full exit (`PROFIT_TARGET`)
+   instead of a meaningless zero-share partial.
+5. **③ VWAP failure** -- `price` drops more than `vwap_failure_buffer_pct`
+   (default 0.5%) below VWAP, regardless of where the stop sits. Full exit.
+6. **④ Time limit** -- position has been open `>= time_limit_minutes`
+   (default 30) with none of the above triggered. Full exit.
 
-**Known gap, not yet built**: there's no explicit "move stop to breakeven
-once price is up N%" rule -- the continuous 3%-trailing calculation
-happens to land a position's stop near/above breakeven once price is
-roughly 3%+ above entry, but that's an emergent side effect of the flat
-percentage math, not a guaranteed floor. A dedicated breakeven-at-+N%
-rule, combined with retiring the hard target-hit exit (#2) in favor of
-letting the trailing stop alone govern the profitable side of every
-strategy's trade (not just Volume Ignition's), is being considered -- see
-the project's task history/chat log for the exact design under discussion
-before treating this as implemented.
+**`Position.partial_exit_taken`** (set the moment the partial `SCALE_OUT`
+fill is confirmed -- `TradingLoop._finalize_partial_exit` /
+`BacktestEngine._execute_exit`) prevents check ② from firing again on
+every subsequent tick that price happens to stay above target; once set,
+the remaining shares are governed purely by ①/③/④ (with ①'s bar itself
+still rising via the breakeven/trailing rules) for the rest of the trade.
+A full `EXIT` (①/③/④, or ② with too few shares to split) still closes the
+position entirely, pops it from tracking, and moves the candidate
+`MANAGING -> EXITED -> COOLDOWN`, same as before this partial-exit design
+existed. A `SCALE_OUT` (②, the normal case) leaves the candidate
+`MANAGING` and the position open with reduced `quantity` -- **only** the
+sold portion becomes a `Trade` record (`exit_reason=PARTIAL_PROFIT_TARGET`),
+and a second `Trade` is recorded later whenever the remainder eventually
+does fully exit.
+
+**Only `VolumeIgnitionStrategy` never reaches check ②** (it sets no
+`target_price` at all -- see "Entry strategies" above), so its full
+position rides on ①/③/④ from the very first tick; the other 7 strategies
+bank half at target and let the other half do the same from that point
+forward.
+
+Both `breakeven_trigger_pct` and `trailing_stop_pct` are live-adjustable
+from the dashboard's Settings panel via `GET`/`POST /api/position-settings`
+(a separate config object -- `PositionManager.config` -- from `RiskEngine.config`,
+hence the separate endpoint pair; see "Dashboard" below), taking effect on
+the very next `check_exit()` call for every open position.
 
 ## Structural vs. temporary disqualification
 
@@ -839,17 +864,28 @@ frontend toolchain; a monitoring dashboard for a single operator doesn't
 need one.
 
 **Settings (top-right gear button)**: the only panel that writes, not just
-reads -- `GET`/`POST /api/risk-settings` expose four `RiskConfig` fields
-(see "Risk sizing" above) for live editing. `POST` mutates
-`trading_loop.risk_engine.config` directly (a plain dataclass instance, no
-extra indirection needed) and takes effect on the very next `Signal`
-evaluated -- no restart, and nothing persisted to disk or the database, so
-a restart reverts to `RiskConfig`'s hardcoded defaults. Deliberately a
-small, curated subset of `RiskConfig` (`_ADJUSTABLE_RISK_FIELDS` in
-`dashboard/app.py`), not every field on it -- matched to what's actually
-useful to tune without restarting versus what's a rarer, more structural
-decision (e.g. `max_simultaneous_positions`) better made by editing the
-config in code.
+reads. Two separate config objects, two separate endpoint pairs, shown
+together in one modal:
+- `GET`/`POST /api/risk-settings` expose four `RiskConfig` fields (see
+  "Risk sizing" above), mutating `trading_loop.risk_engine.config` directly.
+- `GET`/`POST /api/position-settings` expose two `PositionManagementConfig`
+  fields (`breakeven_trigger_pct`, `trailing_stop_pct` -- see "Position
+  management" above), mutating `trading_loop.position_manager.config`.
+
+Both take effect on the very next evaluation (a `Signal` for risk settings,
+a `check_exit()` call for position settings) -- no restart, and nothing
+persisted to disk or the database, so a restart reverts to each config
+dataclass's hardcoded defaults. Both are deliberately small, curated
+subsets of their respective config objects (`_ADJUSTABLE_RISK_FIELDS` /
+`_ADJUSTABLE_POSITION_FIELDS` in `dashboard/app.py`), not every field --
+matched to what's actually useful to tune without restarting versus a
+rarer, more structural decision (e.g. `max_simultaneous_positions`) better
+made by editing the config in code. One current limitation: both
+`PositionManagementConfig` fields are natively `Optional[float]` (`None`
+disables the rule), but the update endpoint also uses `None` to mean
+"omitted from this request" -- so the dashboard can set either to a
+positive value but can't use it to explicitly disable one; that still
+requires a code-level config change.
 
 ## Full persistence: state transitions, MIS scores, momentum events
 

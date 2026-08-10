@@ -90,7 +90,10 @@ def _build_loop(broker, **extra_kwargs) -> TradingLoop:
     return loop
 
 
-def test_full_pipeline_enters_and_exits_via_paper_broker():
+def test_full_pipeline_enters_and_partially_exits_via_paper_broker():
+    # Hitting target sells half (SCALE_OUT) and leaves the remainder open
+    # under trailing-stop/breakeven management -- see
+    # docs/ARCHITECTURE.md's "Position management" section.
     broker = PaperBrokerClient()
     broker.connect()
     loop = _build_loop(broker)
@@ -103,12 +106,14 @@ def test_full_pipeline_enters_and_exits_via_paper_broker():
     assert len(loop._trades) == 1
     trade = loop._trades[0]
     assert trade.symbol == "TEST"
-    assert trade.exit_reason == ExitReason.PROFIT_TARGET
+    assert trade.exit_reason == ExitReason.PARTIAL_PROFIT_TARGET
     assert trade.pnl > 0
 
     candidate = loop.candidates["TEST"]
-    assert candidate.state.value == "cooldown"
-    assert "TEST" not in loop._positions
+    assert candidate.state.value == "managing"
+    assert "TEST" in loop._positions
+    assert loop._positions["TEST"].partial_exit_taken is True
+    assert loop._positions["TEST"].quantity > 0
 
 
 def test_no_trade_when_thresholds_never_reached():
@@ -289,9 +294,15 @@ def test_exit_stays_managing_while_pending_then_finalizes_on_fill():
 
     loop._poll_pending_exit(candidate, snapshot, snapshot.timestamp)
     assert candidate.symbol not in loop._pending_exit_orders
-    assert candidate.state.value == "cooldown"
+    # Target hit sells half (quantity=10 -> 5) and stays MANAGING rather
+    # than closing the whole position -- see PositionManager.check_exit.
+    assert candidate.state.value == "managing"
     assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.PARTIAL_PROFIT_TARGET
     assert trades[0].exit_price == 5.25  # from the fake fill
+    assert trades[0].quantity == 5
+    assert loop._positions["TEST"].quantity == 5
+    assert loop._positions["TEST"].partial_exit_taken is True
 
 
 def test_cooldown_expires_back_to_watching():
@@ -334,6 +345,9 @@ def test_state_transitions_are_flushed_in_order_via_callback():
     symbols = {t[0] for t in transitions}
     assert symbols == {"TEST"}
     path = [(t[1], t[2]) for t in transitions]
+    # Hitting target only partially exits (SCALE_OUT) and stays MANAGING --
+    # see docs/ARCHITECTURE.md's "Position management" section -- so this
+    # 4-bar run never reaches EXITED/COOLDOWN.
     assert path == [
         (CandidateState.DISCOVERED, CandidateState.WATCHING),
         (CandidateState.WATCHING, CandidateState.HEATING_UP),
@@ -341,8 +355,6 @@ def test_state_transitions_are_flushed_in_order_via_callback():
         (CandidateState.ARMED, CandidateState.TRIGGERED),
         (CandidateState.TRIGGERED, CandidateState.ENTERED),
         (CandidateState.ENTERED, CandidateState.MANAGING),
-        (CandidateState.MANAGING, CandidateState.EXITED),
-        (CandidateState.EXITED, CandidateState.COOLDOWN),
     ]
 
 

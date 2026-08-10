@@ -71,6 +71,16 @@ header h1 {
   outline: none;
 }
 
+.settings-subheading {
+  margin: 4px 0 2px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border-top: 1px solid var(--panel-border);
+  padding-top: 12px;
+}
+
 .settings-field {
   display: flex;
   flex-direction: column;

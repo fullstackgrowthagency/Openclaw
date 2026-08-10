@@ -53,7 +53,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from ..collection.event_recorder import MomentumEventTracker
-from ..enums import CandidateState, ExitReason, OrderStatus
+from ..enums import CandidateState, ExitReason, OrderStatus, SignalAction
 from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
@@ -475,7 +475,7 @@ class TradingLoop:
         self._notify_order_update(order)
 
         if order.status == OrderStatus.FILLED:
-            self._finalize_exit(candidate, position, order, exit_signal, now)
+            self._dispatch_exit_finalization(candidate, position, order, exit_signal, now)
         else:
             self._pending_exit_orders[candidate.symbol] = (order, exit_signal)
 
@@ -491,13 +491,22 @@ class TradingLoop:
         if status_order.status == OrderStatus.FILLED:
             self._pending_exit_orders.pop(candidate.symbol)
             position = self._positions[candidate.symbol]
-            self._finalize_exit(candidate, position, status_order, exit_signal, now)
+            self._dispatch_exit_finalization(candidate, position, status_order, exit_signal, now)
         elif status_order.status in (OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED):
             self._pending_exit_orders.pop(candidate.symbol)
             logger.warning("Exit order for %s did not fill (%s); will re-evaluate exit next tick.", candidate.symbol, status_order.status.value)
         # else still pending
 
-    def _finalize_exit(self, candidate: Candidate, position: Position, order: Order, exit_signal: Signal, now: datetime) -> None:
+    def _dispatch_exit_finalization(self, candidate: Candidate, position: Position, order: Order, exit_signal: Signal, now: datetime) -> None:
+        """SCALE_OUT (a target hit -- see PositionManager.check_exit) closes
+        only part of the position and leaves the candidate MANAGING so the
+        remainder keeps being tracked; EXIT closes it entirely."""
+        if exit_signal.action == SignalAction.SCALE_OUT:
+            self._finalize_partial_exit(candidate, position, order, exit_signal, now)
+        else:
+            self._finalize_exit(candidate, position, order, exit_signal, now)
+
+    def _build_trade_from_fill(self, candidate: Candidate, position: Position, order: Order, exit_signal: Signal, now: datetime) -> Trade:
         exit_price = None
         try:
             fills = [f for f in self.broker.poll_fills(since=order.created_at) if f.order_client_id == order.client_order_id]
@@ -516,7 +525,7 @@ class TradingLoop:
         pnl_pct = (exit_price - position.avg_entry_price) / position.avg_entry_price * 100.0 if position.avg_entry_price else 0.0
         exit_reason = ExitReason(exit_signal.metadata.get("exit_reason", ExitReason.MANUAL.value))
 
-        trade = Trade(
+        return Trade(
             symbol=candidate.symbol,
             strategy_name=position.strategy_name,
             side=position.side,
@@ -532,7 +541,10 @@ class TradingLoop:
             max_adverse_excursion=position.max_adverse_excursion,
         )
 
-        self.risk_engine.record_trade_closed(candidate.symbol, pnl, now=now)
+    def _finalize_exit(self, candidate: Candidate, position: Position, order: Order, exit_signal: Signal, now: datetime) -> None:
+        trade = self._build_trade_from_fill(candidate, position, order, exit_signal, now)
+
+        self.risk_engine.record_trade_closed(candidate.symbol, trade.pnl, now=now)
         self._positions.pop(candidate.symbol, None)
         if self.on_trade_closed is not None:
             try:
@@ -540,8 +552,28 @@ class TradingLoop:
             except Exception:
                 logger.exception("on_trade_closed callback raised for %s.", candidate.symbol)
 
-        transition(candidate, CandidateState.EXITED, now=now, reason=exit_reason.value)
+        transition(candidate, CandidateState.EXITED, now=now, reason=trade.exit_reason.value)
         transition(candidate, CandidateState.COOLDOWN, now=now, reason="post-trade cooldown")
+
+    def _finalize_partial_exit(self, candidate: Candidate, position: Position, order: Order, exit_signal: Signal, now: datetime) -> None:
+        """A target hit sold only `order.quantity` shares (see
+        PositionManager.check_exit/OrderManager.submit_signal's SCALE_OUT
+        handling) -- unlike a full exit, the position stays open (reduced
+        quantity) and the candidate stays MANAGING; only this realized
+        slice becomes a Trade record. partial_exit_taken is set so the next
+        tick's check_exit doesn't fire another partial while price remains
+        above target -- the remainder is now governed purely by the
+        stop/trailing-stop/breakeven/VWAP/time-limit checks."""
+        trade = self._build_trade_from_fill(candidate, position, order, exit_signal, now)
+
+        self.risk_engine.record_trade_closed(candidate.symbol, trade.pnl, now=now)
+        position.quantity -= order.quantity
+        position.partial_exit_taken = True
+        if self.on_trade_closed is not None:
+            try:
+                self.on_trade_closed(trade)
+            except Exception:
+                logger.exception("on_trade_closed callback raised for %s.", candidate.symbol)
 
     # -- read-only accessors for external consumers (e.g. the dashboard) -----
 

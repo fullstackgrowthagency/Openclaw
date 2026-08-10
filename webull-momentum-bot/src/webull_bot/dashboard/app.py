@@ -79,6 +79,23 @@ class RiskSettingsUpdate(BaseModel):
     max_total_risk_pct: Optional[float] = None
 
 
+# The two PositionManagementConfig fields adjustable from the same Settings
+# modal -- a separate config object from RiskConfig above (lives on
+# trading_loop.position_manager, not risk_engine), so it gets its own small
+# GET/POST pair rather than being folded into /api/risk-settings. Both are
+# natively Optional[float] on PositionManagementConfig itself (None means
+# "disabled"), but here None means "omitted from this request, leave
+# unchanged" -- there's currently no way to use this endpoint to explicitly
+# turn a rule off, only to set it to a positive value. Disabling one
+# entirely still requires a code-level config change.
+_ADJUSTABLE_POSITION_FIELDS = ("trailing_stop_pct", "breakeven_trigger_pct")
+
+
+class PositionSettingsUpdate(BaseModel):
+    trailing_stop_pct: Optional[float] = None
+    breakeven_trigger_pct: Optional[float] = None
+
+
 def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session], trading_mode: str) -> FastAPI:
     app = FastAPI(title="Webull Momentum Bot Dashboard")
     app.add_middleware(_NoCacheMiddleware)
@@ -170,6 +187,32 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         for field, value in updates.items():
             setattr(config, field, value)
         return {field: getattr(config, field) for field in _ADJUSTABLE_RISK_FIELDS}
+
+    @app.get("/api/position-settings")
+    def get_position_settings():
+        """Live values of the two PositionManagementConfig fields the
+        Settings modal exposes -- read straight off the running
+        PositionManager.config, distinct from RiskConfig above."""
+        config = trading_loop.position_manager.config
+        return {field: getattr(config, field) for field in _ADJUSTABLE_POSITION_FIELDS}
+
+    @app.post("/api/position-settings")
+    def update_position_settings(update: PositionSettingsUpdate):
+        """Mutates the live PositionManager.config in place -- takes effect
+        on the very next check_exit() call for every open position, no
+        restart needed. Only fields present (non-None) in the request body
+        are changed. Both are percentages that must be positive and not
+        exceed 100 (a trailing stop or breakeven trigger beyond 100% of
+        price is meaningless)."""
+        config = trading_loop.position_manager.config
+        updates = update.model_dump(exclude_none=True)
+        errors = [f"{field} must be greater than 0." for field, value in updates.items() if value <= 0]
+        errors += [f"{field} must not exceed 100." for field, value in updates.items() if value > 100]
+        if errors:
+            raise HTTPException(status_code=422, detail=" ".join(errors))
+        for field, value in updates.items():
+            setattr(config, field, value)
+        return {field: getattr(config, field) for field in _ADJUSTABLE_POSITION_FIELDS}
 
     @app.get("/api/positions")
     def get_positions():

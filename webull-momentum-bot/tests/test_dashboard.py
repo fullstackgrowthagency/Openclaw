@@ -373,6 +373,35 @@ def test_risk_settings_update_allows_ratio_field_over_100(loop, client):
     assert loop.risk_engine.config.min_risk_reward_ratio == 150
 
 
+def test_position_settings_returns_current_config(loop, client):
+    resp = client.get("/api/position-settings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["trailing_stop_pct"] == loop.position_manager.config.trailing_stop_pct
+    assert body["breakeven_trigger_pct"] == loop.position_manager.config.breakeven_trigger_pct
+
+
+def test_position_settings_update_mutates_live_manager(loop, client):
+    resp = client.post("/api/position-settings", json={"breakeven_trigger_pct": 7.5})
+    assert resp.status_code == 200
+    assert resp.json()["breakeven_trigger_pct"] == 7.5
+    assert loop.position_manager.config.breakeven_trigger_pct == 7.5
+    # Omitted fields are left untouched.
+    assert loop.position_manager.config.trailing_stop_pct == 3.0
+
+
+def test_position_settings_update_rejects_non_positive_values(loop, client):
+    resp = client.post("/api/position-settings", json={"trailing_stop_pct": 0})
+    assert resp.status_code == 422
+    assert loop.position_manager.config.trailing_stop_pct != 0
+
+
+def test_position_settings_update_rejects_value_over_100(loop, client):
+    resp = client.post("/api/position-settings", json={"breakeven_trigger_pct": 150})
+    assert resp.status_code == 422
+    assert loop.position_manager.config.breakeven_trigger_pct != 150
+
+
 def test_index_and_static_assets_are_served(client):
     assert client.get("/").status_code == 200
     assert client.get("/style.css").status_code == 200

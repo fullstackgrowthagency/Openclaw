@@ -26,7 +26,7 @@ from typing import Optional
 
 from ..brokers.paper.client import PaperBrokerClient, PaperBrokerConfig
 from ..config import Settings, get_settings
-from ..enums import CandidateState, ExitReason, OrderStatus
+from ..enums import CandidateState, ExitReason, OrderStatus, SignalAction
 from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.strategy import Strategy
 from ..models import Candidate, FloatData, MarketSnapshot, Trade
@@ -154,6 +154,14 @@ class BacktestEngine:
         position.strategy_name = signal.strategy_name
 
     def _execute_exit(self, candidate: Candidate, position, exit_signal, snapshot: MarketSnapshot) -> None:
+        """A SCALE_OUT signal (target hit -- see PositionManager.check_exit)
+        only sells part of `position`; PaperBrokerClient._apply_fill already
+        reduces the broker-side position's quantity by the fill amount
+        without deleting it, so the *only* extra bookkeeping needed here is:
+        don't transition the candidate to COOLDOWN, and mark
+        partial_exit_taken so check_exit doesn't fire another partial next
+        bar. An EXIT fully closes it (broker deletes the position once its
+        quantity hits zero), same as before."""
         order = self.order_manager.submit_signal(exit_signal, snapshot=snapshot, position=position)
         if order.status != OrderStatus.FILLED:
             return
@@ -177,5 +185,10 @@ class BacktestEngine:
         )
         self.trades.append(trade)
         self.risk_engine.record_trade_closed(position.symbol, pnl, now=fill.filled_at)
+
+        if exit_signal.action == SignalAction.SCALE_OUT:
+            position.partial_exit_taken = True
+            return
+
         transition(candidate, CandidateState.EXITED, now=snapshot.timestamp, reason=trade.exit_reason.value)
         transition(candidate, CandidateState.COOLDOWN, now=snapshot.timestamp, reason="post-trade cooldown")

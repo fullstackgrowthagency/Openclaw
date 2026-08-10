@@ -74,6 +74,7 @@ class SignalAction(str, Enum):
 class ExitReason(str, Enum):
     STOP_LOSS = "stop_loss"
     PROFIT_TARGET = "profit_target"
+    PARTIAL_PROFIT_TARGET = "partial_profit_target"
     TRAILING_STOP = "trailing_stop"
     MOMENTUM_FAILURE = "momentum_failure"
     VWAP_FAILURE = "vwap_failure"

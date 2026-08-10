@@ -284,6 +284,12 @@ class Position:
     realized_pnl: float = 0.0
     max_favorable_excursion: float = 0.0
     max_adverse_excursion: float = 0.0
+    # Set True once this position's target_price has triggered one partial
+    # (SCALE_OUT) exit -- prevents PositionManager.check_exit from firing
+    # another partial every subsequent tick price stays above target. The
+    # remaining quantity after a partial is managed purely by the
+    # stop/trailing-stop/breakeven/VWAP/time-limit checks from then on.
+    partial_exit_taken: bool = False
 
 
 @dataclass

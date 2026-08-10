@@ -63,7 +63,10 @@ class OrderManager:
         if signal.action in (SignalAction.EXIT, SignalAction.SCALE_OUT):
             if position is None:
                 raise ValueError(f"{signal.action.value} signal for {signal.symbol} requires the open position")
-            quantity = position.quantity if signal.action == SignalAction.EXIT else position.quantity / 2
+            # SCALE_OUT sells half, floored to a whole share count --
+            # PositionManager.check_exit only emits SCALE_OUT when
+            # position.quantity >= 2 specifically so this is never zero.
+            quantity = position.quantity if signal.action == SignalAction.EXIT else int(position.quantity // 2)
             order = Order(
                 symbol=signal.symbol,
                 side=self._side_for_action(signal.action),

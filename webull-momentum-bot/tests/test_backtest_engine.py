@@ -58,7 +58,12 @@ def _float_data() -> FloatData:
     )
 
 
-def test_full_pipeline_enters_on_breakout_and_exits_on_target():
+def test_full_pipeline_enters_on_breakout_and_partially_exits_on_target():
+    # Hitting target no longer fully closes the position -- it sells half
+    # (SCALE_OUT) and lets the remainder ride on the trailing
+    # stop/breakeven rules instead (see docs/ARCHITECTURE.md's "Position
+    # management" section). The candidate stays MANAGING with a reduced
+    # open position rather than moving to COOLDOWN.
     engine = BacktestEngine(
         strategies=[MomentumBreakoutStrategy()],
         risk_config=RiskConfig(risk_per_trade_pct=0.5, stop_loss_required=True),
@@ -70,12 +75,16 @@ def test_full_pipeline_enters_on_breakout_and_exits_on_target():
     assert len(result.trades) == 1
     trade = result.trades[0]
     assert trade.symbol == "TEST"
-    assert trade.exit_reason == ExitReason.PROFIT_TARGET
+    assert trade.exit_reason == ExitReason.PARTIAL_PROFIT_TARGET
     assert trade.pnl > 0
     assert result.ending_equity > engine.config.starting_equity
 
     candidate = engine.candidates["TEST"]
-    assert candidate.state.value == "cooldown"
+    assert candidate.state.value == "managing"
+
+    remaining_position = next(p for p in engine.broker.get_positions() if p.symbol == "TEST")
+    assert remaining_position.partial_exit_taken is True
+    assert remaining_position.quantity > 0
 
 
 def test_no_trade_when_thresholds_never_reached():

@@ -159,6 +159,16 @@
         <span>Max total assumed risk <span class="muted">(% of equity, across all open positions' stop-loss risk)</span></span>
         <input type="number" id="setting-max_total_risk_pct" step="0.1" min="0.1" max="100" required>
       </label>
+      <h4 class="settings-subheading">Position management</h4>
+      <p class="hint">Applies to every open position immediately -- not just new entries. See the "Position management" section of docs/ARCHITECTURE.md for the full exit-check order.</p>
+      <label class="settings-field">
+        <span>Breakeven trigger <span class="muted">(% price up from entry before the stop jumps to entry)</span></span>
+        <input type="number" id="setting-breakeven_trigger_pct" step="0.1" min="0.1" max="100" required>
+      </label>
+      <label class="settings-field">
+        <span>Trailing stop <span class="muted">(% below current price; only ever tightens, never loosens)</span></span>
+        <input type="number" id="setting-trailing_stop_pct" step="0.1" min="0.1" max="100" required>
+      </label>
       <div class="status-bar" id="settings-result"></div>
       <div class="settings-actions">
         <button type="submit">Save</button>
