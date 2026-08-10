@@ -931,3 +931,113 @@ def test_scan_and_add_candidate_reports_unexpected_scanner_errors_without_raisin
     assert candidate is None
     assert "ANY" in reason
     assert was_newly_added is False
+
+
+# -- batched get_snapshots in _process_all_candidates -- see
+# WebullBrokerClient.get_snapshots' docstring for why this exists: every
+# get_snapshot-family call shares the same globally-paced rate limiter, so
+# fetching N tracked candidates one at a time used to mean a real >=N-second
+# floor on how often any single one's tick refreshed ------------------------
+
+@dataclass
+class _BatchAwareBroker(_FakeBroker):
+    batch_calls: list = field(default_factory=list)
+    individual_calls: list = field(default_factory=list)
+
+    def get_snapshot(self, symbol):
+        self.individual_calls.append(symbol)
+        return super().get_snapshot(symbol)
+
+    def get_snapshots(self, symbols):
+        self.batch_calls.append(list(symbols))
+        return {
+            s: MarketSnapshot(
+                symbol=s, timestamp=datetime.utcnow(), last_price=5.20, bid=5.19, ask=5.21,
+                bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=5.20, high_of_day=5.20,
+                low_of_day=5.20, open_price=5.20,
+            )
+            for s in symbols
+        }
+
+
+def _two_candidate_loop(broker):
+    from webull_bot.state_machine import new_candidate, transition
+    from webull_bot.enums import CandidateState
+
+    risk_engine = RiskEngine(RiskConfig(stop_loss_required=True))
+    order_manager = OrderManager(broker, risk_engine, get_settings())
+    watcher = CandidateWatcher()
+    from webull_bot.scanner.trigger_engine import TriggerEngine
+
+    trigger_engine = TriggerEngine(strategies=[MomentumBreakoutStrategy()])
+    position_manager = PositionManager()
+    loop = TradingLoop(
+        broker, StaticUniverseProvider([]), BroadScanner(broker, _SingleSymbolFloatProvider("ONE", 1_000_000)),
+        watcher, trigger_engine, order_manager, position_manager, risk_engine,
+        config=TradingLoopConfig(universe_rescan_interval_seconds=3600),
+    )
+    for symbol in ("ONE", "TWO"):
+        candidate = new_candidate(symbol)
+        transition(candidate, CandidateState.WATCHING)
+        loop.candidates[symbol] = candidate
+    return loop
+
+
+def test_process_all_candidates_uses_one_batched_call_for_multiple_candidates():
+    broker = _BatchAwareBroker()
+    loop = _two_candidate_loop(broker)
+
+    loop._process_all_candidates(datetime.utcnow())
+
+    assert broker.batch_calls == [["ONE", "TWO"]]
+    assert broker.individual_calls == []  # neither candidate fell back to its own get_snapshot()
+    assert loop.candidates["ONE"].last_price == 5.20
+    assert loop.candidates["TWO"].last_price == 5.20
+
+
+def test_process_all_candidates_falls_back_without_get_snapshots():
+    # _FakeBroker has no get_snapshots at all -- representative of
+    # PaperBrokerClient/any broker that doesn't support batching.
+    broker = _FakeBroker()
+    loop = _two_candidate_loop(broker)
+
+    loop._process_all_candidates(datetime.utcnow())
+
+    assert loop.candidates["ONE"].last_price == 5.20
+    assert loop.candidates["TWO"].last_price == 5.20
+
+
+def test_process_all_candidates_falls_back_when_batch_call_raises():
+    class _FlakyBatchBroker(_BatchAwareBroker):
+        def get_snapshots(self, symbols):
+            self.batch_calls.append(list(symbols))
+            raise RuntimeError("simulated Webull batch failure")
+
+    broker = _FlakyBatchBroker()
+    loop = _two_candidate_loop(broker)
+
+    loop._process_all_candidates(datetime.utcnow())
+
+    # The batch call was attempted (and failed), but candidates still got
+    # processed via the per-candidate get_snapshot() fallback.
+    assert len(broker.batch_calls) == 1
+    assert sorted(broker.individual_calls) == ["ONE", "TWO"]
+    assert loop.candidates["ONE"].last_price == 5.20
+    assert loop.candidates["TWO"].last_price == 5.20
+
+
+def test_process_all_candidates_skips_rejected_and_cooldown_symbols_in_batch():
+    from webull_bot.state_machine import new_candidate, transition
+    from webull_bot.enums import CandidateState
+
+    broker = _BatchAwareBroker()
+    loop = _two_candidate_loop(broker)
+    cooldown_candidate = new_candidate("THREE")
+    transition(cooldown_candidate, CandidateState.WATCHING)
+    transition(cooldown_candidate, CandidateState.COOLDOWN)
+    cooldown_candidate.last_updated_at = datetime.utcnow()
+    loop.candidates["THREE"] = cooldown_candidate
+
+    loop._process_all_candidates(datetime.utcnow())
+
+    assert broker.batch_calls == [["ONE", "TWO"]]  # THREE (COOLDOWN) excluded

@@ -94,6 +94,40 @@ in place, and the broker returns a fresh object on every call -- refetching
 every tick would silently discard the running trailing-stop/MFE/MAE state
 computed on prior ticks.
 
+**Batched snapshot fetching** (`WebullBrokerClient.get_snapshots`,
+`TradingLoop._process_all_candidates`): `_process_all_candidates` used to
+call `broker.get_snapshot()` once per tracked candidate every
+`poll_interval_seconds` cycle -- a real problem in practice, confirmed
+against a live case (2026-08-10, see "RVOL historical baseline" section):
+every `get_snapshot`-family call shares the same globally-paced
+`retry.webull_market_data_limiter` (~1 req/s sustained, regardless of
+concurrency), so N tracked candidates meant a real >=N-second floor on how
+often any single candidate's tick actually refreshed -- tens of seconds of
+staleness once the candidate list (now fed by 7 discovery sources) grows
+past a handful of names, for a bot whose whole premise is reacting to
+fast-moving low-float names. `get_snapshot`'s own underlying SDK method
+already accepts a symbol list ("For each request, up to 100 symbols can be
+subscribed"), so `get_snapshots(symbols)` batches every symbol needing a
+snapshot this cycle into as few chunked calls as possible (chunked at that
+100-symbol cap) instead of one call per candidate -- each chunk still
+costs exactly one rate-limited request regardless of how many symbols ride
+along in it, so N candidates now cost `ceil(N/100)` calls instead of N.
+`_process_all_candidates` computes the exact symbol list needing a
+snapshot this cycle (every candidate not `REJECTED`/`COOLDOWN`, mirroring
+`_process_candidate_inner`'s own skip conditions), calls `get_snapshots`
+once up front, and passes each candidate its pre-fetched snapshot via a
+new `prefetched_snapshot` parameter on `_process_candidate`/
+`_process_candidate_inner` -- `None` (the default) preserves the exact
+original per-candidate `get_snapshot()` call, which is also what happens
+automatically when the broker doesn't support batching at all (paper/
+backtest mode has no rate limit to work around) or when the batch call
+itself raises: `get_snapshots` is deliberately NOT part of the
+`BrokerClient` interface, checked via `getattr` and caught in a broad
+`try/except` around the whole batch call, same "optional Webull-specific
+capability" pattern as `get_raw_bars`/`get_daily_volumes` elsewhere in this
+codebase, so a batch failure degrades to the pre-batching behavior for that
+one cycle rather than skipping every candidate's tick.
+
 `data/universe.py` feeds the scanner from **seven** independent Webull
 screener sources, combined by `MultiSourceUniverseProvider`. The first
 four are live-verified; the last three (pre-market, after-hours, and

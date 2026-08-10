@@ -250,6 +250,87 @@ def test_get_snapshot_requests_extended_hours_data():
     assert kwargs.get("extend_hour_required") is True
 
 
+# -- get_snapshots (batch equivalent of get_snapshot) -- see its docstring for
+# why this exists: every get_snapshot-family call shares the same globally-
+# paced rate limiter, so batching many symbols into one call turns an N-call
+# floor into a ceil(N/100)-call one ------------------------------------------
+
+def test_get_snapshots_empty_list_makes_no_calls():
+    client = _client()
+    calls = []
+
+    class _FakeMarketData:
+        def get_snapshot(self, symbols, category, **kwargs):
+            calls.append(symbols)
+            return _FakeResponse([])
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    assert client.get_snapshots([]) == {}
+    assert calls == []
+
+
+def test_get_snapshots_maps_each_row_by_its_own_symbol():
+    client = _client()
+
+    class _FakeMarketData:
+        def get_snapshot(self, symbols, category, **kwargs):
+            rows = [dict(_REAL_SNAPSHOT_ROW, symbol=s, price=str(i + 1)) for i, s in enumerate(symbols)]
+            return _FakeResponse(rows)
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    results = client.get_snapshots(["AAPL", "GME"])
+
+    assert set(results.keys()) == {"AAPL", "GME"}
+    assert results["AAPL"].last_price == 1.0
+    assert results["GME"].last_price == 2.0
+
+
+def test_get_snapshots_omits_symbols_webull_did_not_return():
+    client = _client()
+
+    class _FakeMarketData:
+        def get_snapshot(self, symbols, category, **kwargs):
+            return _FakeResponse([dict(_REAL_SNAPSHOT_ROW, symbol="AAPL")])  # "GME" missing from the response
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    results = client.get_snapshots(["AAPL", "GME"])
+
+    assert set(results.keys()) == {"AAPL"}
+
+
+def test_get_snapshots_chunks_requests_at_the_batch_size_cap():
+    from webull_bot.brokers.webull.client import _SNAPSHOT_BATCH_SIZE
+
+    client = _client()
+    calls = []
+
+    class _FakeMarketData:
+        def get_snapshot(self, symbols, category, **kwargs):
+            calls.append(list(symbols))
+            return _FakeResponse([dict(_REAL_SNAPSHOT_ROW, symbol=s) for s in symbols])
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    symbols = [f"SYM{i}" for i in range(_SNAPSHOT_BATCH_SIZE + 50)]
+    results = client.get_snapshots(symbols)
+
+    assert len(calls) == 2
+    assert len(calls[0]) == _SNAPSHOT_BATCH_SIZE
+    assert len(calls[1]) == 50
+    assert len(results) == len(symbols)
+
+
 # -- bar mapping (real field names, verified live; most-recent-first input) -
 
 _REAL_BARS_MOST_RECENT_FIRST = [

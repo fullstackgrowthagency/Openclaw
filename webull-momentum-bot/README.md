@@ -83,8 +83,20 @@ What's implemented and tested:
 - Event-driven backtest engine using the *same* strategy/risk/order-manager
   code as live trading, with a configurable slippage/fee model
 - **Production run-loop** (`runtime/trading_loop.py`, wired up in `main.py`):
-  polls `broker.get_snapshot()` per candidate (no streaming yet -- see
-  below) and periodically rescans a symbol universe. Correctly handles
+  polls a snapshot per candidate every cycle (no streaming yet -- see
+  below) and periodically rescans a symbol universe. Snapshot fetching is
+  **batched** (`WebullBrokerClient.get_snapshots`) rather than one
+  `get_snapshot()` call per candidate: every such call shares the same
+  globally-paced Webull rate limiter (~1 req/s sustained), so N tracked
+  candidates used to mean a real >=N-second floor on how often any single
+  one's tick refreshed -- tens of seconds of staleness for a fast-moving
+  low-float mover once the candidate list grows past a handful of names.
+  Batching (chunked at Webull's own 100-symbol-per-request cap) turns that
+  into `ceil(N/100)` rate-limited calls per cycle instead of N. Falls back
+  to the original one-call-per-candidate behavior automatically for a
+  broker without batching support (paper/backtest mode) or if the batch
+  call itself fails for a cycle. See `docs/ARCHITECTURE.md`'s "Batched
+  snapshot fetching" section for the full design. Correctly handles
   `WebullBrokerClient.place_order` returning `SUBMITTED` rather than
   `FILLED` (confirmed live) via pending-order polling for both entries and
   exits, rather than assuming synchronous fills like the backtest engine

@@ -116,6 +116,10 @@ _INTERVAL_TO_TIMESPAN = {
     "1d": Timespan.D.name,
 }
 
+# get_snapshot's own docstring: "For each request, up to 100 symbols can be
+# subscribed" -- used by get_snapshots to chunk a larger symbol list.
+_SNAPSHOT_BATCH_SIZE = 100
+
 _SIDE_TO_WEBULL = {
     OrderSide.BUY: "BUY",
     OrderSide.SELL: "SELL",
@@ -362,6 +366,55 @@ class WebullBrokerClient(BrokerClient):
         if not rows:
             raise ValueError(f"Webull returned no snapshot for {symbol}")
         return self._snapshot_from_dict(rows[0])
+
+    def get_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
+        """Batch equivalent of get_snapshot -- fetches every symbol's
+        current snapshot in as few Webull-paced round-trips as possible,
+        chunked to _SNAPSHOT_BATCH_SIZE (the SDK's own documented per-
+        request symbol cap: "up to 100 symbols" -- get_snapshot's docstring
+        on the underlying market_data.get_snapshot), instead of the caller
+        making one get_snapshot() call per symbol.
+
+        This matters a lot in practice, not just in theory: every
+        get_snapshot-family call -- 1 symbol or 100 -- shares the same
+        globally-paced retry.webull_market_data_limiter (~1 req/s
+        sustained, confirmed live, regardless of concurrency or request
+        size). TradingLoop._process_all_candidates used to call
+        get_snapshot once per tracked candidate every poll cycle, so N
+        tracked candidates meant a real >=N-second floor on how often ANY
+        single candidate's tick actually refreshes -- tens of seconds of
+        staleness for a fast-moving low-float mover once the candidate list
+        (now fed by 7 discovery sources) grows past a handful of names.
+        Batching collapses that to ceil(N/100) rate-limited calls per
+        cycle, each one counting as a single paced request regardless of
+        how many symbols ride along in it.
+
+        Not part of the BrokerClient interface (see interfaces/broker.py):
+        this is a Webull-specific capability with no real backing need in
+        paper/backtest mode (nothing there is rate-limited), so callers
+        (TradingLoop) check for it with getattr rather than requiring every
+        broker to implement it -- same pattern as get_raw_bars/
+        get_daily_volumes.
+
+        A symbol Webull doesn't return a row for (delisted, momentarily
+        unavailable, a bad ticker, etc.) is simply absent from the result
+        dict rather than raising -- callers must treat a missing key the
+        same way they'd treat get_snapshot raising for that one symbol."""
+        if not symbols:
+            return {}
+        results: dict[str, MarketSnapshot] = {}
+        for start in range(0, len(symbols), _SNAPSHOT_BATCH_SIZE):
+            chunk = symbols[start:start + _SNAPSHOT_BATCH_SIZE]
+            response = call_with_retry(
+                lambda chunk=chunk: self._require_data_client().market_data.get_snapshot(
+                    chunk, Category.US_STOCK.name, extend_hour_required=True,
+                )
+            )
+            response.raise_for_status()
+            for row in response.json():
+                snapshot = self._snapshot_from_dict(row)
+                results[snapshot.symbol] = snapshot
+        return results
 
     def _snapshots_from_bars(self, symbol: str, raw_bars: list[dict]) -> list[MarketSnapshot]:
         # Webull returns bars most-recent-first; this project's interface

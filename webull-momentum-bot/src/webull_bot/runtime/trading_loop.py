@@ -413,16 +413,27 @@ class TradingLoop:
 
     # -- per-candidate processing ---------------------------------------------
 
-    def _process_candidate(self, candidate: Candidate, now: datetime) -> None:
+    def _process_candidate(
+        self, candidate: Candidate, now: datetime, prefetched_snapshot: Optional[MarketSnapshot] = None
+    ) -> None:
         """Thin wrapper that guarantees _flush_state_transitions runs exactly
         once per tick regardless of which branch below returns early --
-        _process_candidate_inner uses plain `return` freely."""
+        _process_candidate_inner uses plain `return` freely.
+
+        prefetched_snapshot: see _process_all_candidates' batch
+        get_snapshots() call -- when set, this candidate's tick reuses that
+        already-fetched snapshot instead of calling broker.get_snapshot()
+        itself. None (the default) preserves this method's original
+        behavior exactly, which is also what every direct caller other than
+        _process_all_candidates (mainly tests) still gets."""
         try:
-            self._process_candidate_inner(candidate, now)
+            self._process_candidate_inner(candidate, now, prefetched_snapshot)
         finally:
             self._flush_state_transitions(candidate)
 
-    def _process_candidate_inner(self, candidate: Candidate, now: datetime) -> None:
+    def _process_candidate_inner(
+        self, candidate: Candidate, now: datetime, prefetched_snapshot: Optional[MarketSnapshot] = None
+    ) -> None:
         if candidate.state == CandidateState.REJECTED:
             return
 
@@ -432,7 +443,7 @@ class TradingLoop:
             return
 
         try:
-            snapshot = self.broker.get_snapshot(candidate.symbol)
+            snapshot = prefetched_snapshot if prefetched_snapshot is not None else self.broker.get_snapshot(candidate.symbol)
         except Exception:
             logger.warning("get_snapshot failed for %s this cycle; skipping.", candidate.symbol, exc_info=True)
             return
@@ -765,9 +776,37 @@ class TradingLoop:
             except Exception:
                 logger.exception("Unhandled error force-closing all positions for kill switch.")
 
-        for candidate in self._snapshot_candidates():
+        candidates = self._snapshot_candidates()
+
+        # Batch-fetch snapshots for every candidate that will actually need
+        # one this cycle (mirrors _process_candidate_inner's own REJECTED/
+        # COOLDOWN skip below) in as few Webull-paced round-trips as
+        # possible, instead of each candidate making its own get_snapshot()
+        # call -- see WebullBrokerClient.get_snapshots' docstring for why
+        # this matters: every get_snapshot-family call shares the same
+        # globally-paced rate limiter regardless of request size, so N
+        # tracked candidates used to mean a real >=N-second floor on how
+        # often any single one's tick refreshed. Not part of the
+        # BrokerClient interface (paper/backtest has no rate limit to work
+        # around), so checked via getattr like get_raw_bars/get_daily_volumes
+        # elsewhere in this codebase -- a broker without it just means every
+        # candidate below falls back to its own get_snapshot() call, exactly
+        # this method's behavior before batching existed.
+        batch_snapshots: dict[str, MarketSnapshot] = {}
+        get_snapshots = getattr(self.broker, "get_snapshots", None)
+        if get_snapshots is not None:
+            symbols_needing_snapshot = [
+                c.symbol for c in candidates if c.state not in (CandidateState.REJECTED, CandidateState.COOLDOWN)
+            ]
+            if symbols_needing_snapshot:
+                try:
+                    batch_snapshots = get_snapshots(symbols_needing_snapshot)
+                except Exception:
+                    logger.exception("Batch get_snapshots failed this cycle; falling back to per-candidate fetch.")
+
+        for candidate in candidates:
             try:
-                self._process_candidate(candidate, now)
+                self._process_candidate(candidate, now, batch_snapshots.get(candidate.symbol))
             except Exception:
                 logger.exception("Unhandled error processing candidate %s; continuing loop.", candidate.symbol)
 
