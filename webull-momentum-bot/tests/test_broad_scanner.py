@@ -86,6 +86,70 @@ def test_scan_runs_symbols_concurrently_not_sequentially():
     assert elapsed < 0.6, f"scan took {elapsed:.2f}s -- looks sequential, not concurrent"
 
 
+# -- batched get_snapshots for the whole universe -- see
+# WebullBrokerClient.get_snapshots' docstring for why this exists: every
+# get_snapshot-family call shares the same globally-paced rate limiter, so
+# fetching the universe one symbol at a time is what actually determines how
+# long a full scan takes once the universe is large, not max_workers --------
+
+class _BatchAwareSlowFakeBroker(_SlowFakeBroker):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.batch_calls = []
+        self.individual_calls = []
+
+    def get_snapshot(self, symbol):
+        self.individual_calls.append(symbol)
+        return super().get_snapshot(symbol)
+
+    def get_snapshots(self, symbols):
+        self.batch_calls.append(list(symbols))
+        return {s: _snapshot(s, price=self.prices.get(s, 5.0)) for s in symbols}
+
+
+def test_scan_uses_one_batched_call_for_the_whole_universe():
+    symbols = [f"SYM{i}" for i in range(10)]
+    broker = _BatchAwareSlowFakeBroker(delay_seconds=0.0, prices={s: 5.0 for s in symbols})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+
+    candidates = scanner.scan(symbols)
+
+    assert len(candidates) == 10
+    assert broker.batch_calls == [symbols]
+    assert broker.individual_calls == []  # no per-symbol fallback needed
+
+
+def test_scan_falls_back_without_get_snapshots():
+    # _SlowFakeBroker has no get_snapshots at all -- representative of
+    # PaperBrokerClient/any broker that doesn't support batching. Already
+    # implicitly covered by every other test in this file using
+    # _SlowFakeBroker, but asserted explicitly here for clarity.
+    symbols = [f"SYM{i}" for i in range(5)]
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={s: 5.0 for s in symbols})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+
+    candidates = scanner.scan(symbols)
+
+    assert len(candidates) == 5
+
+
+def test_scan_falls_back_per_symbol_when_batch_call_raises():
+    class _FlakyBatchBroker(_BatchAwareSlowFakeBroker):
+        def get_snapshots(self, symbols):
+            self.batch_calls.append(list(symbols))
+            raise RuntimeError("simulated Webull batch failure")
+
+    symbols = [f"SYM{i}" for i in range(5)]
+    broker = _FlakyBatchBroker(delay_seconds=0.0, prices={s: 5.0 for s in symbols})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+
+    candidates = scanner.scan(symbols)
+
+    assert len(candidates) == 5  # every symbol still got discovered
+    assert len(broker.batch_calls) == 1
+    assert sorted(broker.individual_calls) == symbols
+
+
 def test_scan_filters_price_and_free_float():
     symbols = ["CHEAP", "GOOD", "EXPENSIVE", "BIGFLOAT"]
     broker = _SlowFakeBroker(delay_seconds=0.0, prices={"CHEAP": 0.20, "GOOD": 5.0, "EXPENSIVE": 30.0, "BIGFLOAT": 5.0})

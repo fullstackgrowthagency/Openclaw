@@ -66,6 +66,7 @@ valid, not a reason to discard it.
 """
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
@@ -77,6 +78,8 @@ from ..metrics.opening_range import compute_opening_range_high
 from ..metrics.rolling import MAX_HISTORY_MINUTES, seed_history_from_bars
 from ..metrics.volume_baseline import VolumeBaseline, compute_volume_baseline
 from ..metrics.volume_profile import compute_volume_profile, filter_bars_by_lookback, high_volume_node_levels
+
+logger = logging.getLogger(__name__)
 from ..models import Candidate, MarketSnapshot
 from ..state_machine import CandidateState, new_candidate, transition
 
@@ -157,24 +160,37 @@ class BroadScanner:
         # http_get / YFinanceFloatProvider's info_fetcher.
         self.now_fn = now_fn
 
-    def _check_symbol(self, symbol: str) -> Optional[Candidate]:
+    def _check_symbol(self, symbol: str, prefetched_snapshot: Optional[MarketSnapshot] = None) -> Optional[Candidate]:
         """Used by scan()'s bulk per-cycle path, which only cares about the
         resulting candidate list, not why a rejected symbol was rejected --
         see check_symbol_verbose for the version that also explains a
-        rejection, used by the dashboard's on-demand single-ticker scan."""
-        candidate, _reason = self.check_symbol_verbose(symbol)
+        rejection, used by the dashboard's on-demand single-ticker scan.
+
+        prefetched_snapshot: see scan()'s batch get_snapshots() call --
+        None (the default) preserves the original per-symbol
+        broker.get_snapshot() behavior, which is also what the dashboard's
+        single-ticker scan still gets (it calls check_symbol_verbose
+        directly, never through here)."""
+        candidate, _reason = self.check_symbol_verbose(symbol, prefetched_snapshot)
         return candidate
 
-    def check_symbol_verbose(self, symbol: str) -> tuple[Optional[Candidate], Optional[str]]:
+    def check_symbol_verbose(
+        self, symbol: str, prefetched_snapshot: Optional[MarketSnapshot] = None
+    ) -> tuple[Optional[Candidate], Optional[str]]:
         """Runs the exact same structural checks as _check_symbol, but also
         returns a human-readable reason when the symbol is rejected (i.e.
         the candidate is None) -- for the dashboard's on-demand
         single-ticker scan (dashboard/app.py's POST /api/scan-symbol),
         where a human explicitly asked to check one symbol and wants to
         know why, unlike scan()'s bulk path which silently drops rejected
-        symbols by the thousand every cycle."""
+        symbols by the thousand every cycle.
+
+        prefetched_snapshot: see scan()'s batch get_snapshots() call --
+        None (the default, and always the case for the dashboard's
+        single-ticker path) falls back to this method's original
+        broker.get_snapshot() call."""
         try:
-            snapshot = self.broker.get_snapshot(symbol)
+            snapshot = prefetched_snapshot if prefetched_snapshot is not None else self.broker.get_snapshot(symbol)
         except Exception as exc:
             return None, f"Failed to fetch a market snapshot for {symbol}: {exc}"
 
@@ -426,9 +442,34 @@ class BroadScanner:
         if not symbol_universe:
             return []
 
+        # Batch-fetch snapshots for the WHOLE universe up front, in as few
+        # Webull-paced round-trips as possible, instead of every per-symbol
+        # worker below making its own get_snapshot() call -- see
+        # WebullBrokerClient.get_snapshots' docstring: every such call
+        # shares the same globally-paced rate limiter regardless of
+        # concurrency, so this -- not max_workers -- is what actually
+        # determines how long a full scan takes once the universe is large
+        # (hundreds of symbols across 7 discovery sources). check_symbol_verbose
+        # already calls get_snapshot as its very first action for every
+        # symbol regardless of whether it'll pass any gate, so this fetches
+        # nothing that wasn't already being fetched -- just far fewer
+        # round-trips to do it. Same optional-capability pattern as
+        # TradingLoop._process_all_candidates' batching: not part of
+        # BrokerClient (paper/backtest has no rate limit to work around),
+        # checked via getattr, and a batch failure just means every symbol
+        # falls back to its own get_snapshot() call for this scan.
+        batch_snapshots: dict[str, MarketSnapshot] = {}
+        get_snapshots = getattr(self.broker, "get_snapshots", None)
+        if get_snapshots is not None:
+            try:
+                batch_snapshots = get_snapshots(symbol_universe)
+            except Exception:
+                logger.exception("Batch get_snapshots failed for this scan; falling back to per-symbol fetch.")
+
         discovered: list[Candidate] = []
         with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(symbol_universe))) as executor:
-            for candidate in executor.map(self._check_symbol, symbol_universe):
+            prefetched = [batch_snapshots.get(symbol) for symbol in symbol_universe]
+            for candidate in executor.map(self._check_symbol, symbol_universe, prefetched):
                 if candidate is not None:
                     discovered.append(candidate)
         return discovered

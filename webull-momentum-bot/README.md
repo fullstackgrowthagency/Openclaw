@@ -95,7 +95,14 @@ What's implemented and tested:
   into `ceil(N/100)` rate-limited calls per cycle instead of N. Falls back
   to the original one-call-per-candidate behavior automatically for a
   broker without batching support (paper/backtest mode) or if the batch
-  call itself fails for a cycle. See `docs/ARCHITECTURE.md`'s "Batched
+  call itself fails for a cycle. The same batching applies to universe
+  discovery too (`BroadScanner.scan`), not just already-tracked candidates
+  -- `check_symbol_verbose` calls `get_snapshot` for every symbol in the
+  universe before any structural gate runs, so with the universe now
+  routinely in the hundreds (seven discovery sources, unbounded pagination
+  per source), that was the dominant cost of a full scan, not thread-pool
+  concurrency (every Webull call queues on the same limiter regardless of
+  how many threads are running). See `docs/ARCHITECTURE.md`'s "Batched
   snapshot fetching" section for the full design. Correctly handles
   `WebullBrokerClient.place_order` returning `SUBMITTED` rather than
   `FILLED` (confirmed live) via pending-order polling for both entries and

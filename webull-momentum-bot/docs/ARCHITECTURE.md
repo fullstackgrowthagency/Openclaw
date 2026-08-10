@@ -128,6 +128,30 @@ capability" pattern as `get_raw_bars`/`get_daily_volumes` elsewhere in this
 codebase, so a batch failure degrades to the pre-batching behavior for that
 one cycle rather than skipping every candidate's tick.
 
+**The same batching applies to discovery, not just already-tracked
+candidates** (`BroadScanner.scan`): `check_symbol_verbose` calls
+`get_snapshot` as its very first action for *every* symbol in the universe,
+before any structural gate runs -- with the universe now routinely in the
+hundreds (seven discovery sources, unbounded pagination per source), that
+was the dominant cost of a full scan, not `max_workers`' concurrency
+(concurrency helps overlap Webull's paced calls with the separate float-
+provider lookup, but every Webull call still queues on the same limiter
+regardless of how many threads are running). `scan()` now batch-fetches
+snapshots for the entire `symbol_universe` list up front via the same
+`get_snapshots`, before spinning up the thread pool, and hands each
+per-symbol worker (`_check_symbol` -> `check_symbol_verbose`, both now
+accepting the same `prefetched_snapshot` parameter) its own pre-fetched
+snapshot instead of making an individual call. This fetches nothing extra
+-- it's the exact same set of symbols that would have been fetched one at a
+time regardless -- just far fewer round-trips to do it: a 500-symbol
+universe drops from ~500 rate-limited calls to 5. Same fallback
+guarantees as the live-tick case: no `get_snapshots` support, or the batch
+call itself raising, falls back to each symbol making its own
+`get_snapshot()` call, exactly this method's pre-batching behavior. The
+dashboard's on-demand single-ticker scan (`check_symbol_verbose` called
+directly, never through `scan()`) is unaffected either way -- there's
+only ever one symbol, so batching has nothing to save there.
+
 `data/universe.py` feeds the scanner from **seven** independent Webull
 screener sources, combined by `MultiSourceUniverseProvider`. The first
 four are live-verified; the last three (pre-market, after-hours, and
