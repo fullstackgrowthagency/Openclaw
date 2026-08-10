@@ -64,7 +64,15 @@ What's implemented and tested:
   sizing" section for the full mechanics
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
-- Position manager (stop/target/trailing/VWAP-failure/time exits)
+- Position manager: a universal 3% trailing stop applies to every open
+  position regardless of strategy, plus VWAP-failure and time-limit
+  backstops; the strategy's own suggested stop/target become the
+  position's stop/target unchanged (RiskEngine's settings gate entry, they
+  never move an open position's stop or target) -- see
+  `docs/ARCHITECTURE.md`'s "Position management" section for the exact
+  exit-check order and a known gap (no breakeven-at-+N% rule yet, and a
+  fixed target currently caps gains on 7 of the 8 strategies before the
+  trailing stop gets a chance to run further)
 - Event-driven backtest engine using the *same* strategy/risk/order-manager
   code as live trading, with a configurable slippage/fee model
 - **Production run-loop** (`runtime/trading_loop.py`, wired up in `main.py`):

@@ -628,6 +628,67 @@ buying-power-vs-equity distinction in #4), but -- like every other
 threshold in this codebase -- these defaults are unvalidated starting
 points, not backtested or run live yet.
 
+## Position management (exits)
+
+**Important, easy to assume otherwise: `RiskEngine` never sets or
+overrides `stop_price`/`target_price`.** It only *reads* the strategy's
+`suggested_stop`/`suggested_target` to (a) size the position (see "Risk
+sizing" above) and (b) gate entry via `min_risk_reward_ratio` -- rejecting
+a signal outright if its own stop/target combo doesn't already meet the
+ratio. If the signal is approved, the exact `suggested_stop`/
+`suggested_target` values the *strategy* computed become
+`Position.stop_price`/`target_price` unchanged (`trading_loop.py:_confirm_entry_filled`).
+Raising or lowering `min_risk_reward_ratio` in the dashboard's Settings
+panel changes what gets rejected at entry; it does not reach into an
+approved position and move its stop or target. Each strategy currently
+hardcodes its own reward multiple independently (`profit_target_r_multiple`,
+mostly `2.0` -- see each `strategy/*.py` file's config) -- it happens to
+match `RiskConfig`'s default `min_risk_reward_ratio` today, but the two
+are not wired together, so changing one does not change the other.
+
+Once a position is open, `PositionManager.check_exit` (`position/position_manager.py`)
+runs once per poll tick and checks, in this order -- first match wins:
+
+1. **Stop hit** -- `price <= stop_price`.
+2. **Target hit** -- `price >= target_price` (only if the strategy set one).
+3. **VWAP failure** -- `price` drops more than `vwap_failure_buffer_pct`
+   (default 0.5%) below VWAP, regardless of where the stop sits.
+4. **Time limit** -- position has been open `>= time_limit_minutes`
+   (default 30) with none of the above triggered.
+
+Before that check, a **trailing stop** (`PositionManagementConfig.trailing_stop_pct`,
+default 3%) recomputes every tick as `current_price * (1 - 3%)` and
+replaces `stop_price` whenever that's *tighter* (higher) than the current
+stop -- never looser. This is universal: every open position gets the
+exact same trailing-stop treatment regardless of which of the 8 strategies
+triggered its entry. It is not, today, a separate mechanism from #1 above
+-- it just continuously raises the bar #1 checks against.
+
+**The real consequence of this ordering, worth calling out explicitly**:
+for the 7 strategies that set a `target_price` (everything except
+`VolumeIgnitionStrategy`), check #2 fires the moment price reaches that
+target -- which typically happens *before* the trailing stop has ratcheted
+much past the target level, since a strategy's own stop distance and
+2R target tend to land in a similar zone to where a 3% trailing stop
+first becomes meaningful. In practice, that means gains on those 7
+strategies are effectively capped near their target today, even though
+the trailing-stop code exists and would otherwise let the trade run
+further. Only `VolumeIgnitionStrategy` (no target at all) currently lets a
+winning trade run past that point, managed purely by the trailing stop
+(plus VWAP-failure/time-limit as backstops) -- this was a deliberate
+choice for that one strategy, not a general policy.
+
+**Known gap, not yet built**: there's no explicit "move stop to breakeven
+once price is up N%" rule -- the continuous 3%-trailing calculation
+happens to land a position's stop near/above breakeven once price is
+roughly 3%+ above entry, but that's an emergent side effect of the flat
+percentage math, not a guaranteed floor. A dedicated breakeven-at-+N%
+rule, combined with retiring the hard target-hit exit (#2) in favor of
+letting the trailing stop alone govern the profitable side of every
+strategy's trade (not just Volume Ignition's), is being considered -- see
+the project's task history/chat log for the exact design under discussion
+before treating this as implemented.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right
