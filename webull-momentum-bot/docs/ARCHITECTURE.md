@@ -219,14 +219,44 @@ Webull-bound time no matter how many worker threads are checking symbols
 concurrently -- more workers only let FMP float lookups overlap with
 that, they can't make Webull itself go faster. There is no cap on N (see
 `TradingLoop._rescan_universe` above): every symbol the multi-source
-universe returns gets scanned, so full-scan duration scales with however
-large that universe is on a given cycle rather than being bounded by a
-fixed number. `TradingLoopConfig.universe_rescan_interval_seconds` is
+universe returns gets scanned, unless it's already a tracked candidate
+(see the cost-optimization list below), so full-scan duration scales with
+however large that universe's *new* discoveries are on a given cycle
+rather than being bounded by a fixed number. `TradingLoopConfig.universe_rescan_interval_seconds` is
 sized as a floor between scan *starts*, not a target duration, given that
 a full scan now routinely takes longer than any reasonable interval --
 see that config's comments for the measured numbers (and their caveat:
 they predate the wider price range, pagination, and 4th source, so they
 understate current scan time).
+
+**Two cost optimizations (2026-08-09), both purely eliminating wasted
+work with no coverage/behavior tradeoff:**
+
+1. **`_rescan_universe` skips already-tracked symbols before calling
+   `BroadScanner.scan()`.** Previously every symbol the discovery sources
+   returned got the full per-symbol cost (up to 3 paced Webull calls) on
+   *every* rescan pass, even ones already sitting in `self.candidates` --
+   the insert loop right after `scan()` has always silently discarded
+   those results anyway (`if candidate.symbol not in self.candidates`).
+   Filtering the symbol list down to genuinely new discoveries before
+   `scan()` runs means that cost is only ever paid once per symbol, not
+   once per cycle for as long as it keeps appearing on a discovery list.
+   Nothing is lost: an already-tracked candidate's score/state/exit
+   management is driven entirely by `_process_all_candidates` on its own
+   5-second cadence (see the "Concurrency model" section of
+   `runtime/trading_loop.py`'s module docstring), not by this discovery
+   pass, so it keeps getting checked exactly as often either way.
+2. **`BroadScanner.check_symbol_verbose` skips the `get_daily_volumes`
+   call when current-day volume alone already clears its floor.** Since
+   the volume floor only rejects when ALL THREE metrics are missed (see
+   below), a symbol whose `snapshot.cumulative_volume` already clears
+   `min_current_day_volume` is guaranteed to survive regardless of what
+   `average_daily_volume`/`previous_day_volume` would turn out to be --
+   so that network call (and the retry/rate-limit cost it can carry) is
+   skipped entirely in that case. `average_daily_volume`/`previous_day_volume`
+   simply stay `None` on the resulting candidate then, the same
+   already-handled case as a broker with no daily-volume history at all
+   (paper/backtest mode).
 
 **Volume floor** (`BroadScanner._fails_volume_floor`, fed by
 `_compute_average_volume_info` plus the snapshot already in hand): a

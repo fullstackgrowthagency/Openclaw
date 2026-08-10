@@ -544,6 +544,46 @@ def test_candidates_dict_is_thread_safe_under_concurrent_rescan_and_reads():
     assert len(loop.candidates) == 50
 
 
+# -- _rescan_universe skips already-tracked symbols (cost optimization) -----
+
+def test_rescan_universe_does_not_rescan_an_already_tracked_symbol():
+    from webull_bot.state_machine import new_candidate
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)  # universe_provider is StaticUniverseProvider(["TEST"])
+    loop.candidates["TEST"] = new_candidate("TEST")
+
+    scan_calls: list[list[str]] = []
+    original_scan = loop.broad_scanner.scan
+    loop.broad_scanner.scan = lambda symbols: (scan_calls.append(list(symbols)), original_scan(symbols))[1]
+
+    loop._rescan_universe(datetime.utcnow())
+
+    # "TEST" is the only symbol the universe provider returns, and it's
+    # already tracked -- BroadScanner.scan should never even be asked
+    # about it, let alone pay for the network calls that would follow.
+    assert scan_calls == [[]]
+
+
+def test_rescan_universe_still_scans_genuinely_new_symbols():
+    from webull_bot.state_machine import new_candidate
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    loop.universe_provider = StaticUniverseProvider(["TEST", "NEWSYM"])
+    loop.candidates["TEST"] = new_candidate("TEST")
+
+    scan_calls: list[list[str]] = []
+    original_scan = loop.broad_scanner.scan
+    loop.broad_scanner.scan = lambda symbols: (scan_calls.append(list(symbols)), original_scan(symbols))[1]
+
+    loop._rescan_universe(datetime.utcnow())
+
+    assert scan_calls == [["NEWSYM"]]
+
+
 # -- scan_and_add_candidate (on-demand single-ticker scan, backs the
 # dashboard's manual "scan a ticker" feature) --------------------------------
 

@@ -26,6 +26,12 @@ candidate for missing data, same fail-soft spirit as the free-float check
 failing soft on a lookup error, just applied to a value comparison instead
 of an exception.
 
+Cost optimization (2026-08-09): the get_daily_volumes network call behind
+average_volume/previous_day_volume is skipped entirely whenever
+current_day_volume alone already clears min_current_day_volume, since the
+either-or rule above means nothing that call could return would change
+the outcome in that case -- see check_symbol_verbose.
+
 Expensive per-tick metric work happens in CandidateWatcher, not here.
 
 The symbol universe itself (e.g. a premarket-gappers or most-active list)
@@ -166,16 +172,29 @@ class BroadScanner:
         # Structural gate: volume floor. Checked before the (more
         # expensive) resistance network call below so a symbol disqualified
         # here never pays for that extra round-trip (see module docstring).
-        average_volume, previous_day_volume = self._compute_average_volume_info(symbol)
-        if self._fails_volume_floor(average_volume, previous_day_volume, snapshot.cumulative_volume):
-            return None, (
-                f"Average daily volume ({self._fmt_volume(average_volume)}), previous-day volume "
-                f"({self._fmt_volume(previous_day_volume)}), and today's volume-so-far "
-                f"({self._fmt_volume(snapshot.cumulative_volume)}) are all below their floors "
-                f"(min_average_daily_volume={self.config.min_average_daily_volume:,.0f}, "
-                f"min_previous_day_volume={self.config.min_previous_day_volume:,.0f}, "
-                f"min_current_day_volume={self.config.min_current_day_volume:,.0f})."
-            )
+        #
+        # get_daily_volumes is skipped entirely when current-day volume
+        # alone already clears min_current_day_volume: rejection requires
+        # ALL THREE floors to be missed (_fails_volume_floor), so nothing
+        # average/previous-day volume could report would change the
+        # outcome in that case -- the candidate survives regardless, and
+        # it isn't worth an extra Webull round-trip to confirm that.
+        # average_volume/previous_day_volume simply stay None on the
+        # resulting candidate then, same fully-handled case as a broker
+        # with no daily-volume history at all (paper/backtest mode).
+        average_volume: Optional[float] = None
+        previous_day_volume: Optional[float] = None
+        if snapshot.cumulative_volume < self.config.min_current_day_volume:
+            average_volume, previous_day_volume = self._compute_average_volume_info(symbol)
+            if self._fails_volume_floor(average_volume, previous_day_volume, snapshot.cumulative_volume):
+                return None, (
+                    f"Average daily volume ({self._fmt_volume(average_volume)}), previous-day volume "
+                    f"({self._fmt_volume(previous_day_volume)}), and today's volume-so-far "
+                    f"({self._fmt_volume(snapshot.cumulative_volume)}) are all below their floors "
+                    f"(min_average_daily_volume={self.config.min_average_daily_volume:,.0f}, "
+                    f"min_previous_day_volume={self.config.min_previous_day_volume:,.0f}, "
+                    f"min_current_day_volume={self.config.min_current_day_volume:,.0f})."
+                )
 
         candidate = new_candidate(symbol, now=snapshot.timestamp)
         candidate.float_data = float_data

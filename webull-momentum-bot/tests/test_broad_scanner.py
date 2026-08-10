@@ -199,8 +199,10 @@ class _DailyVolumeAwareBroker(_SlowFakeBroker):
         super().__init__(delay_seconds=0.0, prices={})
         self.daily_volumes = daily_volumes
         self.cumulative_volumes = cumulative_volumes or {}
+        self.get_daily_volumes_calls: list[str] = []
 
     def get_daily_volumes(self, symbol, lookback_days):
+        self.get_daily_volumes_calls.append(symbol)
         return self.daily_volumes[symbol]
 
     def get_snapshot(self, symbol):
@@ -269,9 +271,11 @@ def test_scan_keeps_candidate_exactly_at_previous_day_volume_floor():
 
 
 def test_scan_keeps_candidate_when_only_current_day_volume_clears_its_floor():
-    # average_daily_volume (400,000) and previous_day_volume (400,000) both
-    # miss their floors, but current_day_volume (600,000) clears
-    # min_current_day_volume (500,000) -- surviving on that bar alone.
+    # current_day_volume (600,000) clears min_current_day_volume (500,000)
+    # alone -- daily_volumes is set up so average/previous-day would BOTH
+    # miss their own floors if fetched, but get_daily_volumes should never
+    # even be called here (see the dedicated skip test below), so this
+    # candidate survives purely on current-day volume.
     broker = _DailyVolumeAwareBroker({"HOT": [400_000] * 10}, cumulative_volumes={"HOT": 600_000})
     scanner = BroadScanner(broker, _FakeFloatProvider())
     assert [c.symbol for c in scanner.scan(["HOT"])] == ["HOT"]
@@ -279,11 +283,41 @@ def test_scan_keeps_candidate_when_only_current_day_volume_clears_its_floor():
 
 def test_scan_keeps_candidate_exactly_at_current_day_volume_floor():
     # 500,000 is the default min_current_day_volume floor -- AT it, not
-    # below it, so this alone is enough to survive despite average/
-    # previous-day volume both missing their own floors.
+    # below it, so this alone is enough to survive without ever needing
+    # average/previous-day volume.
     broker = _DailyVolumeAwareBroker({"EDGE": [400_000] * 10}, cumulative_volumes={"EDGE": 500_000})
     scanner = BroadScanner(broker, _FakeFloatProvider())
     assert [c.symbol for c in scanner.scan(["EDGE"])] == ["EDGE"]
+
+
+def test_scan_skips_daily_volume_lookup_when_current_day_volume_already_clears_its_floor():
+    # Cost optimization: since clearing any single one of the three volume
+    # floors is enough to survive, get_daily_volumes (a real network call)
+    # is entirely unnecessary once current_day_volume alone already clears
+    # min_current_day_volume -- nothing it could return would change the
+    # outcome. Confirms the call itself is skipped, not just that the
+    # candidate happens to survive either way.
+    broker = _DailyVolumeAwareBroker({"HOT": [400_000] * 10}, cumulative_volumes={"HOT": 600_000})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+
+    candidates = scanner.scan(["HOT"])
+
+    assert broker.get_daily_volumes_calls == []
+    assert candidates[0].average_daily_volume is None
+    assert candidates[0].previous_day_volume is None
+
+
+def test_scan_still_calls_daily_volume_lookup_when_current_day_volume_does_not_clear_its_floor():
+    # The skip only applies when current-day volume alone already clears
+    # its bar -- when it doesn't, average/previous-day volume is still the
+    # candidate's only remaining path to survival, so the call must happen.
+    broker = _DailyVolumeAwareBroker({"OK": [800_000] * 10}, cumulative_volumes={"OK": 200_000})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+
+    candidates = scanner.scan(["OK"])
+
+    assert broker.get_daily_volumes_calls == ["OK"]
+    assert candidates[0].average_daily_volume == 800_000
 
 
 def test_scan_rejects_when_current_day_volume_is_just_below_its_floor():

@@ -83,11 +83,14 @@ class TradingLoopConfig:
     # There is deliberately no cap on how many symbols get scanned per
     # cycle -- see TradingLoop._rescan_universe and data/universe.py's
     # MultiSourceUniverseProvider. Every symbol the multi-source universe
-    # returns gets checked, so a real mover can never be silently dropped
-    # just because it fell past some truncation point (an earlier version
-    # of this config had max_universe_size for exactly that purpose; it was
-    # removed rather than set to some very large number, since keeping a
-    # cap at all reintroduces the risk it existed to prevent).
+    # returns gets checked (unless it's already a tracked candidate --
+    # see _rescan_universe's already_tracked filter, a pure cost
+    # optimization since a re-check there would be thrown away regardless),
+    # so a real mover can never be silently dropped just because it fell
+    # past some truncation point (an earlier version of this config had
+    # max_universe_size for exactly that purpose; it was removed rather
+    # than set to some very large number, since keeping a cap at all
+    # reintroduces the risk it existed to prevent).
     #
     # The real cost: full scan duration scales with how many symbols the
     # universe returns that cycle instead of being bounded by a fixed
@@ -183,8 +186,25 @@ class TradingLoop:
             logger.exception("Universe scan failed; keeping existing candidates this cycle.")
             return
 
+        # Cost optimization (2026-08-09): a symbol already tracked in
+        # self.candidates gets nothing from being re-scanned here -- the
+        # insert loop below has always skipped it anyway
+        # (`if candidate.symbol not in self.candidates`), which meant every
+        # already-known symbol still paid the full BroadScanner cost
+        # (snapshot + volume history + resistance bars, each a paced
+        # Webull round-trip) only to have the result thrown away. Filtering
+        # them out before scan() means that cost is spent solely on
+        # genuinely new discoveries each cycle. Already-tracked candidates
+        # lose nothing from this: they're re-checked far more often anyway
+        # by _process_all_candidates on its own 5s cadence (see this
+        # module's "Concurrency model" docstring), which is what actually
+        # drives their score/state/exit management, not this discovery pass.
+        with self._candidates_lock:
+            already_tracked = set(self.candidates.keys())
+        new_symbols = [s for s in symbols if s not in already_tracked]
+
         try:
-            discovered = self.broad_scanner.scan(symbols)
+            discovered = self.broad_scanner.scan(new_symbols)
         except Exception:
             logger.exception("BroadScanner.scan failed.")
             return
