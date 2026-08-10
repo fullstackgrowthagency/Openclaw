@@ -96,6 +96,23 @@ const COLUMN_INFO = {
       "Put together: a fresh position rides on its original stop, then breakeven once it's up 5%, then hits target and banks half its size, then trails the remaining half with a 3%-below-price stop that only ever tightens -- letting a strong move keep running instead of being capped at the target.\n\n" +
       "None of this has been backtested or run live yet -- the 5% breakeven trigger and 3% trailing distance are starting points, not tuned values.",
   },
+  "risk-events": {
+    title: "Recent Risk Events",
+    body:
+      "A live log of every time RiskEngine blocks a trade or a fleet-wide safety control fires -- read directly from the running risk engine, not the database, so it reflects the current process exactly.\n\n" +
+      "An entry is logged whenever a signal is rejected, or the kill switch is engaged. Event types you'll see:\n\n" +
+      "• trade_rejected -- a generic reject, e.g. no stop-loss on the signal, or the computed position size came out to zero\n" +
+      "• daily_loss_limit_hit -- the day's max loss limit has been reached\n" +
+      "• max_exposure_hit -- taking this trade would push total assumed stop-loss risk across all open positions past the cap\n" +
+      "• max_positions_hit -- already at the max number of simultaneous open positions\n" +
+      "• max_trades_per_ticker_hit / max_trades_per_day_hit -- per-symbol or per-day trade count caps reached\n" +
+      "• spread_too_wide / liquidity_too_low -- the spread or dollar-volume gate failed\n" +
+      "• slippage_protection_triggered\n" +
+      "• cooldown_active -- this symbol is still in its post-loss cooldown window\n" +
+      "• kill_switch_engaged -- either a new trade was blocked because the kill switch is on, or this is the event logged the moment the switch itself gets engaged\n" +
+      "• min_risk_reward_not_met -- the signal's reward:risk ratio is below the \"Minimum reward:risk ratio\" setting\n\n" +
+      "Each row shows the timestamp, event type, symbol (\"--\" for switch-wide events like the kill switch), and a human-readable reason, e.g. \"Spread 1.20% exceeds max 0.50%.\" It's essentially a real-time audit trail of why a trade was or wasn't taken -- useful for tuning the risk settings in the Settings panel without digging through logs. Shows the most recent 20 events, newest first.",
+  },
 };
 
 function initInfoModal() {
