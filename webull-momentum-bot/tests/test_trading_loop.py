@@ -1271,6 +1271,55 @@ def test_reconcile_leaves_an_already_managing_candidate_alone():
     assert candidate.state == CandidateState.MANAGING
 
 
+def test_reconcile_rebuilds_a_candidate_stuck_in_a_non_terminal_state():
+    # Real incident: a candidate sitting in TRIGGERED (the exact case
+    # adoption exists for -- an entry filled at the broker but this
+    # process never confirmed it) made the old code's single-hop
+    # transition straight to MANAGING illegal (only ENTERED -> MANAGING is
+    # a legal hop -- see state_machine._ALLOWED_TRANSITIONS). That raised
+    # InvalidStateTransition and aborted reconciliation for every symbol
+    # still left in that pass -- confirmed live as the reason candidates
+    # stayed stuck in TRIGGERED indefinitely, since the very mechanism
+    # meant to unstick them kept crashing on the attempt.
+    broker = _FakeBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition as _transition_stuck
+    _transition_stuck(candidate, CandidateState.TRIGGERED)
+    loop._persisted_transition_counts["TEST"] = 3
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)  # must not raise
+
+    assert "TEST" in loop._positions
+    assert loop.candidates["TEST"].state == CandidateState.MANAGING
+    # A fresh Candidate object, not the stuck one advanced illegally --
+    # and its persisted-transition count reset so _flush_state_transitions
+    # persists the new object's full history rather than skipping entries
+    # it thinks are already covered.
+    assert loop.candidates["TEST"] is not candidate
+    assert "TEST" not in loop._persisted_transition_counts
+
+
+def test_reconcile_rebuilds_a_candidate_stuck_in_armed():
+    # Same class of bug, different starting state: ARMED can't jump
+    # straight to MANAGING either (only TRIGGERED/HEATING_UP/REJECTED/
+    # COOLDOWN are legal from ARMED).
+    broker = _FakeBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, candidate = _armed_candidate_setup(broker)  # already leaves candidate in ARMED
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)  # must not raise
+
+    assert "TEST" in loop._positions
+    assert loop.candidates["TEST"].state == CandidateState.MANAGING
+
+
 def test_reconcile_is_a_no_op_when_get_positions_fails():
     class _BrokenBroker(_FakeBroker):
         def get_positions(self):

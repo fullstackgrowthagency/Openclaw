@@ -1142,11 +1142,10 @@ in each direction:
 `reconcile_positions_from_broker()` fetches `broker.get_positions()` once
 and does both directions in the same pass: **adopts** any symbol the
 broker reports that isn't already in `self._positions` (inserting it and
-creating/advancing a `Candidate` straight to `MANAGING` via the same
-state-transition chain tests use --
-`WATCHING -> HEATING_UP -> ARMED -> TRIGGERED -> ENTERED -> MANAGING` --
-so `_process_all_candidates` picks it up on the very next tick like any
-other managed position), and **drops** any symbol still in
+building a fresh `Candidate` through the always-legal
+`WATCHING -> HEATING_UP -> ARMED -> TRIGGERED -> ENTERED -> MANAGING` chain
+tests use, so `_process_all_candidates` picks it up on the very next tick
+like any other managed position), and **drops** any symbol still in
 `self._positions` that the broker no longer reports at all (removing it
 and transitioning its candidate `MANAGING -> EXITED -> COOLDOWN`) -- except
 a symbol with a pending exit order already in flight
@@ -1154,6 +1153,30 @@ a symbol with a pending exit order already in flight
 `_poll_pending_exit`/`_dispatch_exit_finalization` can finish it normally
 through the usual path instead of having it yanked out from under that
 machinery.
+
+**Adoption always rebuilds a fresh `Candidate` rather than advancing
+whatever one already exists, and this isn't optional -- it fixes a real
+bug in adoption's first version.** A single-hop transition straight to
+`MANAGING` is only ever legal from `ENTERED`
+(`state_machine._ALLOWED_TRANSITIONS`); the original code tried it
+directly on whatever existing candidate it found, which raised
+`InvalidStateTransition` for a candidate in `TRIGGERED`, `ARMED`, or
+anywhere else that isn't `ENTERED`/`MANAGING` already. Confirmed live as
+the reason candidates stayed stuck in `TRIGGERED` indefinitely: `TRIGGERED`
+is *exactly* the state a candidate ends up in when its entry filled at the
+broker but this process never confirmed it -- precisely the case adoption
+exists to fix -- so the fix crashed on the exact input it was built to
+handle, aborting reconciliation for every symbol still left in that pass
+(a single unguarded loop, so one exception mid-iteration skips everything
+after it too). The fix: if an existing candidate isn't already
+`ENTERED`/`MANAGING`, discard it and build a fresh one through the full
+chain instead of trying to advance the stale one -- its state already
+disagrees with reality (the broker has a real fill; its state machine says
+otherwise), so nothing about it is worth preserving. The old candidate's
+`_persisted_transition_counts[symbol]` entry is cleared at the same time,
+so `_flush_state_transitions` persists the fresh object's complete history
+from zero rather than misapplying an index meant for a different object's
+transition list.
 
 Called from `_process_all_candidates`, throttled by
 `TradingLoopConfig.position_reconcile_interval_seconds` (default 30s) --

@@ -143,7 +143,15 @@ What's implemented and tested:
   %-below-current-price line (long) or %-above (short), no target -- it
   rides on the breakeven/trailing-stop rules only. Tagged with
   `strategy_name="reconciled_at_startup"` so it's always distinguishable
-  from a real signal-driven entry in the trade history.
+  from a real signal-driven entry in the trade history. **Adoption always
+  builds a fresh `Candidate` instead of advancing an existing one** -- an
+  earlier version tried a direct single-hop jump to `MANAGING`, which is
+  only ever legal from `ENTERED`; a candidate stuck in `TRIGGERED` (exactly
+  the state adoption exists to fix) made that jump raise
+  `InvalidStateTransition` and silently abort reconciliation for every
+  other symbol in that pass too -- confirmed live as the reason candidates
+  stayed stuck in `TRIGGERED` indefinitely. See `docs/ARCHITECTURE.md`'s
+  "Adoption always rebuilds a fresh Candidate" note for the full fix.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry

@@ -180,7 +180,7 @@ def test_core_hours_gate_has_no_action_type_carve_out_of_its_own():
 
 def test_rejects_when_daily_loss_limit_hit():
     engine = RiskEngine(RiskConfig(max_daily_loss_pct=1.0))
-    engine.record_trade_closed("XYZ", pnl=-150.0)  # -1.5% of 10,000
+    engine.record_trade_closed("XYZ", pnl=-150.0, now=_CORE_HOURS_NOW)  # -1.5% of 10,000
     decision = _evaluate(engine)
     assert not decision.approved
 
@@ -224,7 +224,7 @@ def test_record_entry_order_failed_frees_up_the_ticker_slot():
 
     # The order this approval led to never actually filled (broker
     # rejected it) -- roll back the optimistic increment.
-    engine.record_entry_order_failed("ABCD")
+    engine.record_entry_order_failed("ABCD", now=_CORE_HOURS_NOW)
 
     second = _evaluate(engine)
     assert second.approved  # slot was freed, not permanently consumed
@@ -235,7 +235,7 @@ def test_record_entry_order_failed_frees_up_the_daily_trade_count():
     first = _evaluate(engine, signal=_signal(symbol="AAAA"))
     assert first.approved
 
-    engine.record_entry_order_failed("AAAA")
+    engine.record_entry_order_failed("AAAA", now=_CORE_HOURS_NOW)
 
     second = _evaluate(engine, signal=_signal(symbol="BBBB"), snapshot=_snapshot(symbol="BBBB"))
     assert second.approved  # daily slot was freed too, not just the ticker one
@@ -245,7 +245,7 @@ def test_record_entry_order_failed_does_not_go_negative():
     engine = RiskEngine(RiskConfig())
     # No prior approval at all -- must not underflow into a negative count
     # that would then let extra approvals sneak through the daily cap.
-    engine.record_entry_order_failed("ABCD")
+    engine.record_entry_order_failed("ABCD", now=_CORE_HOURS_NOW)
     assert engine._daily.trade_count == 0
     assert engine._daily.trades_per_ticker.get("ABCD", 0) == 0
 
@@ -255,7 +255,7 @@ def test_record_entry_order_failed_only_frees_the_affected_ticker():
     _evaluate(engine, signal=_signal(symbol="AAAA"))
     _evaluate(engine, signal=_signal(symbol="BBBB"), snapshot=_snapshot(symbol="BBBB"))
 
-    engine.record_entry_order_failed("AAAA")
+    engine.record_entry_order_failed("AAAA", now=_CORE_HOURS_NOW)
 
     # AAAA's slot was freed...
     assert _evaluate(engine, signal=_signal(symbol="AAAA")).approved

@@ -962,7 +962,25 @@ class TradingLoop:
             self._positions[symbol] = position
 
             candidate = existing_candidates.get(symbol)
-            if candidate is None:
+            if candidate is None or candidate.state not in (CandidateState.ENTERED, CandidateState.MANAGING):
+                # A single-hop transition straight to MANAGING is only ever
+                # legal from ENTERED (see state_machine._ALLOWED_TRANSITIONS)
+                # -- an existing candidate sitting anywhere else (TRIGGERED
+                # in particular: this is exactly the case where an entry
+                # filled at the broker but this process never confirmed it,
+                # which is the whole reason adoption exists) would raise
+                # InvalidStateTransition here, aborting this entire
+                # reconciliation pass for every symbol still left in the
+                # loop -- confirmed live: candidates stuck in TRIGGERED
+                # forever, since the exact fix meant to unstick them kept
+                # crashing on the very attempt to do so. Simplest correct
+                # fix: always rebuild a fresh Candidate through the full,
+                # always-legal WATCHING->...->MANAGING chain (same as the
+                # "no existing candidate at all" case) rather than trying to
+                # advance whatever state the stale existing one happens to
+                # be in -- that existing candidate's state already disagrees
+                # with reality (the broker has a real fill; its state
+                # machine says otherwise), so it isn't worth preserving.
                 candidate = new_candidate(symbol, now=now)
                 for state in (
                     CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
@@ -971,8 +989,13 @@ class TradingLoop:
                     transition(candidate, state, now=now)
                 with self._candidates_lock:
                     self.candidates[symbol] = candidate
-            elif candidate.state not in (CandidateState.ENTERED, CandidateState.MANAGING):
-                transition(candidate, CandidateState.MANAGING, now=now, reason="adopted existing broker position at startup")
+                # The old candidate object (if any) may have already had
+                # some of its transitions persisted under this count --
+                # that object is now discarded, so persisting the fresh
+                # one's full history from scratch (rather than skipping
+                # entries _flush_state_transitions would otherwise think
+                # are already covered) is the correct restart point.
+                self._persisted_transition_counts.pop(symbol, None)
 
             logger.warning(
                 "Adopted untracked broker position at startup: %s qty=%s side=%s synthetic "
