@@ -107,13 +107,16 @@ an MQTT CONNACK return code 1 ("Protocol not supported") on that specific
 retry -- not yet understood, may be a session_id reuse issue in the retry
 path; watch for whether it recurs regardless of which mqtt_host is used.
 
-Usage: python scripts/verify_streaming.py SYMBOL [--seconds N] [--subscribe-delay N] [--mqtt-host HOST]
+Usage: python scripts/verify_streaming.py SYMBOL [--seconds N] [--subscribe-delay N] [--mqtt-host HOST] [--sub-type TYPE]
   Connects (to HOST if given, else the SDK's own auto-resolved default --
   see above), waits `--subscribe-delay` seconds (default 2.0) after MQTT
-  connect succeeds before subscribing to SYMBOL's quotes, then waits up to
-  `--seconds` (default 20) for a message to arrive, reports exactly what
-  happened at each stage, and disconnects. Read-only -- places no orders,
-  costs nothing to run.
+  connect succeeds before subscribing to SYMBOL's TYPE data (default
+  "QUOTE", confirmed live -- see below; the richer "SNAPSHOT" type, which
+  carries price/open/high/low/volume instead of just bid/ask, is
+  implemented by the same SDK/decoder machinery per static inspection but
+  NOT yet live-tested), then waits up to `--seconds` (default 20) for a
+  message to arrive, reports exactly what happened at each stage, and
+  disconnects. Read-only -- places no orders, costs nothing to run.
 """
 import sys
 import time
@@ -139,9 +142,12 @@ def main() -> None:
     mqtt_host = None
     if "--mqtt-host" in sys.argv:
         mqtt_host = sys.argv[sys.argv.index("--mqtt-host") + 1]
+    sub_type = "QUOTE"
+    if "--sub-type" in sys.argv:
+        sub_type = sys.argv[sys.argv.index("--sub-type") + 1]
 
     settings = get_settings()
-    print(f"mqtt_host={mqtt_host or '(SDK auto-resolved default)'}")
+    print(f"mqtt_host={mqtt_host or '(SDK auto-resolved default)'}  sub_type={sub_type}")
     print(
         f"trading_mode={settings.trading_mode.value}  base_url={settings.webull.base_url}  symbol={symbol}  "
         f"subscribe_delay={subscribe_delay_seconds:.1f}s\n"
@@ -178,7 +184,7 @@ def main() -> None:
             print(f"  [event] waiting {subscribe_delay_seconds:.1f}s before subscribing...")
             time.sleep(subscribe_delay_seconds)
         try:
-            client_.subscribe([symbol], Category.US_STOCK.name, ["QUOTE"])
+            client_.subscribe([symbol], Category.US_STOCK.name, [sub_type])
         except Exception as exc:
             events.append(f"subscribe_raised:{exc!r}")
             print(f"  [event] client.subscribe() raised: {exc!r}")
