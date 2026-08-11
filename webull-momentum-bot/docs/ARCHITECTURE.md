@@ -1429,6 +1429,41 @@ a "Mgmt" column (`Broker` / `Software`) so it's visible at a glance which
 positions are riding on a resting broker order right now versus the
 pure-software fallback.
 
+## Extra position-based confirmation for a TRIGGERED entry (2026-08-11)
+
+A `TRIGGERED` candidate (entry order submitted, not yet confirmed filled)
+is normally confirmed purely by `_poll_pending_entry` polling
+`OrderManager.get_status` -> `broker.get_order_status` every tick until it
+resolves to `FILLED` or a terminal failure. That's a single source of
+truth this project has already had reason to distrust in this exact spot:
+`WebullBrokerClient`'s module docstring flags `_order_from_detail`'s
+field-name mapping for a *populated* response as UNVERIFIED (every live
+attempt during integration was rejected for being outside market hours,
+so a real filled order detail was never actually fetched), and
+`get_positions()` -- a structurally different endpoint -- already had one
+real incident where a field-name mismatch silently lost a fill.
+
+`_poll_pending_entry` now falls through to a second, independent check --
+`_maybe_verify_entry_via_positions` -- whenever `get_order_status` reports
+anything other than a terminal status (`FILLED`/`REJECTED`/`CANCELED`/
+`EXPIRED`), **or raises at all**. Once at least
+`TradingLoopConfig.entry_position_verify_delay_seconds` (10s default) have
+passed since the entry order was submitted (`Order.created_at`), it calls
+`broker.get_positions()` directly and, if Webull already shows an open
+position for this symbol, treats the entry as filled right there --
+building an `Order(status=FILLED, quantity=<the broker's own quantity>, ...)`
+and routing it through the same `_confirm_entry_filled` every other fill
+path already uses, rather than waiting for `get_order_status` to
+eventually agree (which, if that mapping is ever wrong again, might be
+never). Runs at most once per pending entry
+(`self._pending_entry_position_checked`, reset whenever a pending entry
+resolves either way or a fresh one is submitted) rather than every tick
+past the 10s mark, to avoid an extra `get_positions()` call every
+`poll_interval_seconds` stacked on top of the `get_order_status` call
+already happening. If the broker genuinely has no matching position yet,
+this is a no-op and normal `get_order_status` polling continues
+uninterrupted.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right

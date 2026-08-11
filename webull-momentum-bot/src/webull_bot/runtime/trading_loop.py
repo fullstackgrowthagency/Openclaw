@@ -15,6 +15,14 @@ contrast, fills synchronously. This loop has to handle both: a freshly
 submitted order parks the candidate in TRIGGERED (entries) or leaves it in
 MANAGING with a pending-exit marker (exits) and polls `OrderManager.get_status`
 on subsequent ticks until it resolves to FILLED or a terminal failure state.
+A TRIGGERED candidate also gets one extra, independent check roughly
+`entry_position_verify_delay_seconds` (10s default) after submission --
+`_poll_pending_entry` falls through to `_maybe_verify_entry_via_positions`,
+which queries `broker.get_positions()` directly and self-heals into a
+tracked position if Webull already shows one open even though
+`get_order_status` hasn't (or couldn't be) reported FILLED yet -- see that
+method's docstring for why relying on order-status polling alone wasn't
+judged sufficient here.
 
 Position tracking is intentionally NOT re-fetched from the broker every
 tick: `PositionManager.check_exit` mutates trailing-stop/MFE/MAE state in
@@ -161,6 +169,17 @@ class TradingLoopConfig:
     # call per interval (not per-candidate, unlike get_snapshots) is cheap
     # enough to run this fairly often.
     position_reconcile_interval_seconds: float = 30.0
+    # How long a candidate can sit TRIGGERED (entry order submitted, not yet
+    # confirmed filled) before _poll_pending_entry also cross-checks
+    # broker.get_positions() directly, on top of (not instead of) the
+    # get_order_status polling every tick already does -- see
+    # _maybe_verify_entry_via_positions' docstring for why a second,
+    # independent confirmation path matters here specifically. Checked once
+    # per pending entry, not every tick past this mark (see
+    # self._pending_entry_position_checked), to avoid an extra
+    # broker.get_positions() call every poll_interval_seconds on top of the
+    # get_order_status call already happening.
+    entry_position_verify_delay_seconds: float = 10.0
 
 
 class TradingLoop:
@@ -229,6 +248,14 @@ class TradingLoop:
         self._candidates_lock = threading.Lock()
         self._entry_signals: dict[str, Signal] = {}       # symbol -> signal that triggered a pending entry
         self._pending_entry_orders: dict[str, Order] = {}  # symbol -> submitted-but-not-yet-filled entry order
+        # symbols whose TRIGGERED entry has already had its one
+        # get_positions()-based verification check (see
+        # _maybe_verify_entry_via_positions) -- prevents that check from
+        # re-firing every tick once the delay threshold has passed. Cleared
+        # whenever the pending entry resolves (filled, rejected, cancelled,
+        # or the position-check itself confirms a fill) or a fresh entry is
+        # submitted for the symbol.
+        self._pending_entry_position_checked: set[str] = set()
         self._pending_exit_orders: dict[str, tuple[Order, Signal]] = {}  # symbol -> (order, exit signal)
         self._positions: dict[str, Position] = {}          # symbol -> our own tracked open position
         self._last_universe_scan: Optional[datetime] = None
@@ -636,6 +663,12 @@ class TradingLoop:
         elif order.status in (OrderStatus.SUBMITTED, OrderStatus.ACCEPTED, OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED):
             self._entry_signals[candidate.symbol] = signal
             self._pending_entry_orders[candidate.symbol] = order
+            # Defensive reset -- should already be clear (see
+            # _poll_pending_entry/_maybe_verify_entry_via_positions, which
+            # both discard it whenever a pending entry resolves either way),
+            # but a fresh entry attempt must never inherit a stale flag from
+            # some earlier attempt for this symbol.
+            self._pending_entry_position_checked.discard(candidate.symbol)
             # trigger_engine already moved this candidate to TRIGGERED.
         else:
             # Risk-approved but the broker itself rejected/failed the order
@@ -657,23 +690,111 @@ class TradingLoop:
             status_order = self.order_manager.get_status(pending.broker_order_id)
         except Exception:
             logger.warning("get_order_status failed for %s this cycle.", candidate.symbol, exc_info=True)
-            return
-        self._notify_order_update(status_order)
+            status_order = None
 
-        if status_order.status == OrderStatus.FILLED:
-            signal = self._entry_signals.pop(candidate.symbol)
-            self._pending_entry_orders.pop(candidate.symbol, None)
-            self._confirm_entry_filled(candidate, signal, status_order, now)
-        elif status_order.status in (OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED):
-            self._entry_signals.pop(candidate.symbol, None)
-            self._pending_entry_orders.pop(candidate.symbol, None)
-            # Same rollback as _submit_entry's immediate-failure branch --
-            # this order was risk-approved and briefly pending, but never
-            # actually filled, so it must not count against this symbol's
-            # daily entry budget either.
-            self.risk_engine.record_entry_order_failed(candidate.symbol, now)
-            transition(candidate, CandidateState.ARMED, now=now, reason=f"entry order {status_order.status.value}")
-        # else still pending: leave as TRIGGERED, check again next tick
+        if status_order is not None:
+            self._notify_order_update(status_order)
+
+            if status_order.status == OrderStatus.FILLED:
+                signal = self._entry_signals.pop(candidate.symbol)
+                self._pending_entry_orders.pop(candidate.symbol, None)
+                self._pending_entry_position_checked.discard(candidate.symbol)
+                self._confirm_entry_filled(candidate, signal, status_order, now)
+                return
+            elif status_order.status in (OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED):
+                self._entry_signals.pop(candidate.symbol, None)
+                self._pending_entry_orders.pop(candidate.symbol, None)
+                self._pending_entry_position_checked.discard(candidate.symbol)
+                # Same rollback as _submit_entry's immediate-failure branch --
+                # this order was risk-approved and briefly pending, but never
+                # actually filled, so it must not count against this symbol's
+                # daily entry budget either.
+                self.risk_engine.record_entry_order_failed(candidate.symbol, now)
+                transition(candidate, CandidateState.ARMED, now=now, reason=f"entry order {status_order.status.value}")
+                return
+            # else still pending: fall through to the position-verification
+            # check below instead of returning -- same as when
+            # get_order_status itself failed above (status_order is None).
+
+        self._maybe_verify_entry_via_positions(candidate, pending, now)
+
+    def _maybe_verify_entry_via_positions(self, candidate: Candidate, pending: Order, now: datetime) -> None:
+        """Extra, independent confirmation that a TRIGGERED entry actually
+        filled, on top of (not instead of) the get_order_status polling in
+        _poll_pending_entry above -- queries broker.get_positions() directly,
+        once, roughly TradingLoopConfig.entry_position_verify_delay_seconds
+        (10s default) after the entry order was submitted, and self-heals
+        into a tracked position immediately if Webull already shows one open
+        for this symbol even though get_order_status hasn't reported FILLED
+        (or couldn't be reached at all) yet.
+
+        Motivated by this project's own history: WebullBrokerClient's module
+        docstring flags _order_from_detail's field-name mapping for a
+        populated get_order_status response as UNVERIFIED (every live
+        verification attempt during integration was rejected for being
+        outside market hours, so a real filled order detail was never
+        actually fetched/checked), and get_positions() itself already had a
+        real incident where a field-name mismatch silently lost a fill (see
+        _confirm_entry_filled's docstring) before being hardened to skip
+        just the one bad row instead of losing everything. Checking
+        positions directly gives a second, independent path to the same
+        fact ("did this fill?") that doesn't depend on order-status parsing
+        being right, catching a fill this loop would otherwise only notice
+        once get_order_status eventually agrees -- which, per the above,
+        might be delayed, or simply never happen if that mapping is wrong.
+
+        Runs at most once per pending entry (see
+        self._pending_entry_position_checked, reset in _submit_entry and
+        wherever a pending entry resolves) rather than on every tick once
+        the delay has passed, to avoid an extra broker.get_positions() call
+        every poll_interval_seconds on top of the get_order_status call
+        _poll_pending_entry already makes each tick."""
+        if candidate.symbol in self._pending_entry_position_checked:
+            return
+        delay = timedelta(seconds=self.config.entry_position_verify_delay_seconds)
+        if now - pending.created_at < delay:
+            return
+        self._pending_entry_position_checked.add(candidate.symbol)
+
+        try:
+            broker_positions = self.broker.get_positions()
+        except Exception:
+            logger.warning(
+                "Position-verification check failed for %s (still TRIGGERED %.0fs after entry submission).",
+                candidate.symbol, self.config.entry_position_verify_delay_seconds, exc_info=True,
+            )
+            return
+
+        live_position = next((p for p in broker_positions if p.symbol == candidate.symbol), None)
+        if live_position is None:
+            return  # genuinely not filled yet (or already failed) -- normal order-status polling continues
+
+        logger.warning(
+            "%s: broker.get_positions() shows an open position %.0fs after entry submission, but "
+            "get_order_status never reported FILLED -- treating the entry as filled now instead of "
+            "waiting on order-status polling. qty=%s avg_entry_price=%.4f",
+            candidate.symbol, self.config.entry_position_verify_delay_seconds,
+            live_position.quantity, live_position.avg_entry_price,
+        )
+        signal = self._entry_signals.pop(candidate.symbol, None)
+        self._pending_entry_orders.pop(candidate.symbol, None)
+        self._pending_entry_position_checked.discard(candidate.symbol)
+        if signal is None:
+            # Shouldn't happen (mirrors _poll_pending_entry's own "no
+            # pending order" guard for the analogous gap), but don't
+            # fabricate stop/target values from nothing -- revert to ARMED
+            # same as any other unexpected tracking gap.
+            transition(candidate, CandidateState.ARMED, now=now, reason="position found but no entry signal on record")
+            return
+
+        filled_order = Order(
+            symbol=candidate.symbol, side=pending.side, order_type=pending.order_type,
+            quantity=live_position.quantity, status=OrderStatus.FILLED,
+            client_order_id=pending.client_order_id, broker_order_id=pending.broker_order_id,
+            created_at=pending.created_at, updated_at=now, strategy_name=pending.strategy_name,
+        )
+        self._notify_order_update(filled_order)
+        self._confirm_entry_filled(candidate, signal, filled_order, now)
 
     def _confirm_entry_filled(self, candidate: Candidate, signal: Signal, order: Order, now: datetime) -> None:
         # This method is the ONLY place a filled entry order becomes a

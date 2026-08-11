@@ -177,6 +177,19 @@ What's implemented and tested:
   orders (`PaperBrokerClient`, backtests) or a broker call in this chain
   fails for any reason. See `docs/ARCHITECTURE.md`'s "Broker-side
   (resting) stop/target management" section for the full lifecycle.
+- **A `TRIGGERED` entry gets a second, independent fill check -- added
+  2026-08-11.** Order-status polling (`get_order_status`) was the only way
+  this loop noticed an entry had filled, and this project has already
+  found that endpoint's populated-response field mapping unverified in
+  this exact spot, plus a real incident where `get_positions()` (a
+  different endpoint) silently lost a fill to a field-name mismatch. Now,
+  ~10 seconds after an entry order is submitted
+  (`TradingLoopConfig.entry_position_verify_delay_seconds`), if
+  `get_order_status` still hasn't reported a terminal status (or failed
+  outright), `_poll_pending_entry` also queries `broker.get_positions()`
+  directly and self-heals into a tracked position immediately if Webull
+  already shows one open -- see `docs/ARCHITECTURE.md`'s "Extra
+  position-based confirmation for a TRIGGERED entry" section.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry

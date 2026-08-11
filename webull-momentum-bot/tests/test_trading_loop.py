@@ -2074,3 +2074,119 @@ def test_reconcile_cancels_resting_orders_when_dropping_an_externally_closed_pos
 
     assert "TEST" not in loop._positions
     assert stop_id in broker._cancelled
+
+
+# -- extra get_positions()-based confirmation for a TRIGGERED entry
+# (_maybe_verify_entry_via_positions, called from _poll_pending_entry) ------
+
+def test_poll_pending_entry_waits_for_the_delay_before_checking_positions():
+    # fills_after_polls=1000: get_order_status never resolves to FILLED
+    # within this test, isolating the position-verification path from the
+    # normal order-status-confirms-the-fill path already covered elsewhere.
+    broker = _FakeBroker(fills_after_polls=1000)
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+    assert candidate.symbol in loop._pending_entry_orders
+
+    # _FakeBroker.place_order's BUY branch already appended a position, but
+    # only 5s have passed (< the 10s default delay) -- must not self-heal yet.
+    loop._poll_pending_entry(candidate, snapshot.timestamp + timedelta(seconds=5))
+
+    assert candidate.symbol in loop._pending_entry_orders
+    assert candidate.state.value == "triggered"
+
+
+def test_poll_pending_entry_self_heals_via_positions_after_delay_when_order_status_still_pending():
+    broker = _FakeBroker(fills_after_polls=1000)
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    later = snapshot.timestamp + timedelta(seconds=11)
+    loop._poll_pending_entry(candidate, later)
+
+    assert candidate.symbol not in loop._pending_entry_orders
+    assert candidate.state.value == "managing"
+    assert "TEST" in loop._positions
+    assert loop._positions["TEST"].avg_entry_price == 5.20  # from the broker's own position
+
+
+def test_poll_pending_entry_self_heals_via_positions_when_get_order_status_raises():
+    class _StatusAlwaysFailsBroker(_FakeBroker):
+        def get_order_status(self, broker_order_id):
+            raise RuntimeError("simulated get_order_status outage")
+
+    broker = _StatusAlwaysFailsBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    later = snapshot.timestamp + timedelta(seconds=11)
+    loop._poll_pending_entry(candidate, later)  # must not raise despite get_order_status failing
+
+    assert candidate.state.value == "managing"
+    assert "TEST" in loop._positions
+
+
+def test_verify_via_positions_runs_at_most_once_per_pending_entry():
+    class _CountingBroker(_FakeBroker):
+        get_positions_calls: int = 0
+
+        def get_positions(self):
+            self.get_positions_calls += 1
+            return super().get_positions()
+
+    broker = _CountingBroker(fills_after_polls=1000)
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+    # Isolate "checked once, not every tick" from the self-heal path covered
+    # above -- clear the position _FakeBroker's place_order already
+    # appended so the entry stays genuinely unconfirmed at the broker, and
+    # reset the counter so only calls from the position-verification check
+    # below are counted (submit_entry's own risk-engine open_positions
+    # lookup already made one real call of its own).
+    broker._positions.clear()
+    broker.get_positions_calls = 0
+
+    later = snapshot.timestamp + timedelta(seconds=11)
+    loop._poll_pending_entry(candidate, later)
+    loop._poll_pending_entry(candidate, later + timedelta(seconds=5))
+    loop._poll_pending_entry(candidate, later + timedelta(seconds=10))
+
+    assert broker.get_positions_calls == 1
+    assert candidate.symbol in loop._pending_entry_orders  # still genuinely pending
+    assert candidate.state.value == "triggered"
+
+
+def test_entry_position_verify_delay_is_configurable():
+    broker = _FakeBroker(fills_after_polls=1000)
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.config.entry_position_verify_delay_seconds = 3.0
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    loop._poll_pending_entry(candidate, snapshot.timestamp + timedelta(seconds=4))
+
+    assert candidate.state.value == "managing"  # self-healed at the shorter configured delay
+
+
+def test_verify_via_positions_reverts_to_armed_when_no_signal_on_record():
+    broker = _FakeBroker(fills_after_polls=1000)
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+    loop._entry_signals.pop(candidate.symbol)  # simulate the "shouldn't happen" gap directly
+
+    later = snapshot.timestamp + timedelta(seconds=11)
+    loop._poll_pending_entry(candidate, later)
+
+    assert candidate.state.value == "armed"
+    assert candidate.symbol not in loop._pending_entry_orders
