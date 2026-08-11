@@ -519,6 +519,24 @@ What's implemented and tested:
   last `recorder.update()` call for an event, so that label was computed
   but never actually included in what got persisted -- invisible before
   since `update()` was a no-op with no real recorder behind it.
+- **The dashboard's Performance/Trade History cards can now actually show
+  data -- real bug fixed 2026-08-11.** Both cards were fully built
+  end-to-end (HTML, `app.js`'s `refreshPerformance()`/`refreshTrades()`,
+  the `/api/performance`/`/api/trades` endpoints, `record_trade()`) and
+  stayed permanently empty anyway: `Base.metadata.create_all()` only
+  creates a table that doesn't exist yet, it never alters one that's
+  already there, and the VPS's long-lived `trades` table predated
+  `TradeRecord.max_favorable_excursion`/`max_adverse_excursion`/
+  `trading_mode` -- every `record_trade()` call had been failing (silently
+  swallowed by `run_dashboard.py`'s `except Exception:
+  logger.exception(...)`) since those columns were added, despite real
+  trades actually closing. `db/session.py`'s `create_all()` now also runs
+  a new `sync_schema()` step that diffs each already-existing table's live
+  columns against the models here and `ALTER TABLE ... ADD COLUMN`s in
+  whatever's missing (additive-only -- see that function's docstring for
+  exactly what it does and doesn't cover) -- closes this specific failure
+  mode for every table in this schema, not just `trades`, and for any
+  future column added to any of them.
 - SQLAlchemy schema for Postgres/Supabase covering the tables in the
   project outline
 
@@ -537,7 +555,12 @@ What's still a skeleton or unverified (explicitly, not silently):
 - `data/float_providers/massive.py` -- unused now that FMP is wired up; kept
   only as an alternate skeleton
 - Level 2 / order-flow features
-- Alembic migrations (use `scripts/init_db.py` for now)
+- Alembic migrations (use `scripts/init_db.py` for now -- `db/session.py`'s
+  `sync_schema()`, added 2026-08-11, covers the specific "a table already
+  exists without a column the model has since gained" failure mode, but
+  it's additive-only: no dropped/renamed/retyped columns, no constraints,
+  no data backfill. Reach for real Alembic the moment schema evolution
+  needs any of that.)
 - `market_observations` (raw-ish sampled quote features, distinct from the
   derived `momentum_scores`/`momentum_events` tables that already persist)
   is still unused -- the schema exists but nothing writes to it yet.

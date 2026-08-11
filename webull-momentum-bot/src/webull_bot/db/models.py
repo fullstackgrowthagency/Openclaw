@@ -8,6 +8,22 @@ store if it's kept at all, not this schema.
 No Alembic migration is included yet -- for early development,
 `scripts/init_db.py` calls `Base.metadata.create_all()` directly. Introduce
 Alembic once the schema needs to evolve against data you care about keeping.
+
+`create_all()` (in `db/session.py`) only creates a table that doesn't
+exist yet -- it silently does nothing to a table that's already there,
+even after a model below gains new columns. Real incident this caused
+(2026-08-11): the VPS's long-lived `trades` table predated
+`TradeRecord.max_favorable_excursion`/`max_adverse_excursion`/
+`trading_mode`, so every `record_trade()` call had been failing (and
+getting silently swallowed by the caller's `except Exception:
+logger.exception(...)`) since those columns were added -- the dashboard's
+Performance/Trade History cards stayed empty despite real trades closing.
+`db/session.py`'s `create_all()` now also runs `sync_schema()` right
+after, which diffs each already-existing table's live columns against
+this file's models and `ALTER TABLE ... ADD COLUMN`s in whatever's
+missing (see that function's docstring for exactly what it does and
+doesn't cover) -- but it's still not a real migration tool, only a cheap
+patch for the specific "silently broken INSERT" failure mode above.
 """
 from __future__ import annotations
 

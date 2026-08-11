@@ -2355,6 +2355,23 @@ See `db/models.py`. Deliberately does not store a raw tick log --
 Run `scripts/init_db.py` against `DATABASE_URL` to create tables; introduce
 Alembic once the schema needs to evolve without losing data you care about.
 
+**`db/session.py`'s `create_all()` also runs `sync_schema()`** (added
+2026-08-11) right after `Base.metadata.create_all()` -- the latter only
+ever creates a table that doesn't exist AT ALL, it silently does nothing
+to a table that's already there even after its model gains new columns.
+Real incident this fixes: the VPS's long-lived `trades` table predated
+several `TradeRecord` columns, so `record_trade()` had been failing
+(silently, via a broad `except Exception: logger.exception(...)` at the
+call site) since those columns were added, leaving the dashboard's
+Performance/Trade History cards empty despite real trades closing.
+`sync_schema()` diffs every already-existing table's live columns against
+what its model expects and `ALTER TABLE ... ADD COLUMN`s in whatever's
+missing -- additive-only (never drops/renames/retypes a column, never
+adds a constraint, never backfills data into the new column for existing
+rows), a cheap patch for this one failure mode, not a substitute for
+Alembic once real migrations (dropped columns, backfills, renames) are
+needed.
+
 ## Backtesting
 
 `backtest/engine.py` reuses the live `Strategy` / `RiskEngine` /
