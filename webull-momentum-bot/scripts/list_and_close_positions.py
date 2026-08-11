@@ -32,6 +32,8 @@ the systemd service uses.
 import sys
 import time
 
+from _rate_limit import call_with_retry
+
 from webull_bot.brokers import get_broker_client
 from webull_bot.config import get_settings
 from webull_bot.enums import OrderSide, OrderStatus, OrderType
@@ -44,35 +46,10 @@ _CLOSE_SIDE = {
 
 _TERMINAL_STATUSES = {OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED}
 
-# The live bot (if still running) shares this same account's Webull rate
-# limiter (~1 req/s sustained, regardless of which process is calling) --
-# see WebullBrokerClient.get_snapshots' docstring. A closing run that fires
-# every symbol back-to-back with no pacing of its own can collide with the
-# bot's own concurrent polling and get a 429 TOO_MANY_REQUESTS mid-run
-# (confirmed live: exactly this happened closing 3 positions). _RETRY_DELAYS
-# is used for BOTH inter-symbol pacing and backoff after a rate-limit hit.
-_RATE_LIMIT_MARKERS = ("TOO_MANY_REQUESTS", "429")
-_RETRY_DELAYS = (3.0, 6.0, 12.0, 20.0)
-
-
-def _call_with_retry(fn, *, label: str):
-    """Calls fn() and retries with backoff ONLY on what looks like a
-    rate-limit error (429 / TOO_MANY_REQUESTS somewhere in the exception),
-    since blindly retrying every kind of failure here (e.g. a genuine order
-    rejection) would be wrong. Re-raises immediately for anything else, and
-    re-raises the last error if every retry is also rate-limited."""
-    last_exc = None
-    for attempt, delay in enumerate((0.0,) + _RETRY_DELAYS):
-        if delay:
-            print(f"    ({label}: rate-limited, waiting {delay:.0f}s before retry {attempt}/{len(_RETRY_DELAYS)})")
-            time.sleep(delay)
-        try:
-            return fn()
-        except Exception as exc:
-            if not any(marker in str(exc) for marker in _RATE_LIMIT_MARKERS):
-                raise
-            last_exc = exc
-    raise last_exc
+# Pacing between symbols (not just retry-after-failure) -- see
+# _rate_limit.py's module docstring for why a script placing several
+# orders in a row needs both.
+_INTER_SYMBOL_DELAY_SECONDS = 3.0
 
 
 def _fetch_raw_positions(client) -> list:
@@ -129,9 +106,9 @@ def main() -> None:
         if i > 0:
             # Space out each symbol's own place_order + poll sequence below
             # from the previous symbol's, on top of the rate-limit-specific
-            # backoff in _call_with_retry -- reduces how often this even
+            # backoff in call_with_retry -- reduces how often this even
             # needs to retry in the first place.
-            time.sleep(3.0)
+            time.sleep(_INTER_SYMBOL_DELAY_SECONDS)
 
         close_side = _CLOSE_SIDE.get(p.side)
         if close_side is None:
@@ -145,7 +122,7 @@ def main() -> None:
             quantity=p.quantity,
         )
         try:
-            order = _call_with_retry(lambda: broker.place_order(order), label=f"{p.symbol} place_order")
+            order = call_with_retry(lambda: broker.place_order(order), label=f"{p.symbol} place_order")
         except Exception as exc:
             print(f"  {p.symbol}: place_order raised (after retries): {exc!r}")
             continue
@@ -157,7 +134,7 @@ def main() -> None:
                 break
             time.sleep(2.0)
             try:
-                order = _call_with_retry(
+                order = call_with_retry(
                     lambda: broker.get_order_status(order.broker_order_id), label=f"{p.symbol} get_order_status"
                 )
             except Exception as exc:
