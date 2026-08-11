@@ -52,7 +52,7 @@ from webull_bot.models import Order
 _INTER_STEP_DELAY_SECONDS = 3.0
 
 
-def _wait_for_terminal(broker, order, label, timeout_s=30):
+def _wait_for_terminal(broker, order, label, timeout_s=90):
     terminal = {OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED}
     deadline = time.time() + timeout_s
     while order.status not in terminal and time.time() < deadline:
@@ -91,19 +91,34 @@ def main() -> None:
 
     # -- Step 1: real entry. Everything else in this script tests orders
     # against this real, owned position -- no order below is placed before
-    # the account actually holds the shares.
-    print(f"Step 1: real MARKET buy of {qty} {symbol}")
-    entry = Order(symbol=symbol, side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=qty)
-    entry = call_with_retry(lambda: broker.place_order(entry), label="entry place_order")
-    entry = _wait_for_terminal(broker, entry, "entry")
-    if entry.status != OrderStatus.FILLED:
-        print("Entry did not fill -- stopping here, nothing to test stops/brackets against.")
-        return
-
+    # the account actually holds the shares. Reuses an existing position for
+    # `symbol` if one's already open (e.g. left over from a prior run whose
+    # fill arrived after that run's own poll timeout gave up watching it)
+    # instead of buying more on every retry -- a live run already showed
+    # this matters: a 30s timeout here was too short for a real sandbox
+    # fill, and the leftover order filled anyway a few seconds later.
     positions = call_with_retry(lambda: broker.get_positions(), label="get_positions")
-    live_position = next((p for p in positions if p.symbol == symbol), None)
-    fill_price = live_position.avg_entry_price if live_position else snapshot.last_price
-    print(f"  entry filled at ~{fill_price}\n")
+    existing_position = next((p for p in positions if p.symbol == symbol), None)
+    if existing_position is not None:
+        print(f"Step 1: reusing existing position ({existing_position.quantity:g} {symbol} "
+              f"@ {existing_position.avg_entry_price}) instead of buying more")
+        qty = existing_position.quantity
+        fill_price = existing_position.avg_entry_price
+    else:
+        print(f"Step 1: real MARKET buy of {qty} {symbol}")
+        entry = Order(symbol=symbol, side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=qty)
+        entry = call_with_retry(lambda: broker.place_order(entry), label="entry place_order")
+        entry = _wait_for_terminal(broker, entry, "entry")
+        if entry.status != OrderStatus.FILLED:
+            print("Entry did not fill within the wait window -- it may still fill shortly at the")
+            print("broker; re-run this script in a bit and it will detect and reuse it instead of")
+            print("buying again, rather than testing stops/brackets against nothing now.")
+            return
+
+        positions = call_with_retry(lambda: broker.get_positions(), label="get_positions")
+        live_position = next((p for p in positions if p.symbol == symbol), None)
+        fill_price = live_position.avg_entry_price if live_position else snapshot.last_price
+    print(f"  using qty={qty:g} @ ~{fill_price}\n")
     time.sleep(_INTER_STEP_DELAY_SECONDS)
 
     # -- Step 2: lone STOP_LOSS order against the now-real position --
