@@ -1464,6 +1464,129 @@ already happening. If the broker genuinely has no matching position yet,
 this is a no-op and normal `get_order_status` polling continues
 uninterrupted.
 
+## Performance/rate-limit rehaul (2026-08-11)
+
+A single Webull sandbox account shares one real, measured ~1 request/second
+sustained rate ceiling (`brokers/webull/retry.py`'s docstring) across
+**every** endpoint this bot calls -- market data, orders, positions,
+account balance, all of it. Before this pass, only `market_data.*` calls
+(`get_snapshot`/`get_bars`) were paced or retried at all; every
+`order_v3.*`/`account_v2.*` call (`place_order`, `cancel_order`,
+`get_order_status`, `get_positions`, `get_account_balance`, ...) had zero
+rate-limit protection despite drawing from that exact same budget -- a
+burst of market-data polling could 429 a stop-loss cancel with nothing to
+retry it. Closing that gap, and making sure exit-critical traffic always
+wins contention over lower-stakes traffic instead of queuing behind it in
+plain arrival order, was the point of this whole pass.
+
+**Priority tiers** (`retry.py`'s `CallPriority`, `RateLimiter`): every
+Webull call this codebase makes now goes through one shared,
+priority-aware `retry.webull_limiter`. When multiple threads are
+simultaneously waiting for the next available ~1/s slot, the
+highest-priority one is released first (ties broken by arrival order) --
+implemented as a lock/condition-variable-guarded min-heap of waiting
+tickets, not a second parallel limiter (that would just double the
+effective rate and reintroduce 429s). Three tiers, lower number wins:
+
+1. **`CRITICAL`** -- exit/stop-loss management: pending-exit polling,
+   broker-bracket fill polling (`_poll_broker_bracket`), cancelling/
+   replacing a resting protective order, entry-fill confirmation once a
+   fill is known, `place_order`/`cancel_order`/`place_oco_bracket`
+   themselves (always a real trading action), the per-tick batched
+   `get_snapshots` call that feeds every `MANAGING` position's stop/
+   target/VWAP checks, and `get_positions()` (shared fixed priority --
+   see its docstring for why erring toward CRITICAL for every caller,
+   entry-sizing included, was judged safe: it's cheap and infrequent
+   relative to market-data polling).
+2. **`NORMAL`** -- pending-entry polling, the 10s entry-verification
+   check, periodic reconciliation, account equity/buying-power reads,
+   `poll_fills`, `modify_order`. The default when nothing more specific
+   applies.
+3. **`BACKGROUND`** -- universe discovery/rescan (`BroadScanner.scan`'s own
+   `get_snapshots` call) and periodic resistance-level refresh
+   (`get_raw_bars`/`get_daily_volumes`). Free to wait behind everything
+   above -- this is exactly the traffic that used to be able to starve out
+   money-at-risk calls under load.
+
+Strict `BrokerClient` ABC methods (`get_snapshot`, `get_bars`,
+`get_positions`, `place_order`, `cancel_order`, `get_order_status`,
+`poll_fills`) use a single fixed priority baked into `WebullBrokerClient`
+rather than a caller-supplied one, deliberately: threading a `priority`
+kwarg through every implementer of those methods (`PaperBrokerClient` and
+every test double across the suite) for cases that don't actually need
+call-site granularity wasn't worth the blast radius. The two methods where
+the distinction *does* matter in practice --
+`get_snapshots`/`get_raw_bars`/`get_daily_volumes` -- are already
+optional/`getattr`-gated (only `WebullBrokerClient` implements them), so
+adding a `priority` parameter there was safe and cheap; `TradingLoop`
+passes `CRITICAL`, `BroadScanner` passes `BACKGROUND`, explicitly, at each
+call site.
+
+**Stop-sync hysteresis** (`TradingLoopConfig.stop_sync_min_move_pct`,
+0.25% default): `_sync_broker_protective_orders` used to cancel+replace
+the resting stop on *any* change to `position.stop_price`, but
+`PositionManager`'s trailing-stop math (`current_price * (1 -
+trailing_pct)`) recomputes to a different float almost every tick once
+active -- without a minimum-move threshold, a fast-moving symbol would
+cancel+replace on nearly every single tick for changes too small to
+matter, burning `CRITICAL`-tier rate-limiter slots for no real protective
+benefit. 0.25% is deliberately small relative to the 3% default
+`trailing_stop_pct`: hysteresis against float noise, not a meaningful
+loosening of how tightly the stop actually trails price.
+
+**Batched broker-bracket status polling** (`WebullBrokerClient.list_open_orders`,
+`TradingLoop._get_open_orders_for_tick`): `_poll_broker_bracket` used to
+call `get_order_status` once per resting leg (up to 2) per broker-managed
+position, every tick. `list_open_orders` fetches every currently-resting
+order for the whole account in one call, via the confirmed
+`order_v3.get_order_open` SDK method (see this doc's "Broker-side (resting)
+stop/target management" section for the earlier `get_open_orders` vs.
+`get_order_open` naming mixup this confirms was resolved correctly), and
+`_poll_broker_bracket` checks that batch first: a leg still listed there is
+confirmed still resting with **zero** individual calls needed (the common
+case, every tick a resting order hasn't fired). Only a leg that's
+disappeared from the batch falls back to one targeted `get_order_status`
+call, to learn whether it specifically filled or was cancelled (the batch
+only says "no longer open," not why). Confirmed live that `get_order_open`'s
+row shape uses `total_quantity`, not the plain `quantity` key
+`get_order_detail`/`place_order` use elsewhere -- `_order_from_open_order_dict`
+handles that separately from `_order_from_detail`, with a defensive
+fallback to `quantity` in case a response variant ever differs. Falls back
+entirely to the original per-leg polling for a broker without this
+capability (`PaperBrokerClient`/backtests, or a `list_open_orders` call
+that failed this tick).
+
+**Per-tick `get_positions()` dedup** (`TradingLoop._get_positions_for_tick`,
+`self._tick_positions_cache`): several candidates independently needing
+`get_positions()` within the same `_process_all_candidates` pass (e.g.
+multiple `TRIGGERED` entries crossing their own verify-delay threshold
+together, or that lining up with the independently-throttled periodic
+reconcile) used to each fire their own network call for the exact same
+account-wide data. Now shared: at most one real call per pass, reset at
+the start of the next one. Deliberately **not** used by
+`_confirm_entry_filled`'s own post-fill lookup, which always calls
+`broker.get_positions()` directly -- that call specifically wants to see a
+fill that may have only just been confirmed *this* tick, which a value
+cached earlier in the same pass (before the fill was known) could miss.
+The same per-pass-cache pattern backs `_get_open_orders_for_tick` above.
+
+**Discovery snapshot batching** (`BroadScanner.scan`'s `get_snapshots`
+call) already existed before this pass -- confirmed while investigating
+this rehaul, not newly added -- collapsing what would otherwise be one
+`get_snapshot` call per newly-discovered symbol into `ceil(N/100)` batched
+calls for the whole new-symbol set. What this pass added was tagging it
+`BACKGROUND` priority so it can never contend with the exit-critical
+per-tick batch for the same rate-limiter slots.
+
+**Still open**: `get_raw_bars`/`get_daily_volumes` (resistance levels,
+volume profile, opening range, average volume) remain one call per *newly
+discovered* symbol -- Webull's history-bar API is inherently per-symbol
+with no multi-symbol batch equivalent (unlike snapshot), so there's no
+equivalent batching lever available there; this cost is paid once per
+symbol ever (not on every rescan -- see `TradingLoopConfig`'s docstring),
+which is judged acceptable rather than a further optimization target for
+now.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right

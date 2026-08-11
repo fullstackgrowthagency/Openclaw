@@ -190,6 +190,22 @@ What's implemented and tested:
   directly and self-heals into a tracked position immediately if Webull
   already shows one open -- see `docs/ARCHITECTURE.md`'s "Extra
   position-based confirmation for a TRIGGERED entry" section.
+- **Performance/rate-limit rehaul -- 2026-08-11.** Every Webull endpoint
+  this bot calls shares one real, measured ~1 req/s account-wide budget --
+  but only `market_data.*` calls were ever paced or retried; `place_order`/
+  `cancel_order`/`get_order_status`/`get_positions`/`get_account_balance`
+  had zero protection despite drawing from the same budget. Every Webull
+  call now goes through one shared, **priority-aware** rate limiter
+  (`CallPriority.CRITICAL/NORMAL/BACKGROUND` -- exit/stop-loss management
+  always wins contention over discovery/resistance-refresh traffic instead
+  of queuing behind it). Also added: hysteresis on the broker-side stop
+  cancel+replace (a fast-moving trailing stop no longer hammers the API on
+  every tick for sub-0.25% changes), batched broker-bracket status polling
+  (`list_open_orders` -- one call covers every resting order instead of up
+  to 2 `get_order_status` calls per managed position per tick), and a
+  per-tick `get_positions()` cache (several candidates needing it in the
+  same pass now share one real call). See `docs/ARCHITECTURE.md`'s
+  "Performance/rate-limit rehaul" section for the full breakdown.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry

@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from webull_bot.brokers.webull.retry import RateLimiter, call_with_retry, is_rate_limited
+from webull_bot.brokers.webull.retry import CallPriority, RateLimiter, call_with_retry, is_rate_limited
 
 
 class _RateLimitError(Exception):
@@ -89,9 +89,9 @@ def test_call_with_retry_paces_every_attempt_not_just_the_first(monkeypatch):
     wait_calls = []
     original_wait = limiter.wait
 
-    def _counting_wait():
+    def _counting_wait(priority=2):
         wait_calls.append(1)
-        original_wait()
+        original_wait(priority)
 
     limiter.wait = _counting_wait
 
@@ -141,3 +141,87 @@ def test_rate_limiter_enforces_spacing_across_threads():
     call_times.sort()
     gaps = [b - a for a, b in zip(call_times, call_times[1:])]
     assert all(gap >= 0.09 for gap in gaps), gaps
+
+
+# -- priority tiers -----------------------------------------------------------
+
+def test_rate_limiter_releases_higher_priority_waiter_first():
+    # First call takes the slot immediately (nothing waiting yet); every
+    # thread below then queues up *while that first slot is still
+    # occupied*, all before the second real slot opens -- ensures a
+    # genuine priority contest rather than everyone getting their own slot
+    # in arrival order regardless of priority.
+    limiter = RateLimiter(min_interval_seconds=0.15)
+    order: list[str] = []
+    lock = threading.Lock()
+    limiter.wait()  # consumes the first slot synchronously
+
+    def worker(label: str, priority: int, start_barrier: threading.Barrier):
+        start_barrier.wait()
+        limiter.wait(priority)
+        with lock:
+            order.append(label)
+
+    barrier = threading.Barrier(3)
+    threads = [
+        threading.Thread(target=worker, args=("background", CallPriority.BACKGROUND, barrier)),
+        threading.Thread(target=worker, args=("normal", CallPriority.NORMAL, barrier)),
+        threading.Thread(target=worker, args=("critical", CallPriority.CRITICAL, barrier)),
+    ]
+    # Start background/normal first and give them time to actually queue
+    # (call wait() and start blocking) before critical joins -- proves
+    # critical wins even though it arrived last, not just first.
+    threads[0].start()
+    threads[1].start()
+    time.sleep(0.05)
+    threads[2].start()
+    for t in threads:
+        t.join(timeout=2.0)
+
+    assert order[0] == "critical"
+
+
+def test_rate_limiter_same_priority_ties_break_by_arrival_order():
+    limiter = RateLimiter(min_interval_seconds=0.1)
+    order: list[str] = []
+    lock = threading.Lock()
+    limiter.wait()  # consumes the first slot
+
+    def worker(label: str):
+        limiter.wait(CallPriority.NORMAL)
+        with lock:
+            order.append(label)
+
+    first = threading.Thread(target=worker, args=("first",))
+    first.start()
+    time.sleep(0.02)  # ensure "first" is queued before "second" arrives
+    second = threading.Thread(target=worker, args=("second",))
+    second.start()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+
+    assert order == ["first", "second"]
+
+
+def test_rate_limiter_still_enforces_interval_regardless_of_priority():
+    limiter = RateLimiter(min_interval_seconds=0.15)
+    limiter.wait()
+    start = time.monotonic()
+    limiter.wait(CallPriority.CRITICAL)
+    # A CRITICAL call still has to wait out the real interval -- priority
+    # only affects contention ordering among simultaneous waiters, it's
+    # not a way to bypass the pacing itself.
+    assert time.monotonic() - start >= 0.14
+
+
+def test_call_with_retry_passes_priority_through_to_the_limiter():
+    seen_priorities = []
+
+    class _RecordingLimiter(RateLimiter):
+        def wait(self, priority=CallPriority.NORMAL):
+            seen_priorities.append(priority)
+
+    limiter = _RecordingLimiter(min_interval_seconds=0.0)
+    call_with_retry(lambda: "ok", limiter=limiter, priority=CallPriority.CRITICAL)
+
+    assert seen_priorities == [CallPriority.CRITICAL]

@@ -72,6 +72,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Optional
 
+from ..brokers.webull.retry import CallPriority
 from ..interfaces.broker import BrokerClient
 from ..interfaces.float_provider import FloatDataProvider
 from ..metrics.opening_range import compute_opening_range_high
@@ -305,7 +306,10 @@ class BroadScanner:
         if get_daily_volumes is None:
             return (None, None)
         try:
-            volumes = get_daily_volumes(symbol, self.config.avg_volume_lookback_days)
+            # BACKGROUND: discovery/pre-entry work only -- see
+            # WebullBrokerClient.get_daily_volumes' docstring's `priority`
+            # note and retry.py's CallPriority docstring for the tiers.
+            volumes = get_daily_volumes(symbol, self.config.avg_volume_lookback_days, priority=CallPriority.BACKGROUND)
         except Exception:
             return (None, None)
         if not volumes:
@@ -325,7 +329,15 @@ class BroadScanner:
         if get_raw_bars is None:
             return None
         try:
-            return get_raw_bars(symbol, self.config.volume_profile_bar_interval, self.config.volume_profile_bar_count)
+            # BACKGROUND: every caller of _fetch_raw_bars (resistance
+            # levels, volume profile, opening range, and the periodic
+            # refresh_resistance_levels below) is discovery/pre-entry work,
+            # never exit-critical -- see get_raw_bars' `priority` docstring
+            # note and retry.py's CallPriority docstring for the tiers.
+            return get_raw_bars(
+                symbol, self.config.volume_profile_bar_interval, self.config.volume_profile_bar_count,
+                priority=CallPriority.BACKGROUND,
+            )
         except Exception:
             return None
 
@@ -462,7 +474,13 @@ class BroadScanner:
         get_snapshots = getattr(self.broker, "get_snapshots", None)
         if get_snapshots is not None:
             try:
-                batch_snapshots = get_snapshots(symbol_universe)
+                # BACKGROUND: discovery is never exit-critical -- see
+                # WebullBrokerClient.get_snapshots' `priority` docstring
+                # note and retry.py's CallPriority docstring for the tiers.
+                # (Contrast TradingLoop._process_all_candidates' own
+                # get_snapshots call, which passes CRITICAL since it feeds
+                # MANAGING positions' stop/target/VWAP checks directly.)
+                batch_snapshots = get_snapshots(symbol_universe, priority=CallPriority.BACKGROUND)
             except Exception:
                 logger.exception("Batch get_snapshots failed for this scan; falling back to per-symbol fetch.")
 

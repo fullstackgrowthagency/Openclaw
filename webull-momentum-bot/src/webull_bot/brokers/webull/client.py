@@ -94,6 +94,19 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     full discovery writeup, since it was a multi-step process to find the
     actual failure mode). This matters because BroadScanner calls
     get_snapshot concurrently across many symbols at once.
+  - Priority-tiered rate limiting (2026-08-11): every Webull call this
+    client makes -- not just market_data.* -- now goes through the same
+    shared, priority-aware `retry.webull_limiter` (see retry.py's
+    docstring for the CRITICAL/NORMAL/BACKGROUND tiers and which call
+    sites use which). Previously order_v3.*/account_v2.* calls
+    (place_order, cancel_order, get_order_status, get_positions,
+    get_account_balance, ...) had NO rate-limit protection at all despite
+    sharing this exact same account-wide budget -- a burst of market-data
+    polling could 429 a stop-loss cancel or an entry-fill confirmation
+    with nothing to retry it. Closing that gap, and letting exit-critical
+    calls win contention over discovery/resistance-refresh traffic
+    instead of queuing behind it in plain arrival order, was the whole
+    point of adding priority in the first place.
 
 Safety (unchanged from the skeleton this replaces):
   - `WebullBrokerClient.is_live` reflects the *configured* trading mode.
@@ -122,7 +135,7 @@ from ...config import Settings, TradingMode
 from ...enums import OrderSide, OrderStatus, OrderType, TimeInForce
 from ...interfaces.broker import BrokerClient
 from ...models import Fill, MarketSnapshot, Order, Position
-from .retry import call_with_retry
+from .retry import CallPriority, call_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +261,19 @@ class WebullBrokerClient(BrokerClient):
     # -- account -----------------------------------------------------------
 
     def _get_primary_currency_asset(self) -> dict:
-        response = self._require_trade_client().account_v2.get_account_balance(self.account_id)
+        # NORMAL priority: feeds entry-sizing (RiskEngine.evaluate's
+        # account_equity/account_buying_power), not exit management -- see
+        # retry.py's CallPriority docstring for the full tier rationale.
+        # Previously not rate-limited or retried AT ALL (unlike
+        # market_data.* calls) despite sharing the exact same account-wide
+        # ~1 req/s budget -- see this module's docstring and
+        # retry.py's "Priority tiers" section for why every Webull call
+        # this client makes now goes through the same shared, paced,
+        # priority-aware limiter.
+        response = call_with_retry(
+            lambda: self._require_trade_client().account_v2.get_account_balance(self.account_id),
+            priority=CallPriority.NORMAL,
+        )
         response.raise_for_status()
         body = response.json()
         assets = body.get("account_currency_assets") or []
@@ -314,8 +339,23 @@ class WebullBrokerClient(BrokerClient):
         logging the one bad row instead keeps every other real position
         visible, and the logged raw row is exactly the data needed to fix
         _position_from_dict's field-name guesses the next time this actually
-        fires against a real account."""
-        response = self._require_trade_client().account_v2.get_account_position(self.account_id)
+        fires against a real account.
+
+        CRITICAL priority: called from both entry-sizing (RiskEngine's
+        open_positions exposure check) AND exit-critical paths
+        (post-fill confirmation, reconciliation, kill-switch flatten) --
+        see retry.py's CallPriority docstring. Erring toward CRITICAL for
+        every caller of this one shared method is deliberate: this call is
+        cheap and infrequent relative to market-data polling, so always
+        favoring it costs little contention-wise, while a discovery burst
+        (BACKGROUND) never gets to starve out a position-visibility check
+        that could be either kind of call under the hood. Previously not
+        rate-limited or retried at all -- see _get_primary_currency_asset's
+        comment for why that mattered."""
+        response = call_with_retry(
+            lambda: self._require_trade_client().account_v2.get_account_position(self.account_id),
+            priority=CallPriority.CRITICAL,
+        )
         response.raise_for_status()
         positions = []
         for row in response.json():
@@ -414,10 +454,21 @@ class WebullBrokerClient(BrokerClient):
         # without this, _snapshot_from_dict's ext_price handling above would
         # never see anything to prefer, and every candidate's price would
         # silently lag by hours during pre-market or after-hours trading.
+        # NORMAL priority, fixed (not caller-configurable): this singular
+        # method is on the strict BrokerClient ABC (see interfaces/broker.py),
+        # so giving callers a way to override priority here would mean
+        # updating every implementer (PaperBrokerClient, every test double)
+        # to accept the kwarg -- not worth the blast radius when the
+        # get_snapshots/get_raw_bars/get_daily_volumes methods below (all
+        # optional/getattr-gated, so only WebullBrokerClient needs to know
+        # about priority at all) already cover the two cases -- exit-
+        # critical batch ticks vs. discovery -- where the distinction
+        # actually matters in practice. See retry.py's CallPriority docstring.
         response = call_with_retry(
             lambda: self._require_data_client().market_data.get_snapshot(
                 [symbol], Category.US_STOCK.name, extend_hour_required=True,
-            )
+            ),
+            priority=CallPriority.NORMAL,
         )
         response.raise_for_status()
         rows = response.json()
@@ -425,7 +476,7 @@ class WebullBrokerClient(BrokerClient):
             raise ValueError(f"Webull returned no snapshot for {symbol}")
         return self._snapshot_from_dict(rows[0])
 
-    def get_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
+    def get_snapshots(self, symbols: list[str], priority: int = CallPriority.NORMAL) -> dict[str, MarketSnapshot]:
         """Batch equivalent of get_snapshot -- fetches every symbol's
         current snapshot in as few Webull-paced round-trips as possible,
         chunked to _SNAPSHOT_BATCH_SIZE (the SDK's own documented per-
@@ -457,7 +508,17 @@ class WebullBrokerClient(BrokerClient):
         A symbol Webull doesn't return a row for (delisted, momentarily
         unavailable, a bad ticker, etc.) is simply absent from the result
         dict rather than raising -- callers must treat a missing key the
-        same way they'd treat get_snapshot raising for that one symbol."""
+        same way they'd treat get_snapshot raising for that one symbol.
+
+        `priority` (2026-08-11, see retry.py's CallPriority docstring):
+        this one method serves two very differently-urgent call sites --
+        TradingLoop._process_all_candidates' per-tick batch, which feeds
+        MANAGING positions' stop/target/VWAP checks directly, and
+        BroadScanner.scan()'s discovery-time batch, which only affects
+        finding NEW candidates. Defaults to NORMAL; TradingLoop passes
+        CRITICAL explicitly, BroadScanner passes BACKGROUND explicitly --
+        so a discovery burst can never make an exit-critical batch wait
+        behind it for the next rate-limiter slot."""
         if not symbols:
             return {}
         results: dict[str, MarketSnapshot] = {}
@@ -466,7 +527,8 @@ class WebullBrokerClient(BrokerClient):
             response = call_with_retry(
                 lambda chunk=chunk: self._require_data_client().market_data.get_snapshot(
                     chunk, Category.US_STOCK.name, extend_hour_required=True,
-                )
+                ),
+                priority=priority,
             )
             response.raise_for_status()
             for row in response.json():
@@ -522,18 +584,23 @@ class WebullBrokerClient(BrokerClient):
         return snapshots
 
     def get_bars(self, symbol: str, interval: str, lookback: int) -> list[MarketSnapshot]:
+        # NORMAL priority, fixed -- same rationale as get_snapshot's own
+        # comment above (strict ABC method, not worth the blast radius of a
+        # caller-configurable priority when nothing currently calls this
+        # from an exit-critical path).
         timespan = _INTERVAL_TO_TIMESPAN.get(interval)
         if timespan is None:
             raise ValueError(f"Unsupported interval {interval!r}; supported: {sorted(_INTERVAL_TO_TIMESPAN)}")
         response = call_with_retry(
             lambda: self._require_data_client().market_data.get_history_bar(
                 symbol, Category.US_STOCK.name, timespan, count=str(lookback)
-            )
+            ),
+            priority=CallPriority.NORMAL,
         )
         response.raise_for_status()
         return self._snapshots_from_bars(symbol, response.json())
 
-    def get_raw_bars(self, symbol: str, interval: str, count: int) -> list[dict]:
+    def get_raw_bars(self, symbol: str, interval: str, count: int, priority: int = CallPriority.BACKGROUND) -> list[dict]:
         """Each entry is that bar's OWN {time, open, high, low, close, volume}
         (not a running total), most-recent-first -- Webull's native response
         shape and order, completely unprocessed. This deliberately bypasses
@@ -581,7 +648,14 @@ class WebullBrokerClient(BrokerClient):
         window rather than corrupting it. get_bars()/_snapshots_from_bars()
         above (VWAP, momentum-score ticks) deliberately still uses the
         RTH-only default -- extending sessions there would change VWAP and
-        MIS calculations beyond what was asked for."""
+        MIS calculations beyond what was asked for.
+
+        `priority` (2026-08-11, see retry.py's CallPriority docstring):
+        every current caller of this method (resistance levels, volume
+        profile, opening range, daily-volume history -- all via
+        BroadScanner) is discovery/pre-entry work, never exit-critical, so
+        BACKGROUND is a safe default; BroadScanner still passes it
+        explicitly for clarity rather than relying on the default alone."""
         timespan = _INTERVAL_TO_TIMESPAN.get(interval)
         if timespan is None:
             raise ValueError(f"Unsupported interval {interval!r}; supported: {sorted(_INTERVAL_TO_TIMESPAN)}")
@@ -589,12 +663,13 @@ class WebullBrokerClient(BrokerClient):
             lambda: self._require_data_client().market_data.get_history_bar(
                 symbol, Category.US_STOCK.name, timespan, count=str(count),
                 trading_sessions=["PRE", "RTH", "ATH"],
-            )
+            ),
+            priority=priority,
         )
         response.raise_for_status()
         return response.json()
 
-    def get_daily_volumes(self, symbol: str, lookback_days: int) -> list[float]:
+    def get_daily_volumes(self, symbol: str, lookback_days: int, priority: int = CallPriority.BACKGROUND) -> list[float]:
         """Each entry is that day's OWN volume (not a running total), most
         recent trading day first. Confirmed live (2026-08-09): raw daily
         bars come back most-recent-first with each bar's own `volume` field
@@ -602,7 +677,7 @@ class WebullBrokerClient(BrokerClient):
         34.4M/46.1M/49.4M/68.0M/75.1M, one full day's volume per entry, not
         a cumulative sum. See get_raw_bars above for why this doesn't reuse
         get_bars()/_snapshots_from_bars()."""
-        return [float(row["volume"]) for row in self.get_raw_bars(symbol, "1d", lookback_days)]
+        return [float(row["volume"]) for row in self.get_raw_bars(symbol, "1d", lookback_days, priority=priority)]
 
     def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
         raise NotImplementedError(
@@ -679,8 +754,19 @@ class WebullBrokerClient(BrokerClient):
             # long-lived process could have its settings reloaded/mutated.
             raise RuntimeError("Live trading authorization lost; refusing to place order.")
 
+        # CRITICAL priority, fixed: every place_order call is a real
+        # trading action (an entry or a software-submitted exit), never
+        # discovery/background work -- see retry.py's CallPriority
+        # docstring. Previously not rate-limited or retried AT ALL despite
+        # sharing the same account-wide budget as market-data calls -- a
+        # burst of get_snapshot polling could 429 an entry/exit order with
+        # nothing to catch it (see this module's docstring's "Priority
+        # tiers" note and retry.py's for the fuller history).
         payload = self._order_payload(order)
-        response = self._require_trade_client().order_v3.place_order(self.account_id, [payload])
+        response = call_with_retry(
+            lambda: self._require_trade_client().order_v3.place_order(self.account_id, [payload]),
+            priority=CallPriority.CRITICAL,
+        )
         response.raise_for_status()
 
         # Webull's own cancel/detail calls key off the client-generated
@@ -736,8 +822,14 @@ class WebullBrokerClient(BrokerClient):
         target_payload["combo_type"] = "OCO"
         target_payload["client_combo_order_id"] = combo_id
 
-        response = self._require_trade_client().order_v3.place_order(
-            self.account_id, [stop_payload, target_payload]
+        # CRITICAL priority: attaching/replacing a protective stop+target
+        # bracket is a real trading action protecting an open position --
+        # same tier as place_order above.
+        response = call_with_retry(
+            lambda: self._require_trade_client().order_v3.place_order(
+                self.account_id, [stop_payload, target_payload]
+            ),
+            priority=CallPriority.CRITICAL,
         )
         response.raise_for_status()
 
@@ -755,7 +847,13 @@ class WebullBrokerClient(BrokerClient):
         return stop_order, target_order
 
     def cancel_order(self, broker_order_id: str) -> None:
-        response = self._require_trade_client().order_v3.cancel_order(self.account_id, broker_order_id)
+        # CRITICAL priority: always either protecting a position (cancelling
+        # a stale resting stop/target before replacing or before a full
+        # exit) or genuine cleanup -- never background work.
+        response = call_with_retry(
+            lambda: self._require_trade_client().order_v3.cancel_order(self.account_id, broker_order_id),
+            priority=CallPriority.CRITICAL,
+        )
         response.raise_for_status()
 
     def modify_order(self, broker_order_id: str, **changes) -> Order:
@@ -764,8 +862,15 @@ class WebullBrokerClient(BrokerClient):
         # to be a list-of-dicts like place_order's new_orders (same
         # ReplaceOrderRequest.set_modify_orders pattern), but the exact
         # accepted keys beyond client_order_id were not confirmed live.
+        # NORMAL priority: not used by any production path today (cancel +
+        # place_resting_stop/place_resting_bracket is used instead -- see
+        # TradingLoop._sync_broker_protective_orders' docstring for why),
+        # only by scripts/verify_bracket_orders.py.
         modify_payload = {"client_order_id": broker_order_id, **changes}
-        response = self._require_trade_client().order_v3.replace_order(self.account_id, [modify_payload])
+        response = call_with_retry(
+            lambda: self._require_trade_client().order_v3.replace_order(self.account_id, [modify_payload]),
+            priority=CallPriority.NORMAL,
+        )
         response.raise_for_status()
         return self.get_order_status(broker_order_id)
 
@@ -793,7 +898,18 @@ class WebullBrokerClient(BrokerClient):
         )
 
     def get_order_status(self, broker_order_id: str) -> Order:
-        response = self._require_trade_client().order_v3.get_order_detail(self.account_id, broker_order_id)
+        # CRITICAL priority, fixed: the majority and most important callers
+        # of this method are exit/fill-critical (pending-exit polling,
+        # broker-bracket fill polling) -- the minority use (pending-entry
+        # polling, not yet money-at-risk) isn't harmed by also being
+        # favored, unlike the reverse (an entry-priority default starving
+        # an exit poll would be a real problem). Strict ABC method, so not
+        # caller-configurable -- see get_snapshot's comment for why that
+        # tradeoff was made instead of threading priority through here too.
+        response = call_with_retry(
+            lambda: self._require_trade_client().order_v3.get_order_detail(self.account_id, broker_order_id),
+            priority=CallPriority.CRITICAL,
+        )
         response.raise_for_status()
         body = response.json()
         row = body[0] if isinstance(body, list) else body
@@ -801,10 +917,16 @@ class WebullBrokerClient(BrokerClient):
 
     def poll_fills(self, since: Optional[datetime] = None) -> list[Fill]:
         # UNVERIFIED field names for a populated response -- no live
-        # execution existed to test against during integration.
+        # execution existed to test against during integration. NORMAL
+        # priority: only used to look up a trade's realized exit price
+        # after the fact (_build_trade_from_fill), not blocking any live
+        # decision.
         start_date = since.strftime("%Y-%m-%d") if since else None
-        response = self._require_trade_client().order_v3.get_order_executions(
-            self.account_id, start_date=start_date
+        response = call_with_retry(
+            lambda: self._require_trade_client().order_v3.get_order_executions(
+                self.account_id, start_date=start_date
+            ),
+            priority=CallPriority.NORMAL,
         )
         response.raise_for_status()
         fills = []
@@ -821,6 +943,72 @@ class WebullBrokerClient(BrokerClient):
                 )
             )
         return fills
+
+    def _order_from_open_order_dict(self, raw: dict) -> Order:
+        """get_order_open's confirmed-live row shape (2026-08-11, this
+        session, via a real resting OCO bracket) uses `total_quantity`, NOT
+        the plain `quantity` key get_order_detail/place_order's own
+        payloads use elsewhere in this file -- reusing _order_from_detail
+        here unmodified would have silently mapped every open order to
+        quantity=0. Falls back to `quantity` defensively (same multi-key-
+        fallback insurance as _position_from_dict's `symbol` lookup) in
+        case a different order type/response variant ever uses that key
+        instead."""
+        status = _WEBULL_STATUS_TO_OURS.get(raw.get("status", ""), OrderStatus.PENDING)
+        return Order(
+            symbol=raw.get("symbol", ""),
+            side=OrderSide.BUY if raw.get("side") == "BUY" else OrderSide.SELL,
+            order_type=OrderType.MARKET,
+            quantity=float(raw.get("total_quantity", raw.get("quantity", 0))),
+            limit_price=float(raw["limit_price"]) if raw.get("limit_price") is not None else None,
+            stop_price=float(raw["stop_price"]) if raw.get("stop_price") is not None else None,
+            status=status,
+            client_order_id=raw.get("client_order_id"),
+            broker_order_id=raw.get("client_order_id"),
+        )
+
+    def list_open_orders(self, priority: int = CallPriority.NORMAL) -> list[Order]:
+        """Fetches every currently-resting (SUBMITTED, not yet filled/
+        cancelled) order for this account in one call, via
+        order_v3.get_order_open(account_id, page_size=None,
+        last_client_order_id=None) -- confirmed live 2026-08-11 as the
+        REAL "list open orders" method (a ChatGPT-sourced guess suggested
+        `get_open_orders`/`GET /openapi/trade/order/open`; the real method
+        name and REST path, `GET /trading/orders/open-orders/list`, were
+        confirmed independently via both the official OpenAPI spec and
+        introspecting the actual installed SDK -- treat that as the
+        standing example of why a third-party AI's guess about this SDK is
+        never trusted here without independent confirmation).
+
+        Used by TradingLoop to check every broker-managed position's
+        resting stop/target legs in ONE call per tick instead of one
+        get_order_status call per leg per position -- see
+        TradingLoop._get_open_orders_for_tick/_poll_broker_bracket's
+        docstrings for how the result is used (a leg still present here is
+        confirmed still resting, with no further call needed; a leg that's
+        disappeared needs exactly one follow-up get_order_status call to
+        learn whether it filled or was cancelled, since this endpoint only
+        says "no longer open," not why).
+
+        Single page only -- pagination via last_client_order_id is NOT
+        implemented here; this bot's expected number of concurrently-open
+        positions is small enough that a single page should cover every
+        resting order in practice, but this is an assumption, not a
+        confirmed server-side page size limit. Revisit if a real account
+        ever has enough simultaneous resting orders to risk truncation.
+
+        Not part of the BrokerClient interface (see interfaces/broker.py)
+        -- same getattr-gated pattern as get_snapshots/get_raw_bars/
+        place_oco_bracket: PaperBrokerClient/backtests have no resting
+        orders to list at all."""
+        response = call_with_retry(
+            lambda: self._require_trade_client().order_v3.get_order_open(self.account_id),
+            priority=priority,
+        )
+        response.raise_for_status()
+        body = response.json()
+        rows = body if isinstance(body, list) else [body]
+        return [self._order_from_open_order_dict(row) for row in rows]
 
     @property
     def is_live(self) -> bool:

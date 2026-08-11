@@ -80,6 +80,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
+from ..brokers.webull.retry import CallPriority
 from ..collection.event_recorder import MomentumEventTracker
 from ..enums import CandidateState, ExitReason, OrderSide, OrderStatus, SignalAction
 from ..execution.order_manager import OrderManager, OrderRejected
@@ -180,6 +181,21 @@ class TradingLoopConfig:
     # broker.get_positions() call every poll_interval_seconds on top of the
     # get_order_status call already happening.
     entry_position_verify_delay_seconds: float = 10.0
+    # Minimum % move (relative to the stop price currently resting at the
+    # broker) PositionManager's breakeven/trailing math has to produce
+    # before _sync_broker_protective_orders actually cancels+replaces the
+    # resting order -- see that method's docstring. Without this, a
+    # continuously-recomputed trailing stop on a fast-moving symbol would
+    # cancel+replace on nearly every single tick once trailing is active
+    # (partial_exit_taken=True), since `current_price * (1 - trailing_pct)`
+    # almost never lands on the exact same float twice -- hammering
+    # place_order/cancel_order for a change too small to matter while also
+    # burning CRITICAL-tier rate-limiter slots that could otherwise go to
+    # genuinely new fills/exits. 0.25% is deliberately small relative to
+    # the 3% default trailing_stop_pct: this is hysteresis against tick-to-
+    # tick float noise, not a meaningful loosening of how tightly the stop
+    # actually trails price.
+    stop_sync_min_move_pct: float = 0.25
 
 
 class TradingLoop:
@@ -260,6 +276,28 @@ class TradingLoop:
         self._positions: dict[str, Position] = {}          # symbol -> our own tracked open position
         self._last_universe_scan: Optional[datetime] = None
         self._last_position_reconcile: Optional[datetime] = None
+        # Reset at the start of every _process_all_candidates pass (see
+        # that method) and populated lazily by _get_positions_for_tick --
+        # collapses multiple independent broker.get_positions() calls that
+        # would otherwise all happen within the same tick (e.g. several
+        # TRIGGERED candidates each crossing their own
+        # entry_position_verify_delay_seconds mark in the same pass, or
+        # that lining up with the periodic reconcile) into a single real
+        # network round-trip. NOT used by _confirm_entry_filled's own
+        # post-fill lookup, which deliberately always calls
+        # broker.get_positions() directly -- that call specifically wants
+        # to see a fill that may have only just been confirmed THIS tick,
+        # which a value cached earlier in the same pass could miss.
+        self._tick_positions_cache: Optional[list[Position]] = None
+        # Reset alongside _tick_positions_cache (see _process_all_candidates)
+        # -- {broker_order_id: Order} for every resting order at the
+        # broker, fetched at most once per pass via _get_open_orders_for_tick
+        # and shared by every broker-managed position's _poll_broker_bracket
+        # call this tick. None (not populated -- distinct from an empty
+        # dict, which means "fetched, nothing resting") until first
+        # accessed; also None for the whole pass if the broker doesn't
+        # support list_open_orders at all.
+        self._tick_open_orders_cache: Optional[dict[str, Order]] = None
         self._persisted_transition_counts: dict[str, int] = {}  # symbol -> len(state_history) already flushed
         # Set by engage_kill_switch_and_flatten (callable from any thread,
         # e.g. the dashboard's request thread) and consumed by
@@ -718,6 +756,19 @@ class TradingLoop:
 
         self._maybe_verify_entry_via_positions(candidate, pending, now)
 
+    def _get_positions_for_tick(self) -> list[Position]:
+        """Returns broker.get_positions(), reusing a single result across
+        every caller within the same _process_all_candidates pass instead
+        of each one making its own network round-trip -- see
+        self._tick_positions_cache's docstring for which call sites this
+        is (and, importantly, is NOT) used by. Raises on failure exactly
+        like broker.get_positions() itself would (no swallowing here) --
+        each caller already has its own try/except around this for its own
+        specific fallback behavior; caching must not change that contract."""
+        if self._tick_positions_cache is None:
+            self._tick_positions_cache = self.broker.get_positions()
+        return self._tick_positions_cache
+
     def _maybe_verify_entry_via_positions(self, candidate: Candidate, pending: Order, now: datetime) -> None:
         """Extra, independent confirmation that a TRIGGERED entry actually
         filled, on top of (not instead of) the get_order_status polling in
@@ -748,7 +799,11 @@ class TradingLoop:
         wherever a pending entry resolves) rather than on every tick once
         the delay has passed, to avoid an extra broker.get_positions() call
         every poll_interval_seconds on top of the get_order_status call
-        _poll_pending_entry already makes each tick."""
+        _poll_pending_entry already makes each tick. Uses
+        _get_positions_for_tick (not broker.get_positions() directly) so
+        several candidates crossing this same delay threshold within one
+        _process_all_candidates pass share a single network call rather
+        than each firing its own -- see that method's docstring."""
         if candidate.symbol in self._pending_entry_position_checked:
             return
         delay = timedelta(seconds=self.config.entry_position_verify_delay_seconds)
@@ -757,7 +812,7 @@ class TradingLoop:
         self._pending_entry_position_checked.add(candidate.symbol)
 
         try:
-            broker_positions = self.broker.get_positions()
+            broker_positions = self._get_positions_for_tick()
         except Exception:
             logger.warning(
                 "Position-verification check failed for %s (still TRIGGERED %.0fs after entry submission).",
@@ -989,10 +1044,18 @@ class TradingLoop:
         No-op if this position was never bracketed at the broker in the
         first place (broker_stop_order_id is None -- broker unsupported, or
         _attach_broker_bracket already fell back to software-only
-        management) or if the stop hasn't actually moved since the last
-        sync. When it has, cancels BOTH resting legs (not just the stop)
-        and re-attaches a fresh bracket via _attach_broker_bracket, rather
-        than trying to update just the stop leg's price in place: Webull's
+        management), if the stop hasn't actually moved since the last sync,
+        or if it moved by less than
+        TradingLoopConfig.stop_sync_min_move_pct (0.25% default) --
+        hysteresis against the trailing-stop math recomputing to a
+        different float almost every tick once active (`current_price *
+        (1 - trailing_pct)` on a continuously-moving symbol), which would
+        otherwise cancel+replace the resting order on nearly every single
+        tick for changes too small to matter, burning CRITICAL-tier
+        rate-limiter slots for no real protective benefit. When the move
+        IS large enough, cancels BOTH resting legs (not just the stop) and
+        re-attaches a fresh bracket via _attach_broker_bracket, rather than
+        trying to update just the stop leg's price in place: Webull's
         modify_order/replace_order was live-tested and its effect on a
         resting order's price was inconclusive (see
         WebullBrokerClient.place_oco_bracket's docstring), and whether
@@ -1005,9 +1068,43 @@ class TradingLoop:
             return
         if position.stop_price is None or position.stop_price == position.broker_stop_price_synced:
             return
+        if position.broker_stop_price_synced:
+            move_pct = abs(position.stop_price - position.broker_stop_price_synced) / position.broker_stop_price_synced * 100.0
+            if move_pct < self.config.stop_sync_min_move_pct:
+                return
 
         self._cancel_broker_protective_orders(candidate.symbol, position)
         self._attach_broker_bracket(candidate, position, now)
+
+    def _get_open_orders_for_tick(self) -> Optional[dict[str, Order]]:
+        """Returns {broker_order_id: Order} for every currently-resting
+        order at the broker, fetched at most once per _process_all_candidates
+        pass (see self._tick_open_orders_cache) and shared across every
+        broker-managed position's _poll_broker_bracket call this tick --
+        collapses what would otherwise be up to 2 get_order_status calls
+        per position per tick (one per resting leg) into a single
+        list_open_orders() call covering every position at once.
+
+        Returns None (not an empty dict) if the broker doesn't support
+        list_open_orders at all (PaperBrokerClient/backtests -- see
+        WebullBrokerClient.list_open_orders' docstring for why it's not
+        part of the BrokerClient interface) or if the call itself failed
+        this tick -- callers must treat None as "fall back to the
+        original per-leg get_status() polling", not as "no orders are
+        open," which an empty dict (a real, successful "nothing resting
+        right now" answer) means instead."""
+        if self._tick_open_orders_cache is not None:
+            return self._tick_open_orders_cache
+        list_open_orders = getattr(self.broker, "list_open_orders", None)
+        if list_open_orders is None:
+            return None
+        try:
+            orders = list_open_orders()
+        except Exception:
+            logger.warning("list_open_orders failed this cycle; falling back to per-leg get_order_status polling.", exc_info=True)
+            return None
+        self._tick_open_orders_cache = {order.broker_order_id: order for order in orders if order.broker_order_id}
+        return self._tick_open_orders_cache
 
     def _poll_broker_bracket(self, candidate: Candidate, position: Position, now: datetime) -> bool:
         """Checks whether this position's resting broker-side stop or
@@ -1029,10 +1126,22 @@ class TradingLoop:
         EXIT -- unlike the pure-software path, there's no "too small to
         split, downgrade to a full exit" branch to replicate here since
         _attach_broker_bracket already made that same call before ever
-        placing the leg."""
+        placing the leg.
+
+        Checks _get_open_orders_for_tick's batched result first: a leg
+        still listed there is confirmed still resting with NO individual
+        get_order_status call needed at all -- the common case, every tick
+        a resting order hasn't fired yet. Only a leg that's disappeared
+        from that batch (or a broker that doesn't support the batch at
+        all) falls back to the original one-call-per-leg polling below, to
+        learn whether it specifically filled (vs. was cancelled/rejected)."""
+        open_orders = self._get_open_orders_for_tick()
+
         for order_id, is_target in ((position.broker_stop_order_id, False), (position.broker_target_order_id, True)):
             if order_id is None:
                 continue
+            if open_orders is not None and order_id in open_orders:
+                continue  # confirmed still resting via the batched fetch -- no individual call needed
             try:
                 status_order = self.order_manager.get_status(order_id)
             except Exception:
@@ -1298,7 +1407,13 @@ class TradingLoop:
         unprotected," not "as precise as a real strategy's stop.\""""
         now = now or datetime.utcnow()
         try:
-            broker_positions = self.broker.get_positions()
+            # _get_positions_for_tick, not broker.get_positions() directly:
+            # this call and _maybe_verify_entry_via_positions' own can land
+            # in the same _process_all_candidates pass (reconcile's own
+            # throttle is independent of any candidate's entry-verify
+            # timing), so sharing one result avoids a second, redundant
+            # network round-trip for the exact same data within one tick.
+            broker_positions = self._get_positions_for_tick()
         except Exception:
             logger.exception("reconcile_positions_from_broker: get_positions() failed; skipping this run.")
             return
@@ -1432,6 +1547,13 @@ class TradingLoop:
         self._process_all_candidates(now)
 
     def _process_all_candidates(self, now: datetime) -> None:
+        # Fresh per pass -- see _get_positions_for_tick/self._tick_positions_cache's
+        # docstrings: at most one real broker.get_positions() call gets
+        # shared across every caller within THIS pass, never reused into
+        # the next one.
+        self._tick_positions_cache = None
+        self._tick_open_orders_cache = None
+
         # Consumed here (main thread) rather than acted on immediately by
         # whatever thread called engage_kill_switch_and_flatten -- keeps
         # all position-closing work on the single thread that already owns
@@ -1504,7 +1626,15 @@ class TradingLoop:
             ]
             if symbols_needing_snapshot:
                 try:
-                    batch_snapshots = get_snapshots(symbols_needing_snapshot)
+                    # CRITICAL priority: this batch includes every MANAGING
+                    # position's price, which directly feeds
+                    # PositionManager.check_exit's stop/target/VWAP
+                    # decisions -- must win contention over
+                    # BroadScanner's own (BACKGROUND-priority) discovery
+                    # snapshot calls, not queue behind them. See
+                    # WebullBrokerClient.get_snapshots' `priority`
+                    # docstring note and retry.py's CallPriority docstring.
+                    batch_snapshots = get_snapshots(symbols_needing_snapshot, priority=CallPriority.CRITICAL)
                 except Exception:
                     logger.exception("Batch get_snapshots failed this cycle; falling back to per-candidate fetch.")
 

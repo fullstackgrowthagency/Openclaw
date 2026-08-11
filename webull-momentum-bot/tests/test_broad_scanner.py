@@ -97,13 +97,15 @@ class _BatchAwareSlowFakeBroker(_SlowFakeBroker):
         super().__init__(*args, **kwargs)
         self.batch_calls = []
         self.individual_calls = []
+        self.batch_priorities = []
 
     def get_snapshot(self, symbol):
         self.individual_calls.append(symbol)
         return super().get_snapshot(symbol)
 
-    def get_snapshots(self, symbols):
+    def get_snapshots(self, symbols, priority=None):
         self.batch_calls.append(list(symbols))
+        self.batch_priorities.append(priority)
         return {s: _snapshot(s, price=self.prices.get(s, 5.0)) for s in symbols}
 
 
@@ -117,6 +119,21 @@ def test_scan_uses_one_batched_call_for_the_whole_universe():
     assert len(candidates) == 10
     assert broker.batch_calls == [symbols]
     assert broker.individual_calls == []  # no per-symbol fallback needed
+
+
+def test_scan_requests_background_priority_for_its_batch_snapshot_call():
+    # Discovery is never exit-critical -- must not contend with
+    # TradingLoop's own CRITICAL-priority per-tick batch for MANAGING
+    # positions. See retry.py's CallPriority docstring.
+    from webull_bot.brokers.webull.retry import CallPriority
+
+    symbols = [f"SYM{i}" for i in range(3)]
+    broker = _BatchAwareSlowFakeBroker(delay_seconds=0.0, prices={s: 5.0 for s in symbols})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+
+    scanner.scan(symbols)
+
+    assert broker.batch_priorities == [CallPriority.BACKGROUND]
 
 
 def test_scan_falls_back_without_get_snapshots():
@@ -135,7 +152,7 @@ def test_scan_falls_back_without_get_snapshots():
 
 def test_scan_falls_back_per_symbol_when_batch_call_raises():
     class _FlakyBatchBroker(_BatchAwareSlowFakeBroker):
-        def get_snapshots(self, symbols):
+        def get_snapshots(self, symbols, priority=None):
             self.batch_calls.append(list(symbols))
             raise RuntimeError("simulated Webull batch failure")
 
@@ -265,7 +282,7 @@ class _DailyVolumeAwareBroker(_SlowFakeBroker):
         self.cumulative_volumes = cumulative_volumes or {}
         self.get_daily_volumes_calls: list[str] = []
 
-    def get_daily_volumes(self, symbol, lookback_days):
+    def get_daily_volumes(self, symbol, lookback_days, priority=None):
         self.get_daily_volumes_calls.append(symbol)
         return self.daily_volumes[symbol]
 
@@ -403,7 +420,7 @@ def test_scan_does_not_reject_symbol_when_volume_data_is_missing_on_one_side():
 
 def test_scan_does_not_reject_symbol_on_daily_volume_lookup_failure():
     class _FlakyDailyVolumeBroker(_DailyVolumeAwareBroker):
-        def get_daily_volumes(self, symbol, lookback_days):
+        def get_daily_volumes(self, symbol, lookback_days, priority=None):
             raise RuntimeError("simulated Webull failure")
 
     broker = _FlakyDailyVolumeBroker({})
@@ -436,7 +453,7 @@ class _RawBarsAwareBroker(_SlowFakeBroker):
         super().__init__(delay_seconds=0.0, prices=prices or {})
         self.raw_bars = raw_bars
 
-    def get_raw_bars(self, symbol, interval, count):
+    def get_raw_bars(self, symbol, interval, count, priority=None):
         return self.raw_bars[symbol]
 
 
@@ -463,7 +480,7 @@ def test_scan_populates_static_resistance_levels_from_volume_profile():
 
 def test_scan_leaves_static_resistance_levels_empty_on_raw_bars_failure():
     class _FlakyRawBarsBroker(_RawBarsAwareBroker):
-        def get_raw_bars(self, symbol, interval, count):
+        def get_raw_bars(self, symbol, interval, count, priority=None):
             raise RuntimeError("simulated Webull failure")
 
     broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})
@@ -521,7 +538,7 @@ def test_scan_leaves_opening_range_high_none_without_get_raw_bars():
 
 def test_scan_leaves_opening_range_high_none_on_raw_bars_failure():
     class _FlakyRawBarsBroker(_RawBarsAwareBroker):
-        def get_raw_bars(self, symbol, interval, count):
+        def get_raw_bars(self, symbol, interval, count, priority=None):
             raise RuntimeError("simulated Webull failure")
 
     broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})
@@ -539,7 +556,7 @@ def test_scan_fetches_raw_bars_only_once_per_symbol():
             super().__init__(*args, **kwargs)
             self.call_count = 0
 
-        def get_raw_bars(self, symbol, interval, count):
+        def get_raw_bars(self, symbol, interval, count, priority=None):
             self.call_count += 1
             return super().get_raw_bars(symbol, interval, count)
 
@@ -582,7 +599,7 @@ def test_scan_leaves_volume_baseline_none_without_get_raw_bars():
 
 def test_scan_leaves_volume_baseline_none_on_raw_bars_failure():
     class _FlakyRawBarsBroker(_RawBarsAwareBroker):
-        def get_raw_bars(self, symbol, interval, count):
+        def get_raw_bars(self, symbol, interval, count, priority=None):
             raise RuntimeError("simulated Webull failure")
 
     broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})
@@ -638,7 +655,7 @@ def test_scan_leaves_seed_snapshots_empty_without_get_raw_bars():
 
 def test_scan_leaves_seed_snapshots_empty_on_raw_bars_failure():
     class _FlakyRawBarsBroker(_RawBarsAwareBroker):
-        def get_raw_bars(self, symbol, interval, count):
+        def get_raw_bars(self, symbol, interval, count, priority=None):
             raise RuntimeError("simulated Webull failure")
 
     broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})
@@ -677,7 +694,7 @@ def test_refresh_resistance_levels_recomputes_from_fresh_bars():
 
 def test_refresh_resistance_levels_leaves_state_unchanged_on_fetch_failure():
     class _FlakyRawBarsBroker(_RawBarsAwareBroker):
-        def get_raw_bars(self, symbol, interval, count):
+        def get_raw_bars(self, symbol, interval, count, priority=None):
             raise RuntimeError("simulated Webull failure")
 
     broker = _FlakyRawBarsBroker({}, prices={"ANY": 5.0})

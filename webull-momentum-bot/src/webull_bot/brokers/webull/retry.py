@@ -1,7 +1,8 @@
 """
-Shared rate-limit handling for Webull OpenAPI calls: a proactive pacer
-(RateLimiter) plus a reactive safety net (call_with_retry), with every
-*attempt* -- including retries -- going through the same pacer.
+Shared rate-limit handling for Webull OpenAPI calls: a proactive,
+priority-aware pacer (RateLimiter) plus a reactive safety net
+(call_with_retry), with every *attempt* -- including retries -- going
+through the same pacer.
 
 Confirmed live (2026-08-08), in order of discovery:
   1. Firing 10 truly concurrent get_snapshot calls at the sandbox tripped a
@@ -12,6 +13,19 @@ Confirmed live (2026-08-08), in order of discovery:
      something close to a **1 request/second** sustained rate, independent
      of concurrency level or any other provider's (e.g. FMP's) limits:
      0.5s spacing -> 0/20 errors; 0.3s spacing -> 6/20 errors (30%).
+     NOTE (2026-08-11): Webull's own published docs list the Market Data
+     API's rate limit as "300 requests per minute" (5/s average) -- flatly
+     contradicted by the above, which measured real 429s at spacing far
+     looser than that (0.3s ~ 3.3 req/s, already 30% errors; 300/min would
+     be sustainable at ~1 req/s or faster with room to spare if the doc
+     were accurate for this account/environment). This is now the third
+     time this project has found Webull's docs disagree with live sandbox
+     behavior (see also `support_trading_session` in client.py, and the
+     `get_open_orders` vs `get_order_open` method-name mismatch) -- the
+     measured 1 req/s figure below is kept exactly because it's proven
+     against this real account, not because the doc is assumed wrong in
+     general. Re-verify only via another live measurement, never by
+     trusting a published number over an unreproduced one.
   3. A real 149-symbol scan using 5 concurrent workers with only reactive
      retry (no pacing) hit 101 rate-limit errors before even finishing --
      reactive backoff alone doesn't scale, since retries themselves add
@@ -41,13 +55,32 @@ which are real requests too. RateLimiter enforces pacing globally (shared
 across all threads/callers, and now across all attempts of a given call)
 so BroadScanner's thread pool doesn't need to -- and can't accidentally
 forget to -- get this right itself.
+
+Priority tiers (2026-08-11): every Webull endpoint this client calls --
+market data AND order/account/position management -- shares this exact
+same account-wide budget (confirmed live: the sandbox's ~1 req/s ceiling
+was observed to be per-account, not per-endpoint). Previously only
+market_data.* calls went through this pacer at all; order_v3.*/account_v2.*
+calls (place_order, cancel_order, get_order_status, get_positions, ...)
+had zero rate-limit protection of their own, meaning a burst of market-data
+polling could starve out a stop-loss cancel or an entry-fill confirmation
+with no retry to fall back on. Now every Webull call in this codebase goes
+through the same shared `webull_limiter`, and RateLimiter is
+priority-aware: when several threads are simultaneously waiting for the
+next available slot, the most urgent one goes next, not whoever happened
+to call wait() first. See CallPriority for the three tiers and
+docs/ARCHITECTURE.md's "Priority-tiered rate limiting" section for which
+call sites use which tier and why.
 """
 from __future__ import annotations
 
+import heapq
+import itertools
 import logging
 import random
 import threading
 import time
+from enum import IntEnum
 from typing import Callable, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -55,31 +88,110 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+class CallPriority(IntEnum):
+    """Lower value = more urgent = wins contention for the next available
+    rate-limiter slot. See RateLimiter.wait's docstring for the mechanism.
+
+    Assigned per call site, not per endpoint -- the same get_order_status
+    call is CRITICAL when polling a pending exit (money already at risk)
+    but only NORMAL when polling a pending entry (not yet at risk; a few
+    extra seconds of TRIGGERED is a UX/latency cost, not a safety one)."""
+
+    # Exit/stop-loss management: pending-exit polling, broker-bracket fill
+    # polling, cancelling/replacing a resting protective order, and the
+    # entry-fill confirmation path once an order has actually filled
+    # (get_positions() for avg_entry_price/quantity). Anything where a
+    # delay directly means a position sits unprotected or untracked longer
+    # than it has to.
+    CRITICAL = 1
+    # Pending-entry polling, the 10s entry-position-verification check,
+    # periodic position reconciliation, account equity/buying-power reads
+    # for sizing. Matters, but no money is at risk yet if delayed briefly.
+    NORMAL = 2
+    # Universe discovery/rescan and periodic resistance-level refresh --
+    # finding or re-evaluating NOT-yet-triggered candidates. Free to wait
+    # behind everything above; this is the traffic that used to (and, for
+    # any endpoint that isn't yet paced, still can) starve out
+    # money-at-risk calls under load.
+    BACKGROUND = 3
+
+
 class RateLimiter:
-    """Thread-safe: blocks the calling thread until at least `min_interval_seconds`
-    has elapsed since the last call *by any thread* returned from wait()."""
+    """Thread-safe, priority-aware pacer: blocks the calling thread until
+    at least `min_interval_seconds` has elapsed since the last call *by any
+    thread* returned from wait(), and, when multiple threads are waiting
+    simultaneously for that next slot, releases the highest-priority
+    (lowest CallPriority value) one first -- ties broken by arrival order,
+    so same-priority calls still queue fairly.
+
+    Implementation: a single lock/condition variable guards a min-heap of
+    waiting tickets `(priority, sequence_number)`. Each waiting thread
+    holds its own ticket on the heap and, each time it wakes (on a timeout
+    equal to the remaining interval, or a notify from whichever thread just
+    got a slot or a new higher-priority ticket arrived), rechecks whether
+    it is now both the heap's minimum AND the interval has elapsed. This is
+    a bounded busy-recheck, not an unbounded spin: the condition variable's
+    timeout is always set to (at most) the remaining interval, so a thread
+    never wakes needlessly more than once per pending slot."""
 
     def __init__(self, min_interval_seconds: float):
         self.min_interval_seconds = min_interval_seconds
-        self._lock = threading.Lock()
+        self._condition = threading.Condition()
         self._last_call_at: float = 0.0
+        self._waiting: list[tuple[int, int]] = []
+        self._counter = itertools.count()
 
-    def wait(self) -> None:
-        with self._lock:
-            now = time.monotonic()
-            sleep_for = self.min_interval_seconds - (now - self._last_call_at)
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            self._last_call_at = time.monotonic()
+    def wait(self, priority: int = CallPriority.NORMAL) -> None:
+        with self._condition:
+            ticket = (int(priority), next(self._counter))
+            heapq.heappush(self._waiting, ticket)
+            try:
+                while True:
+                    now = time.monotonic()
+                    elapsed = now - self._last_call_at
+                    if self._waiting[0] == ticket and elapsed >= self.min_interval_seconds:
+                        heapq.heappop(self._waiting)
+                        self._last_call_at = time.monotonic()
+                        self._condition.notify_all()
+                        return
+                    remaining = self.min_interval_seconds - elapsed
+                    timeout = remaining if remaining > 0 else None
+                    self._condition.wait(timeout=timeout)
+            except BaseException:
+                # A waiter that never reaches the normal return path (e.g.
+                # interrupted) must not leave a phantom ticket stuck at the
+                # head of the heap, which would permanently block every
+                # other thread behind it.
+                try:
+                    self._waiting.remove(ticket)
+                    heapq.heapify(self._waiting)
+                    self._condition.notify_all()
+                except ValueError:
+                    pass
+                raise
 
 
 # 1.0s -- matches the ~1 req/s sustained rate measured in the sequential
-# test (see module docstring #2). The actual fix for the concurrent-load
-# failures (#4/#5 above) was pacing every retry attempt through this same
-# limiter, not this number; it's set to the measured rate itself rather
-# than a number below it since call_with_retry now provides the margin via
-# real pacing on every attempt, not just the first.
-webull_market_data_limiter = RateLimiter(min_interval_seconds=1.0)
+# test (see module docstring #2), which takes priority over Webull's own
+# published "300 requests per minute" figure for the reasons explained
+# there. The actual fix for the concurrent-load failures (#4/#5 above) was
+# pacing every retry attempt through this same limiter, not this number;
+# it's set to the measured rate itself rather than a number below it since
+# call_with_retry now provides the margin via real pacing on every attempt,
+# not just the first.
+#
+# Shared across EVERY Webull call this codebase makes -- market data AND
+# order/account/position management alike (see this module's docstring's
+# "Priority tiers" section) -- since the account-wide budget it's pacing
+# against is a single shared ceiling, not one per endpoint.
+webull_limiter = RateLimiter(min_interval_seconds=1.0)
+
+# Backward-compatible alias -- webull_market_data_limiter was the name used
+# while only market_data.* calls were paced through this. Kept so any
+# external reference (scripts, in-flight branches) doesn't silently start
+# pointing at a different limiter instance; both names are the exact same
+# object, not two separate budgets.
+webull_market_data_limiter = webull_limiter
 
 
 def is_rate_limited(exc: Exception) -> bool:
@@ -97,18 +209,24 @@ def call_with_retry(
     max_attempts: int = 4,
     base_delay: float = 0.5,
     limiter: Optional[RateLimiter] = None,
+    priority: int = CallPriority.NORMAL,
 ) -> _T:
     """Paces every attempt (including retries) through `limiter`
-    (defaults to the shared `webull_market_data_limiter`) and retries only
-    on Webull's rate-limit error, with exponential backoff plus jitter on
-    top of that pacing. Pacing every attempt -- not just the first -- is
-    what makes this safe under real concurrency: an un-paced retry is a
-    real request that can land back-to-back with another thread's retry
-    and re-trigger the same 429 it was meant to recover from (see the
-    module docstring, finding #4)."""
-    limiter = limiter or webull_market_data_limiter
+    (defaults to the shared `webull_limiter`) and retries only on Webull's
+    rate-limit error, with exponential backoff plus jitter on top of that
+    pacing. Pacing every attempt -- not just the first -- is what makes
+    this safe under real concurrency: an un-paced retry is a real request
+    that can land back-to-back with another thread's retry and re-trigger
+    the same 429 it was meant to recover from (see the module docstring,
+    finding #4).
+
+    `priority`: see CallPriority. Passed straight through to the limiter's
+    own wait() on every attempt, including retries -- a retry of a
+    CRITICAL call stays CRITICAL, it doesn't fall back to the queue at
+    NORMAL priority just because the first attempt failed."""
+    limiter = limiter or webull_limiter
     for attempt in range(max_attempts):
-        limiter.wait()
+        limiter.wait(priority)
         try:
             return fn()
         except Exception as exc:

@@ -10,9 +10,27 @@ from types import SimpleNamespace
 
 import pytest
 
+from webull_bot.brokers.webull import retry as retry_module
 from webull_bot.brokers.webull.client import WebullBrokerClient
 from webull_bot.enums import OrderSide, OrderStatus, OrderType, TimeInForce
 from webull_bot.models import Order
+
+
+@pytest.fixture(autouse=True)
+def _no_rate_limit_delay(monkeypatch):
+    """Every WebullBrokerClient method that talks to the SDK now goes
+    through the shared, real, 1.0s-interval `retry.webull_limiter`
+    singleton (see client.py's 2026-08-11 "Priority-tiered rate limiting"
+    note) -- fine and correct for production, but these tests fake the SDK
+    client entirely, so waiting out real pacing here would only slow the
+    suite down for no reason (and, since it's a process-wide singleton,
+    make this file's timing depend on whatever other tests happened to run
+    before it). Patch the interval to 0 for the duration of each test
+    instead of swapping in a different limiter instance -- these tests
+    call `client._require_trade_client()`/etc. directly, with no way to
+    inject a substitute limiter into client.py's hardcoded
+    `call_with_retry(..., priority=...)` call sites."""
+    monkeypatch.setattr(retry_module.webull_limiter, "min_interval_seconds", 0.0)
 
 
 def _client() -> WebullBrokerClient:
@@ -574,3 +592,281 @@ def test_place_oco_bracket_refuses_when_live_trading_not_authorized():
 
     with pytest.raises(RuntimeError):
         client.place_oco_bracket(stop_order, target_order)
+
+
+# -- priority tiers actually reach the shared limiter (2026-08-11) ----------
+# Every Webull call this client makes -- not just market_data.* -- now goes
+# through retry.call_with_retry with an explicit priority (see client.py's
+# "Priority-tiered rate limiting" docstring note and retry.py's
+# CallPriority). These tests spy on client.py's own `call_with_retry` name
+# (not the SDK calls themselves, already covered above) to confirm each
+# method requests the tier its docstring/comment claims, rather than
+# silently falling back to call_with_retry's own NORMAL default.
+
+def _spy_call_with_retry(monkeypatch):
+    from webull_bot.brokers.webull import client as client_module
+
+    calls = []
+    real = client_module.call_with_retry
+
+    def _spy(fn, **kwargs):
+        calls.append(kwargs.get("priority"))
+        return real(fn, **kwargs)
+
+    monkeypatch.setattr(client_module, "call_with_retry", _spy)
+    return calls
+
+
+def test_get_positions_uses_critical_priority(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeAccountV2:
+        def get_account_position(self, account_id):
+            return _FakeResponse([])
+
+    class _FakeTradeClient:
+        account_v2 = _FakeAccountV2()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    client.get_positions()
+
+    assert calls == [retry_module.CallPriority.CRITICAL]
+
+
+def test_account_balance_uses_normal_priority(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeAccountV2:
+        def get_account_balance(self, account_id):
+            return _FakeResponse({"account_currency_assets": [{"net_liquidation_value": "1000", "buying_power": "500"}]})
+
+    class _FakeTradeClient:
+        account_v2 = _FakeAccountV2()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    client.get_account_equity()
+
+    assert calls == [retry_module.CallPriority.NORMAL]
+
+
+def test_place_order_uses_critical_priority(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+    client.settings = SimpleNamespace(trading_mode=None, is_live_trading_authorized=lambda: True)
+    client.account_id = "test-account"
+
+    class _FakeOrderV3:
+        def place_order(self, account_id, order_dicts):
+            return _FakeResponse({"status": "accepted"})
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    order = Order(symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=1)
+    client.place_order(order)
+
+    assert calls == [retry_module.CallPriority.CRITICAL]
+
+
+def test_cancel_order_uses_critical_priority(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeOrderV3:
+        def cancel_order(self, account_id, broker_order_id):
+            return _FakeResponse({"status": "cancelled"})
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    client.cancel_order("some-order-id")
+
+    assert calls == [retry_module.CallPriority.CRITICAL]
+
+
+def test_get_order_status_uses_critical_priority(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeOrderV3:
+        def get_order_detail(self, account_id, broker_order_id):
+            return _FakeResponse({"symbol": "AAPL", "side": "BUY", "quantity": "1", "status": "FILLED"})
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    client.get_order_status("some-order-id")
+
+    assert calls == [retry_module.CallPriority.CRITICAL]
+
+
+def test_modify_order_uses_normal_priority(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeOrderV3:
+        def replace_order(self, account_id, modify_dicts):
+            return _FakeResponse({"status": "accepted"})
+
+        def get_order_detail(self, account_id, broker_order_id):
+            return _FakeResponse({"symbol": "AAPL", "side": "BUY", "quantity": "1", "status": "SUBMITTED"})
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    client.modify_order("some-order-id", stop_price="10.00")
+
+    # One NORMAL for replace_order, then one CRITICAL for the trailing
+    # get_order_status readback (modify_order calls it directly) -- both
+    # priorities are exercised here, not just the first call.
+    assert calls == [retry_module.CallPriority.NORMAL, retry_module.CallPriority.CRITICAL]
+
+
+def test_poll_fills_uses_normal_priority(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeOrderV3:
+        def get_order_executions(self, account_id, start_date=None):
+            return _FakeResponse([])
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    client.poll_fills()
+
+    assert calls == [retry_module.CallPriority.NORMAL]
+
+
+def test_get_snapshot_uses_normal_priority(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+
+    class _FakeMarketData:
+        def get_snapshot(self, symbols, category, extend_hour_required=False):
+            return _FakeResponse([_REAL_SNAPSHOT_ROW])
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    client.get_snapshot("AAPL")
+
+    assert calls == [retry_module.CallPriority.NORMAL]
+
+
+def test_get_snapshots_defaults_to_normal_but_accepts_an_override(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+
+    class _FakeMarketData:
+        def get_snapshot(self, symbols, category, extend_hour_required=False):
+            return _FakeResponse([_REAL_SNAPSHOT_ROW])
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    client.get_snapshots(["AAPL"])
+    client.get_snapshots(["AAPL"], priority=retry_module.CallPriority.BACKGROUND)
+
+    assert calls == [retry_module.CallPriority.NORMAL, retry_module.CallPriority.BACKGROUND]
+
+
+def test_get_raw_bars_defaults_to_background_but_accepts_an_override(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+
+    class _FakeMarketData:
+        def get_history_bar(self, symbol, category, timespan, count=None, trading_sessions=None):
+            return _FakeResponse([])
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    client.get_raw_bars("AAPL", "1d", 5)
+    client.get_raw_bars("AAPL", "1d", 5, priority=retry_module.CallPriority.CRITICAL)
+
+    assert calls == [retry_module.CallPriority.BACKGROUND, retry_module.CallPriority.CRITICAL]
+
+
+# -- list_open_orders (batched broker-bracket status polling) ---------------
+
+_REAL_OPEN_ORDER_ROW = {
+    "client_order_id": "26532938-0ecf-409f-a4c8-7a54f38aa415",
+    "order_id": "UHHKDO5KJPCH6JQ8SAEAQJOFIB",
+    "order_type": "LIMIT",
+    "limit_price": "322.56",
+    "total_quantity": "2",
+    "status": "SUBMITTED",
+    "symbol": "AAPL",
+    "side": "SELL",
+}
+
+
+def test_order_from_open_order_dict_uses_total_quantity_not_quantity():
+    # Confirmed live 2026-08-11: get_order_open's real row shape uses
+    # total_quantity, NOT the plain `quantity` key get_order_detail/
+    # place_order use elsewhere in this file.
+    client = _client()
+    order = client._order_from_open_order_dict(_REAL_OPEN_ORDER_ROW)
+    assert order.quantity == 2.0
+    assert order.limit_price == 322.56
+    assert order.status == OrderStatus.SUBMITTED
+    assert order.broker_order_id == "26532938-0ecf-409f-a4c8-7a54f38aa415"
+
+
+def test_order_from_open_order_dict_falls_back_to_quantity_key():
+    client = _client()
+    order = client._order_from_open_order_dict({"status": "SUBMITTED", "quantity": "5"})
+    assert order.quantity == 5.0
+
+
+def test_list_open_orders_maps_every_row():
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeOrderV3:
+        def get_order_open(self, account_id):
+            return _FakeResponse([_REAL_OPEN_ORDER_ROW, {**_REAL_OPEN_ORDER_ROW, "client_order_id": "leg-2", "order_type": "STOP_LOSS", "stop_price": "304.13", "limit_price": None}])
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    orders = client.list_open_orders()
+
+    assert len(orders) == 2
+    assert {o.broker_order_id for o in orders} == {"26532938-0ecf-409f-a4c8-7a54f38aa415", "leg-2"}
+
+
+def test_list_open_orders_uses_normal_priority_by_default(monkeypatch):
+    calls = _spy_call_with_retry(monkeypatch)
+    client = _client()
+    client.account_id = "test-account"
+
+    class _FakeOrderV3:
+        def get_order_open(self, account_id):
+            return _FakeResponse([])
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._require_trade_client = lambda: _FakeTradeClient()
+    client.list_open_orders()
+
+    assert calls == [retry_module.CallPriority.NORMAL]

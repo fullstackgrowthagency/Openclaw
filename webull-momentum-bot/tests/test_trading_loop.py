@@ -241,6 +241,8 @@ class _RestingBroker(_FakeBroker):
     _brackets: list = field(default_factory=list)
     _lone_stops: list = field(default_factory=list)
     _cancelled: list = field(default_factory=list)
+    list_open_orders_calls: int = 0
+    get_order_status_calls: int = 0
 
     def place_oco_bracket(self, stop_order, target_order):
         stop_order.broker_order_id = f"stop-{len(self._brackets)}"
@@ -262,6 +264,7 @@ class _RestingBroker(_FakeBroker):
         return super().place_order(order)
 
     def get_order_status(self, broker_order_id):
+        self.get_order_status_calls += 1
         if broker_order_id in self._resting_orders:
             return self._resting_orders[broker_order_id]
         return super().get_order_status(broker_order_id)
@@ -271,6 +274,15 @@ class _RestingBroker(_FakeBroker):
         order = self._resting_orders.get(broker_order_id)
         if order is not None:
             order.status = OrderStatus.CANCELED
+
+    def list_open_orders(self):
+        # Mirrors get_order_open's real semantics: only currently-resting
+        # (SUBMITTED) orders come back -- a leg a test flipped to FILLED/
+        # CANCELED via _resting_orders directly must NOT still show up
+        # here, or _poll_broker_bracket's batched-skip check would wrongly
+        # treat it as still resting and never notice the fill.
+        self.list_open_orders_calls += 1
+        return [o for o in self._resting_orders.values() if o.status == OrderStatus.SUBMITTED]
 
 
 def _armed_candidate_setup(broker):
@@ -1501,6 +1513,89 @@ def test_process_all_candidates_reconciles_immediately_then_throttles():
     assert calls == [True, True]
 
 
+# -- per-tick get_positions() dedup (_get_positions_for_tick) ---------------
+
+def test_get_positions_for_tick_shares_one_broker_call_within_a_pass():
+    class _CountingBroker(_FakeBroker):
+        get_positions_calls: int = 0
+
+        def get_positions(self):
+            self.get_positions_calls += 1
+            return super().get_positions()
+
+    broker = _CountingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+
+    first = loop._get_positions_for_tick()
+    second = loop._get_positions_for_tick()
+
+    assert first is second  # exact same list object, not just equal
+    assert broker.get_positions_calls == 1
+
+
+def test_tick_positions_cache_resets_between_passes():
+    # Reconcile alone triggers one broker.get_positions() call per
+    # _process_all_candidates pass (it always fires -- see
+    # test_process_all_candidates_reconciles_immediately_then_throttles)
+    # via _get_positions_for_tick -- exactly one per pass, not accumulating
+    # or staying stuck at the first pass' cached value.
+    class _CountingBroker(_FakeBroker):
+        get_positions_calls: int = 0
+
+        def get_positions(self):
+            self.get_positions_calls += 1
+            return super().get_positions()
+
+    broker = _CountingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+    assert broker.get_positions_calls == 1
+
+    # Space this second pass out past position_reconcile_interval_seconds
+    # (30s default) -- reconcile is throttled, so a pass too soon after the
+    # first wouldn't call get_positions() again at all, which would make
+    # "the cache resets" indistinguishable from "reconcile just didn't run
+    # this time." See test_process_all_candidates_reconciles_immediately_then_throttles.
+    loop._process_all_candidates(
+        _IN_HOURS_NOW + timedelta(seconds=loop.config.position_reconcile_interval_seconds + 1)
+    )
+    assert broker.get_positions_calls == 2
+
+
+def test_maybe_verify_entry_via_positions_and_reconcile_share_the_tick_cache():
+    # The exact real-world scenario this exists for: a TRIGGERED entry
+    # crossing its own verify-delay threshold in the same pass as the
+    # (independently-throttled) periodic reconcile -- both want
+    # get_positions(), but only one real network call should happen.
+    class _CountingEmptyBroker(_FakeBroker):
+        get_positions_calls: int = 0
+
+        def get_positions(self):
+            # Never shows a matching position for TEST -- keeps the entry
+            # genuinely pending (not filled) so this test isolates the
+            # cache-sharing behavior from _confirm_entry_filled's own
+            # deliberately-uncached follow-up lookup (see
+            # _get_positions_for_tick's docstring for why that one stays
+            # direct).
+            self.get_positions_calls += 1
+            return []
+
+    broker = _CountingEmptyBroker(fills_after_polls=1000)
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+    broker.get_positions_calls = 0  # ignore submit_entry's own risk-sizing lookup
+
+    later = snapshot.timestamp + timedelta(seconds=11)
+    loop._maybe_verify_entry_via_positions(candidate, loop._pending_entry_orders["TEST"], later)
+    loop.reconcile_positions_from_broker(later)
+
+    assert broker.get_positions_calls == 1
+    assert "TEST" in loop._pending_entry_orders  # still genuinely pending, not filled
+
+
 # -- scan_and_add_candidate (on-demand single-ticker scan, backs the
 # dashboard's manual "scan a ticker" feature) --------------------------------
 
@@ -1587,13 +1682,15 @@ def test_scan_and_add_candidate_reports_unexpected_scanner_errors_without_raisin
 class _BatchAwareBroker(_FakeBroker):
     batch_calls: list = field(default_factory=list)
     individual_calls: list = field(default_factory=list)
+    batch_priorities: list = field(default_factory=list)
 
     def get_snapshot(self, symbol):
         self.individual_calls.append(symbol)
         return super().get_snapshot(symbol)
 
-    def get_snapshots(self, symbols):
+    def get_snapshots(self, symbols, priority=None):
         self.batch_calls.append(list(symbols))
+        self.batch_priorities.append(priority)
         return {
             s: MarketSnapshot(
                 symbol=s, timestamp=datetime.utcnow(), last_price=5.20, bid=5.19, ask=5.21,
@@ -1639,6 +1736,20 @@ def test_process_all_candidates_uses_one_batched_call_for_multiple_candidates():
     assert loop.candidates["TWO"].last_price == 5.20
 
 
+def test_process_all_candidates_requests_critical_priority_for_its_batch_snapshot_call():
+    # This batch feeds MANAGING positions' stop/target/VWAP checks directly
+    # -- must win contention over BroadScanner's own (BACKGROUND-priority)
+    # discovery snapshot calls. See retry.py's CallPriority docstring.
+    from webull_bot.brokers.webull.retry import CallPriority
+
+    broker = _BatchAwareBroker()
+    loop = _two_candidate_loop(broker)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert broker.batch_priorities == [CallPriority.CRITICAL]
+
+
 def test_process_all_candidates_falls_back_without_get_snapshots():
     # _FakeBroker has no get_snapshots at all -- representative of
     # PaperBrokerClient/any broker that doesn't support batching.
@@ -1653,7 +1764,7 @@ def test_process_all_candidates_falls_back_without_get_snapshots():
 
 def test_process_all_candidates_falls_back_when_batch_call_raises():
     class _FlakyBatchBroker(_BatchAwareBroker):
-        def get_snapshots(self, symbols):
+        def get_snapshots(self, symbols, priority=None):
             self.batch_calls.append(list(symbols))
             raise RuntimeError("simulated Webull batch failure")
 
@@ -1788,6 +1899,118 @@ def test_confirm_entry_filled_attaches_broker_bracket_when_supported():
     assert position.broker_target_order_id is not None
 
 
+# -- batched broker-bracket status polling (_get_open_orders_for_tick) -----
+
+def test_poll_broker_bracket_skips_individual_calls_when_still_resting_per_batch():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    assert position.broker_stop_order_id is not None
+    assert position.broker_target_order_id is not None
+    broker.get_order_status_calls = 0  # ignore any calls from attaching the bracket itself
+
+    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert handled is False
+    assert broker.list_open_orders_calls == 1
+    # Both legs came back in the batch as still SUBMITTED -- neither needed
+    # its own get_order_status call.
+    assert broker.get_order_status_calls == 0
+
+
+def test_poll_broker_bracket_falls_back_to_individual_call_for_a_leg_missing_from_the_batch():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+    broker._resting_orders[stop_id].status = OrderStatus.FILLED
+    broker._resting_orders[stop_id].quantity = 10
+    broker.get_order_status_calls = 0
+
+    trades = []
+    loop.on_trade_closed = trades.append
+    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert handled is True
+    assert len(trades) == 1
+    # The batch correctly omitted the now-FILLED leg (see _RestingBroker.
+    # list_open_orders), so exactly one targeted get_order_status call was
+    # needed to learn it specifically filled (vs. cancelled) -- not zero,
+    # not the original two-calls-per-tick.
+    assert broker.get_order_status_calls == 1
+
+
+def test_poll_broker_bracket_falls_back_entirely_without_list_open_orders_support():
+    class _RestingBrokerWithoutBatchPolling(_RestingBroker):
+        list_open_orders = None  # removes the capability -- getattr(..., None) finds this and stops
+
+    broker = _RestingBrokerWithoutBatchPolling()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    broker.get_order_status_calls = 0
+
+    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert handled is False
+    # No batching capability at all -- both legs fall back to their own
+    # individual get_order_status call, exactly the pre-2026-08-11 behavior.
+    assert broker.get_order_status_calls == 2
+
+
+def test_get_open_orders_for_tick_shares_one_broker_call_within_a_pass():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    broker.list_open_orders_calls = 0
+
+    first = loop._get_open_orders_for_tick()
+    second = loop._get_open_orders_for_tick()
+
+    assert first is second
+    assert broker.list_open_orders_calls == 1
+
+
 def test_poll_broker_bracket_finalizes_full_exit_on_stop_fill():
     broker = _RestingBroker()
     loop, candidate = _armed_candidate_setup(broker)
@@ -1918,6 +2141,65 @@ def test_sync_broker_protective_orders_is_a_noop_when_stop_unchanged():
     loop._attach_broker_bracket(candidate, position, datetime.utcnow())
     stop_id = position.broker_stop_order_id
 
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+
+    assert broker._cancelled == []
+    assert position.broker_stop_order_id == stop_id
+
+
+def test_sync_broker_protective_orders_ignores_a_move_below_the_threshold():
+    # Hysteresis against trailing-stop tick-to-tick float noise -- see
+    # TradingLoopConfig.stop_sync_min_move_pct's docstring. Default 0.25%;
+    # a move of ~0.1% must not trigger a cancel+replace.
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+
+    position.stop_price = 4.5045  # +0.1% -- below the 0.25% default threshold
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+
+    assert broker._cancelled == []
+    assert position.broker_stop_order_id == stop_id
+    assert position.broker_stop_price_synced == 4.50  # unchanged -- still the last real sync
+
+
+def test_sync_broker_protective_orders_acts_on_a_move_at_or_above_the_threshold():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+
+    position.stop_price = 4.52  # ~+0.44% -- above the 0.25% default threshold
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+
+    assert stop_id in broker._cancelled
+    assert position.broker_stop_price_synced == 4.52
+
+
+def test_stop_sync_min_move_pct_is_configurable():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.config.stop_sync_min_move_pct = 5.0  # much looser than the default
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+
+    position.stop_price = 4.60  # ~+2.2% -- would clear the 0.25% default, not this 5% override
     loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
 
     assert broker._cancelled == []
