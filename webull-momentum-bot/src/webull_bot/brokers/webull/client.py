@@ -711,6 +711,12 @@ class WebullBrokerClient(BrokerClient):
             order_type=OrderType.MARKET,
             quantity=float(raw.get("quantity", 0)),
             limit_price=float(raw["limit_price"]) if raw.get("limit_price") is not None else None,
+            # Added alongside stop_price becoming a real, exercised field
+            # (scripts/verify_bracket_orders.py) -- same UNVERIFIED status
+            # as limit_price above, just never had a reason to be read back
+            # before now since no order carrying a stop_price had ever been
+            # placed live.
+            stop_price=float(raw["stop_price"]) if raw.get("stop_price") is not None else None,
             status=status,
             client_order_id=raw.get("client_order_id"),
             broker_order_id=raw.get("client_order_id"),

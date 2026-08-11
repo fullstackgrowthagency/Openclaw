@@ -491,3 +491,17 @@ def test_order_from_detail_unknown_status_falls_back_to_pending():
     client = _client()
     order = client._order_from_detail({"symbol": "AAPL", "side": "BUY", "quantity": "1", "status": "SOMETHING_NEW"})
     assert order.status == OrderStatus.PENDING
+
+
+def test_order_from_detail_parses_stop_price_when_present():
+    client = _client()
+    order = client._order_from_detail(
+        {"symbol": "AAPL", "side": "SELL", "quantity": "10", "status": "SUBMITTED", "stop_price": "95.50"}
+    )
+    assert order.stop_price == 95.50
+
+
+def test_order_from_detail_stop_price_defaults_to_none():
+    client = _client()
+    order = client._order_from_detail({"symbol": "AAPL", "side": "SELL", "quantity": "10", "status": "SUBMITTED"})
+    assert order.stop_price is None

@@ -138,17 +138,41 @@ def main() -> None:
         target_payload["client_combo_order_id"] = combo_id
 
         print(f"  submitting OCO pair: stop={stop_price} target={target_price} combo_id={combo_id}")
+        oco_placed = False
         try:
             response = broker._require_trade_client().order_v3.place_order(
                 broker.account_id, [stop_payload, target_payload]
             )
             response.raise_for_status()
             print(f"  OCO combo accepted: {response.json()}")
+            oco_placed = True
         except Exception as exc:
             print(f"  OCO combo place_order raised: {exc!r}")
             print("  (this is the answer we needed either way -- if this failed, attaching")
             print("   a bracket after the fact isn't supported this way; a MASTER-anchored")
             print("   combo submitted atomically with the entry may be required instead)")
+
+        # -- Step 3: modify the resting stop leg's price -- the mechanism
+        # breakeven/trailing updates would rely on. WebullBrokerClient.
+        # modify_order's request shape is UNVERIFIED (no live order existed
+        # to test a replace against when it was written) -- this is exactly
+        # what this step exists to pin down, not something to assume works
+        # just because "Replace" is a named lifecycle stage in the docs.
+        if oco_placed:
+            print("\nStep 3: modify the resting stop leg's stop_price (simulates a breakeven move)")
+            new_stop_price = round(fill_price * 0.99, 2)
+            stop_broker_order_id = stop_payload["client_order_id"]
+            try:
+                modified = broker.modify_order(stop_broker_order_id, stop_price=str(new_stop_price))
+                print(f"  modify_order accepted: new status={modified.status.value}")
+                # Confirm the price actually changed, not just that the call
+                # didn't error -- a 2xx with no real effect would be a false
+                # positive for what this step is trying to prove.
+                confirm_order = broker.get_order_status(stop_broker_order_id)
+                print(f"  post-modify order detail: status={confirm_order.status.value}, "
+                      f"stop_price={confirm_order.stop_price}")
+            except Exception as exc:
+                print(f"  modify_order raised: {exc!r}")
 
     print("\nDone. If anything above is still open at the broker (check with")
     print("scripts/list_and_close_positions.py), close it manually before leaving this test.")
