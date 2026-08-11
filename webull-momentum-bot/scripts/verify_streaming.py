@@ -68,11 +68,30 @@ actually run clean against the sandbox and printed real ticks -- exactly
 the same rule this project applied to support_trading_session and the
 OCO bracket feature before either was trusted.
 
-Usage: python scripts/verify_streaming.py SYMBOL [--seconds N]
-  Connects, subscribes to SYMBOL's quotes, waits up to N seconds
-  (default 20) for any message to arrive, then reports exactly what
-  happened at each stage and disconnects. Read-only -- places no orders,
-  costs nothing to run.
+FIRST LIVE RUN (2026-08-11, during real core trading hours -- 14:38 ET):
+MQTT connect succeeded (on_connect_success fired), but the immediately-
+following client.subscribe() call -- fired ~0.4s later, inside that same
+callback, per the SDK's own intended design -- was rejected outright:
+
+    417 INVALID_SESSION: "Mqtt connection not exist for session:<id>"
+
+That reads as a timing race, not a sandbox-support wall or a missing
+entitlement: the REST-side session registry apparently hasn't caught up
+to the MQTT handshake yet at the instant subscribe() fires. This script
+now waits `--subscribe-delay` seconds (default 2.0) after
+on_connect_success before calling subscribe(), specifically to test that
+theory. A separate, likely-unrelated artifact also appeared ~10s later,
+during the SDK's own automatic reconnect attempt after the failed
+subscribe: an MQTT CONNACK return code 1 ("Protocol not supported") on
+that specific retry -- not yet understood, may be a session_id reuse
+issue in the retry path; watch for whether it recurs.
+
+Usage: python scripts/verify_streaming.py SYMBOL [--seconds N] [--subscribe-delay N]
+  Connects, waits `--subscribe-delay` seconds (default 2.0) after MQTT
+  connect succeeds before subscribing to SYMBOL's quotes (see "FIRST LIVE
+  RUN" above for why), then waits up to `--seconds` (default 20) for a
+  message to arrive, reports exactly what happened at each stage, and
+  disconnects. Read-only -- places no orders, costs nothing to run.
 """
 import sys
 import time
@@ -81,6 +100,7 @@ import uuid
 from webull_bot.config import get_settings
 
 _DEFAULT_WAIT_SECONDS = 20.0
+_DEFAULT_SUBSCRIBE_DELAY_SECONDS = 2.0
 
 
 def main() -> None:
@@ -91,9 +111,15 @@ def main() -> None:
     wait_seconds = _DEFAULT_WAIT_SECONDS
     if "--seconds" in sys.argv:
         wait_seconds = float(sys.argv[sys.argv.index("--seconds") + 1])
+    subscribe_delay_seconds = _DEFAULT_SUBSCRIBE_DELAY_SECONDS
+    if "--subscribe-delay" in sys.argv:
+        subscribe_delay_seconds = float(sys.argv[sys.argv.index("--subscribe-delay") + 1])
 
     settings = get_settings()
-    print(f"trading_mode={settings.trading_mode.value}  base_url={settings.webull.base_url}  symbol={symbol}\n")
+    print(
+        f"trading_mode={settings.trading_mode.value}  base_url={settings.webull.base_url}  symbol={symbol}  "
+        f"subscribe_delay={subscribe_delay_seconds:.1f}s\n"
+    )
 
     try:
         from webull.data.common.category import Category
@@ -116,6 +142,15 @@ def main() -> None:
     def _on_connect_success(client_, api_client_, session_id_):
         events.append("connect_success")
         print(f"  [event] MQTT connected (session_id={session_id_})")
+        if subscribe_delay_seconds > 0:
+            # Testing the timing-race theory from this script's own
+            # "FIRST LIVE RUN" note: sleeping here blocks the MQTT client's
+            # own network-loop thread (this callback runs on it) for
+            # `subscribe_delay_seconds` -- acceptable for a short,
+            # diagnostic-only delay like this, not something a real
+            # production integration should do.
+            print(f"  [event] waiting {subscribe_delay_seconds:.1f}s before subscribing...")
+            time.sleep(subscribe_delay_seconds)
         try:
             client_.subscribe([symbol], Category.US_STOCK.name, ["QUOTE"])
         except Exception as exc:
