@@ -265,6 +265,24 @@ class WebullBrokerClient(BrokerClient):
         # symbols to the same connection) rather than opening a new one
         # per call.
         self._streaming_client: Optional[DataStreamingClient] = None
+        # Tracked ourselves rather than trusted from
+        # DataStreamingClient.get_connect_success() -- confirmed live
+        # 2026-08-11 that method is misleadingly named: it flips True the
+        # instant `client.on_connect_success = ...` is *assigned*
+        # (DataStreamingClient's own property setter sets this
+        # unconditionally, before any network call happens at all -- see
+        # subscribe_quotes' docstring), not once the MQTT handshake
+        # actually succeeds. Trusting it caused a real production bug:
+        # multiple subscribe_quotes() calls landing in quick succession
+        # (e.g. reconcile_positions_from_broker adopting several positions
+        # in the same pass) would see the SDK's flag already "true" for
+        # every call after the first and try to register a subscription
+        # over REST before the MQTT session existed server-side -- the
+        # exact 417 INVALID_SESSION failure mode from this feature's
+        # original verification, just reintroduced by a different path.
+        # This flag is set only inside this module's own _on_connect_success
+        # wrapper below, which the SDK genuinely only calls once connected.
+        self._streaming_connected: bool = False
         self._streaming_subscribed_symbols: set[str] = set()
         # Per-symbol caches used to merge the two streamed message types
         # into one MarketSnapshot -- see subscribe_quotes' docstring for
@@ -311,6 +329,7 @@ class WebullBrokerClient(BrokerClient):
                 logger.warning("Failed to cleanly disconnect the streaming client.", exc_info=True)
             self._streaming_client = None
             with self._streaming_lock:
+                self._streaming_connected = False
                 self._streaming_subscribed_symbols = set()
                 self._streaming_snapshot_cache = {}
                 self._streaming_quote_cache = {}
@@ -880,7 +899,22 @@ class WebullBrokerClient(BrokerClient):
         yet, they're picked up by the connect callback once it does)
         rather than opening a second connection. Already-subscribed
         symbols in `symbols` are silently ignored (no duplicate
-        subscribe call).
+        subscribe call). "Has the connection finished connecting yet" is
+        tracked via this module's own `self._streaming_connected` flag,
+        NOT `DataStreamingClient.get_connect_success()` -- confirmed live
+        2026-08-11 that the SDK's method is misleadingly named: its
+        `on_connect_success` property setter sets that flag `True` the
+        instant a callback is *assigned* (before `connect_and_loop_start()`
+        is even called, let alone before the MQTT handshake completes),
+        so it can never actually distinguish "still connecting" from
+        "connected." Trusting it caused a real bug in production: several
+        `subscribe_quotes` calls landing back-to-back for different
+        symbols (e.g. `reconcile_positions_from_broker` adopting multiple
+        positions in one pass) would see it already "true" for every call
+        after the first and try to register a subscription over REST
+        before the MQTT session existed server-side yet -- the same `417
+        INVALID_SESSION` failure this feature's original verification
+        already diagnosed once, reintroduced by a different path.
 
         `on_update` is called from the MQTT client's own background
         thread (paho-mqtt's network loop), NOT the caller's thread --
@@ -916,7 +950,9 @@ class WebullBrokerClient(BrokerClient):
             self._streaming_subscribed_symbols.update(new_symbols)
 
         if self._streaming_client is not None:
-            if self._streaming_client.get_connect_success():
+            with self._streaming_lock:
+                already_connected = self._streaming_connected
+            if already_connected:
                 try:
                     self._streaming_client.subscribe(new_symbols, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
                 except Exception:
@@ -933,6 +969,7 @@ class WebullBrokerClient(BrokerClient):
 
         def _on_connect_success(client_, api_client_, session_id_):
             with self._streaming_lock:
+                self._streaming_connected = True
                 current_symbols = sorted(self._streaming_subscribed_symbols)
             logger.info(
                 "Streaming MQTT connected (session_id=%s); subscribing to %d symbol(s).",

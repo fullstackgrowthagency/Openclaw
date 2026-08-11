@@ -1719,6 +1719,45 @@ live-verified unsubscribe path as a follow-up if it turns out to matter),
 consistent with this project's rule of not building for an unconfirmed
 constraint.
 
+**Real bug found and fixed during first production deploy (2026-08-11)**:
+the first VPS deploy of the WATCHING-stage extension adopted three
+existing positions in one `reconcile_positions_from_broker` pass, each
+calling `subscribe_quotes` back-to-back within the same tick -- and zero
+streaming activity ever appeared in the logs afterward (no successful
+connect, no failure either). Root cause, confirmed directly against the
+installed SDK (not guessed): `DataStreamingClient.get_connect_success()`,
+which `subscribe_quotes` used to decide "connection already up, send the
+REST subscribe call directly" vs. "still connecting, let the connect
+callback handle it," is misleadingly named -- its backing flag is set
+`True` by the `on_connect_success` property's own setter the instant a
+callback is *assigned*, not once the MQTT handshake actually completes:
+
+```python
+>>> c = DataStreamingClient(...)
+>>> c.get_connect_success()
+None
+>>> c.on_connect_success = lambda *a: None  # no network call made at all
+>>> c.get_connect_success()
+True
+```
+
+So every `subscribe_quotes` call after the very first one (which sets
+that callback while constructing the client) saw the flag already
+"true" and tried to register a subscription over REST before the MQTT
+session existed server-side yet -- the same `417 INVALID_SESSION`
+failure this feature's original verification had already diagnosed once
+against the wrong host, now reintroduced by a completely different path
+using the right host. Fixed by tracking the real connection state
+ourselves: a new `WebullBrokerClient._streaming_connected` flag, set
+`True` only from inside this module's own `_on_connect_success` wrapper
+(which the SDK does only call once genuinely connected), and consulted
+instead of `get_connect_success()` everywhere `subscribe_quotes` needs
+to know whether it's safe to subscribe directly. Covered by a regression
+test (`test_subscribe_quotes_does_not_trust_the_sdks_get_connect_success`)
+whose fake mirrors the SDK's real (mis-)behavior rather than a
+nicer-behaved approximation of it, specifically so this can't silently
+regress.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right

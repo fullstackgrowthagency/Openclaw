@@ -1026,17 +1026,34 @@ class _FakeDataStreamingClient:
         self.session_id = session_id
         self.http_host = http_host
         self.mqtt_host = mqtt_host
-        self.on_connect_success = None
+        self._on_connect_success = None
         self.on_quotes_message = None
         self.connect_calls = 0
         self.subscribe_calls = []
-        self._connected = False
+        # Mirrors the REAL SDK's own (misleadingly-named) behavior,
+        # confirmed live 2026-08-11: get_connect_success() flips True the
+        # instant on_connect_success is *assigned* -- no network activity
+        # required -- so it can never distinguish "still connecting" from
+        # "actually connected." Kept this way deliberately so a test
+        # relying on get_connect_success() for that distinction would fail
+        # the same way it did in production, rather than passing on a
+        # fake that's nicer-behaved than reality.
+        self._connect_success_flag = False
+
+    @property
+    def on_connect_success(self):
+        return self._on_connect_success
+
+    @on_connect_success.setter
+    def on_connect_success(self, func):
+        self._connect_success_flag = True
+        self._on_connect_success = func
 
     def connect_and_loop_start(self):
         self.connect_calls += 1
 
     def get_connect_success(self):
-        return self._connected
+        return self._connect_success_flag
 
     def subscribe(self, symbols, category, sub_types):
         self.subscribe_calls.append((list(symbols), category, list(sub_types)))
@@ -1051,6 +1068,7 @@ def _streaming_client(trading_mode=None):
         webull=SimpleNamespace(app_key="test-key", app_secret="test-secret", base_url="api.sandbox.webull.com"),
     )
     client._streaming_client = None
+    client._streaming_connected = False
     client._streaming_subscribed_symbols = set()
     client._streaming_snapshot_cache = {}
     client._streaming_quote_cache = {}
@@ -1188,13 +1206,35 @@ def test_subscribe_quotes_reuses_the_existing_connection_for_new_symbols(monkeyp
     client = _streaming_client()
     client.subscribe_quotes(["AAPL"], lambda snap: None)
     fake = instances[0]
-    fake._connected = True
+    fake.on_connect_success(fake, None, "session-1")  # real MQTT handshake completes
 
     client.subscribe_quotes(["MSFT"], lambda snap: None)
 
     assert len(instances) == 1  # no second connection opened
     assert fake.connect_calls == 1
-    assert fake.subscribe_calls == [(["MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]  # only the NEW symbol
+    # Only the NEW symbol -- not a re-subscribe of AAPL (already covered
+    # by the on_connect_success call above).
+    assert fake.subscribe_calls == [(["AAPL"], "US_STOCK", ["QUOTE", "SNAPSHOT"]), (["MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
+
+
+def test_subscribe_quotes_does_not_trust_the_sdks_get_connect_success(monkeypatch):
+    # Regression test for a real production bug (2026-08-11): the SDK's
+    # own get_connect_success() flips True the instant on_connect_success
+    # is assigned, not once the MQTT handshake actually finishes -- see
+    # _FakeDataStreamingClient's docstring/property, which mirrors that
+    # real quirk exactly. If subscribe_quotes ever goes back to trusting
+    # it (instead of self._streaming_connected, set only from inside our
+    # own _on_connect_success wrapper), this must fail.
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+    assert fake.get_connect_success() is True  # the SDK's misleading flag -- already "true"
+    assert client._streaming_connected is False  # our own tracked flag -- correctly still false
+
+    client.subscribe_quotes(["MSFT"], lambda snap: None)  # must NOT be sent directly yet
+
+    assert fake.subscribe_calls == []  # still waiting for the real connect callback
 
 
 def test_subscribe_quotes_skips_already_subscribed_symbols(monkeypatch):
@@ -1202,7 +1242,7 @@ def test_subscribe_quotes_skips_already_subscribed_symbols(monkeypatch):
     client = _streaming_client()
     client.subscribe_quotes(["AAPL"], lambda snap: None)
     fake = instances[0]
-    fake._connected = True
+    fake.on_connect_success(fake, None, "session-1")
     fake.subscribe_calls.clear()
 
     client.subscribe_quotes(["AAPL"], lambda snap: None)  # already subscribed -- no-op
@@ -1211,22 +1251,23 @@ def test_subscribe_quotes_skips_already_subscribed_symbols(monkeypatch):
 
 
 def test_subscribe_quotes_defers_new_symbols_until_connected(monkeypatch):
-    # Second call arrives before the first connection has finished
-    # connecting (get_connect_success() still False) -- the new symbol
-    # must not be dropped, just picked up once _on_connect_success fires
-    # and reads the full (by-then-updated) subscribed-symbols set.
+    # Second call arrives before the first connection has actually
+    # finished connecting (client._streaming_connected still False) -- the
+    # new symbol must not be dropped, just picked up once
+    # _on_connect_success genuinely fires and reads the full (by-then-
+    # updated) subscribed-symbols set.
     instances = _patch_streaming_client_factory(monkeypatch)
     client = _streaming_client()
     client.subscribe_quotes(["AAPL"], lambda snap: None)
-    fake = instances[0]
-    assert fake._connected is False
+    assert client._streaming_connected is False
 
     client.subscribe_quotes(["MSFT"], lambda snap: None)
+    fake = instances[0]
     assert fake.subscribe_calls == []  # not connected yet -- nothing sent directly
 
-    fake._connected = True
     fake.on_connect_success(fake, None, "session-1")
 
+    assert client._streaming_connected is True
     assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
 
 
