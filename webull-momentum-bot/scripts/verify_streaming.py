@@ -75,23 +75,45 @@ callback, per the SDK's own intended design -- was rejected outright:
 
     417 INVALID_SESSION: "Mqtt connection not exist for session:<id>"
 
-That reads as a timing race, not a sandbox-support wall or a missing
-entitlement: the REST-side session registry apparently hasn't caught up
-to the MQTT handshake yet at the instant subscribe() fires. This script
-now waits `--subscribe-delay` seconds (default 2.0) after
-on_connect_success before calling subscribe(), specifically to test that
-theory. A separate, likely-unrelated artifact also appeared ~10s later,
-during the SDK's own automatic reconnect attempt after the failed
-subscribe: an MQTT CONNACK return code 1 ("Protocol not supported") on
-that specific retry -- not yet understood, may be a session_id reuse
-issue in the retry path; watch for whether it recurs.
+SECOND LIVE RUN (same day, ~9 minutes later): added a 2.0s delay between
+MQTT connect and calling subscribe(), to test whether it was a timing
+race (REST-side session registry not yet caught up to the MQTT handshake).
+Identical error, verbatim, even with the delay -- **that theory is now
+ruled out.**
 
-Usage: python scripts/verify_streaming.py SYMBOL [--seconds N] [--subscribe-delay N]
-  Connects, waits `--subscribe-delay` seconds (default 2.0) after MQTT
-  connect succeeds before subscribing to SYMBOL's quotes (see "FIRST LIVE
-  RUN" above for why), then waits up to `--seconds` (default 20) for a
-  message to arrive, reports exactly what happened at each stage, and
-  disconnects. Read-only -- places no orders, costs nothing to run.
+Current leading theory instead: mqtt_host=None resolves to
+data-api.webull.com -- the SDK's ONE bundled quotes-api host, with no
+sandbox equivalent anywhere in its config (see above) -- meaning this
+MQTT session is very likely being registered against Webull's PRODUCTION
+quotes system, while the subscribe REST call correctly targets
+api.sandbox.webull.com. Those would be two independent backend systems
+with no shared session state -- "Mqtt connection not exist for session"
+is exactly what you'd expect if a session created on one system is looked
+up on the other, and it requires no missing entitlement to explain (this
+project already separately confirmed sandbox/production are fully
+separate systems for the REST API specifically -- see
+brokers/webull/client.py's module docstring's "App key/secret are
+environment-locked" note). This script now accepts --mqtt-host to test
+the natural next hypothesis: a sandbox-specific quotes host following the
+same naming pattern as the REST API's own sandbox/production split
+(api.webull.com -> api.sandbox.webull.com), i.e.
+data-api.sandbox.webull.com -- try that explicitly; if it doesn't even
+resolve/connect, that's informative too (rules out that specific guess
+rather than leaving it untested).
+
+A separate, likely-unrelated artifact appeared ~10s after the failed
+subscribe on both runs, during the SDK's own automatic reconnect attempt:
+an MQTT CONNACK return code 1 ("Protocol not supported") on that specific
+retry -- not yet understood, may be a session_id reuse issue in the retry
+path; watch for whether it recurs regardless of which mqtt_host is used.
+
+Usage: python scripts/verify_streaming.py SYMBOL [--seconds N] [--subscribe-delay N] [--mqtt-host HOST]
+  Connects (to HOST if given, else the SDK's own auto-resolved default --
+  see above), waits `--subscribe-delay` seconds (default 2.0) after MQTT
+  connect succeeds before subscribing to SYMBOL's quotes, then waits up to
+  `--seconds` (default 20) for a message to arrive, reports exactly what
+  happened at each stage, and disconnects. Read-only -- places no orders,
+  costs nothing to run.
 """
 import sys
 import time
@@ -114,8 +136,12 @@ def main() -> None:
     subscribe_delay_seconds = _DEFAULT_SUBSCRIBE_DELAY_SECONDS
     if "--subscribe-delay" in sys.argv:
         subscribe_delay_seconds = float(sys.argv[sys.argv.index("--subscribe-delay") + 1])
+    mqtt_host = None
+    if "--mqtt-host" in sys.argv:
+        mqtt_host = sys.argv[sys.argv.index("--mqtt-host") + 1]
 
     settings = get_settings()
+    print(f"mqtt_host={mqtt_host or '(SDK auto-resolved default)'}")
     print(
         f"trading_mode={settings.trading_mode.value}  base_url={settings.webull.base_url}  symbol={symbol}  "
         f"subscribe_delay={subscribe_delay_seconds:.1f}s\n"
@@ -136,7 +162,7 @@ def main() -> None:
     client = DataStreamingClient(
         settings.webull.app_key, settings.webull.app_secret, "us", session_id,
         http_host=settings.webull.base_url,  # sandbox REST host for the subscribe call
-        mqtt_host=None,  # let the SDK resolve it -- see this module's docstring for what that resolves to
+        mqtt_host=mqtt_host,  # None lets the SDK auto-resolve -- see this module's docstring for what that resolves to
     )
 
     def _on_connect_success(client_, api_client_, session_id_):
