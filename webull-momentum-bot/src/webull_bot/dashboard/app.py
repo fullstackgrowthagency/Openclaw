@@ -225,11 +225,15 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         Engaging (`active=true`) calls
         TradingLoop.engage_kill_switch_and_flatten, which blocks all new
         entries immediately (RiskEngine checks this on every signal) and
-        requests every open position be force-closed at market -- the
-        actual closing happens on the trading loop's own processing thread
-        within one poll cycle, not synchronously in this request (see that
-        method's docstring for why). Disengaging (`active=false`) just
-        releases the switch -- there's nothing to flatten on the way out."""
+        starts force-closing every open position at market -- the actual
+        closing happens on the trading loop's own processing thread, not
+        synchronously in this request, and keeps retrying every poll
+        cycle until every position is actually closed or the switch is
+        disengaged (fixed 2026-08-11 -- see that method's docstring for
+        why a single failed close attempt used to permanently abandon the
+        flatten for that position). Disengaging (`active=false`) releases
+        the switch, which also stops that retry -- any position still
+        open at that point is left exactly as it is."""
         if update.active:
             trading_loop.engage_kill_switch_and_flatten("Kill switch engaged from dashboard")
         else:

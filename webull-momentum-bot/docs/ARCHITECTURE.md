@@ -2299,21 +2299,52 @@ then `POST /api/kill-switch` with `{"active": true|false}`.
      effect the instant it's called (`RiskEngine.evaluate()` checks
      `kill_switch_active` first, before anything else, so no new entry can
      slip through even mid-request).
-  2. Sets a request flag (`TradingLoop._close_all_positions_requested`)
-     that `_process_all_candidates` consumes on the trading loop's own
-     main thread, at the start of its very next tick -- **not**
-     synchronously in the dashboard's request handler. `_close_all_positions_now`
-     then force-closes every open position at market
-     (`ExitReason.RISK_KILL_SWITCH`), reusing the exact same
+  2. From that point on, `_process_all_candidates` checks
+     `risk_engine.kill_switch_active` on the trading loop's own main
+     thread every single tick -- **not** a one-shot request consumed once,
+     and **not** synchronously in the dashboard's request handler.
+     `_close_all_positions_now` force-closes every open position at
+     market (`ExitReason.RISK_KILL_SWITCH`), reusing the exact same
      submit -> fill-or-pending -> finalize path `_manage_position` uses
      for any other exit (`_dispatch_exit_finalization`,
      `_pending_exit_orders`) -- a position that doesn't fill synchronously
      is left pending and picked up by the following tick's ordinary
      `_manage_position`/`_poll_pending_exit` call for that symbol, no
      kill-switch-specific polling code needed.
-- **Disengaging** (`active: false`) just calls `RiskEngine.release_kill_switch()`
-  -- nothing to flatten on the way out, positions (if any exist) are left
-  exactly as they are.
+- **Disengaging** (`active: false`) calls `RiskEngine.release_kill_switch()`,
+  which also stops the retry above (the per-tick check reads
+  `kill_switch_active` fresh every time) -- any position still open at
+  that point is left exactly as it is, matching the dashboard's own
+  disengage confirmation text.
+
+**Retries every tick until it actually succeeds (fixed 2026-08-11) --
+this was a real, confirmed incident, not a theoretical gap.** Originally
+a one-shot request flag (`_close_all_positions_requested`), consumed and
+cleared the instant a single tick saw it, *before* `_close_all_positions_now`
+even ran. A single failed close attempt on any symbol -- a rate limit, a
+`get_snapshot` hiccup, a rejected order, anything -- permanently
+abandoned the flatten for that symbol: it just fell back into ordinary
+`_manage_position` handling (only exits on a real stop/target/VWAP/
+time-limit condition), with nothing left to ever retry a *force*-close
+specifically. Reported live: clicking "Engage & Close All Positions"
+during core hours, on several separate occasions, appeared to do
+nothing at all -- exactly the symptom this gap predicts if the very
+first attempt hits any transient failure. Fixed by driving the retry off
+`risk_engine.kill_switch_active` directly, re-checked every tick, mirroring
+the end-of-day auto-flatten's own already-correct pattern below (which
+never had this bug, since it was never a one-shot flag to begin with).
+
+**A second, related risk found and fixed at the same time**:
+`_close_all_positions_now` had no guard against a symbol whose close was
+already submitted and still pending (`self._pending_exit_orders`) --
+harmless as a one-shot action (a real broker fill takes at most a few
+seconds), but genuinely dangerous once retried every tick: a still-
+pending symbol would get a *second* market exit order submitted against
+it before the first one even resolved, risking a real over-sell against
+a live broker. `_close_all_positions_now` now skips any symbol already
+in `_pending_exit_orders` at the top of its loop -- it's already being
+tracked by the normal per-tick pending-exit poll, nothing more to do
+until that resolves.
 
 **Why the flatten is deferred to the main thread instead of running inline
 in the request handler**: `_close_all_positions_now` mutates `Candidate`/

@@ -412,9 +412,12 @@ def test_kill_switch_engage_via_dashboard(loop, client):
     assert resp.json()["kill_switch_active"] is True
     # Takes effect immediately -- no need to wait for a trading-loop tick.
     assert loop.risk_engine.kill_switch_active is True
-    # Also requests the flatten-all-positions action the trading loop's own
-    # next tick will carry out -- see TradingLoop.engage_kill_switch_and_flatten.
-    assert loop._close_all_positions_requested is True
+    # The flatten-all-positions action the trading loop's own next tick
+    # (and every tick after, until it succeeds or the switch is
+    # disengaged -- see TradingLoop.engage_kill_switch_and_flatten's
+    # docstring) will carry out is driven directly off
+    # risk_engine.kill_switch_active, not a separate one-shot flag.
+    assert loop._close_all_positions_reason == "Kill switch engaged from dashboard"
 
 
 def test_kill_switch_disengage_via_dashboard(loop, client):
@@ -427,12 +430,16 @@ def test_kill_switch_disengage_via_dashboard(loop, client):
     assert loop.risk_engine.kill_switch_active is False
 
 
-def test_kill_switch_disengage_does_not_request_flatten(loop, client):
+def test_kill_switch_disengage_stops_the_flatten_retry(loop, client):
+    # Once disengaged, _process_all_candidates' kill-switch check
+    # (gated on risk_engine.kill_switch_active) must not keep trying to
+    # force-close anything -- an open position at this point is left
+    # exactly as-is, per the dashboard's own disengage confirmation text.
     loop.risk_engine.engage_kill_switch("manual test")
 
     client.post("/api/kill-switch", json={"active": False})
 
-    assert loop._close_all_positions_requested is False
+    assert loop.risk_engine.kill_switch_active is False
 
 
 def test_index_and_static_assets_are_served(client):

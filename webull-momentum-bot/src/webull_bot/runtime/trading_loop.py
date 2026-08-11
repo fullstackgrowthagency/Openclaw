@@ -394,11 +394,18 @@ class TradingLoop:
         self._streaming_requested_symbols: set[str] = set()
         self._persisted_transition_counts: dict[str, int] = {}  # symbol -> len(state_history) already flushed
         # Set by engage_kill_switch_and_flatten (callable from any thread,
-        # e.g. the dashboard's request thread) and consumed by
+        # e.g. the dashboard's request thread) and read by
         # _process_all_candidates on the main thread -- see that method's
         # docstring for why the actual position-closing work is deferred
         # to the main thread rather than run inline on the caller's thread.
-        self._close_all_positions_requested = False
+        # Just a display string for _close_all_positions_now's log/reason
+        # field, not itself a trigger -- see that comment for why the
+        # actual retry condition is risk_engine.kill_switch_active, not a
+        # one-shot flag (a real incident, 2026-08-11: a one-shot request
+        # flag meant a single failed close attempt on any symbol -- a rate
+        # limit, a get_snapshot hiccup, anything -- silently ended the
+        # flatten for that symbol forever, with the kill switch appearing
+        # to "do nothing" whenever that happened).
         self._close_all_positions_reason = ""
 
     # -- kill switch: halt + flatten ------------------------------------------
@@ -406,16 +413,27 @@ class TradingLoop:
     def engage_kill_switch_and_flatten(self, reason: str) -> None:
         """Engages the kill switch (blocks all new entries immediately --
         RiskEngine.evaluate() checks this on every signal, so this part
-        takes effect the instant it's called, from any thread) and
-        requests that every currently open position be force-closed at
-        market. Safe to call from any thread: engage_kill_switch itself is
-        just a boolean flip (atomic under the GIL), and the request flag
-        set here is consumed by _process_all_candidates on the main
-        processing thread, which is where the actual position-closing
-        happens -- see that method and _close_all_positions_now for why."""
+        takes effect the instant it's called, from any thread) and, from
+        that point on, every tick of _process_all_candidates keeps
+        attempting to force-close every currently open position (see that
+        method's `risk_engine.kill_switch_active` check) until either none
+        remain or the switch is disengaged. Safe to call from any thread:
+        engage_kill_switch itself is just a boolean flip (atomic under the
+        GIL); the actual position-closing work always runs on the main
+        processing thread regardless of which thread called this (the
+        dashboard's request thread, typically) -- see
+        _close_all_positions_now for why.
+
+        Retried every tick rather than attempted once (fixed 2026-08-11,
+        a real incident: the kill switch appeared to silently "do
+        nothing" during live testing -- traced to a one-shot request flag
+        that meant a single failed close attempt on any symbol, for any
+        reason, permanently abandoned the flatten for it). An emergency
+        stop that gives up after one failure defeats its own purpose --
+        same reasoning as _sync_broker_protective_orders' retry of a
+        failed broker-side bracket attach."""
         self.risk_engine.engage_kill_switch(reason)
         self._close_all_positions_reason = reason
-        self._close_all_positions_requested = True
 
     def _close_all_positions_now(
         self, reason: str, now: datetime, exit_reason: ExitReason = ExitReason.RISK_KILL_SWITCH
@@ -437,8 +455,24 @@ class TradingLoop:
         A get_snapshot or order failure for one symbol is logged and
         skipped rather than aborting the whole flatten -- one bad quote
         shouldn't leave every other position uncautiously open during an
-        emergency stop."""
+        emergency stop.
+
+        Skips any symbol already in `self._pending_exit_orders` (fixed
+        2026-08-11, alongside making both callers of this method retry
+        every tick instead of once): that symbol's close was already
+        submitted on an earlier pass and hasn't resolved yet (a real
+        broker returns SUBMITTED, not an instant FILLED -- see
+        `WebullBrokerClient.place_order`'s docstring), and is already
+        being tracked by `_manage_position`/`_poll_pending_exit`'s normal
+        per-tick polling. Without this guard, a still-pending symbol
+        would get a SECOND market exit order submitted against it on
+        every subsequent tick this method runs -- e.g. the kill switch
+        or the end-of-day buffer window retrying while a broker fill is
+        still in flight -- risking a real over-sell against a live
+        broker."""
         for symbol, position in list(self._positions.items()):
+            if symbol in self._pending_exit_orders:
+                continue
             candidate = self.candidates.get(symbol)
             if candidate is None:
                 continue
@@ -1809,7 +1843,7 @@ class TradingLoop:
         self._tick_positions_cache = None
         self._tick_open_orders_cache = None
 
-        # Consumed here (main thread) rather than acted on immediately by
+        # Runs here (main thread) rather than acted on immediately by
         # whatever thread called engage_kill_switch_and_flatten -- keeps
         # all position-closing work on the single thread that already owns
         # mutating candidates/positions, with no new locking needed. A few
@@ -1817,10 +1851,19 @@ class TradingLoop:
         # flattening actually starts is an acceptable cost for that safety;
         # new entries are already blocked immediately regardless, since
         # engage_kill_switch itself takes effect the instant it's called.
-        if self._close_all_positions_requested:
-            self._close_all_positions_requested = False
+        #
+        # Re-evaluated every tick (fixed 2026-08-11) rather than a one-shot
+        # flag consumed once: the kill switch is an emergency stop, and a
+        # single failed close attempt on any symbol -- a rate limit, a
+        # get_snapshot hiccup, anything -- must not permanently abandon
+        # the flatten for it. Mirrors the end-of-day auto-flatten's own
+        # already-correct pattern just below. Naturally becomes a no-op
+        # once either every position has actually closed
+        # (`self._positions` empty) or the switch is disengaged
+        # (`kill_switch_active` False) -- whichever happens first.
+        if self._positions and self.risk_engine.kill_switch_active:
             try:
-                self._close_all_positions_now(self._close_all_positions_reason, now)
+                self._close_all_positions_now(self._close_all_positions_reason or "Kill switch engaged", now)
             except Exception:
                 logger.exception("Unhandled error force-closing all positions for kill switch.")
 

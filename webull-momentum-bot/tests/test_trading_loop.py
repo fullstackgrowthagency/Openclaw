@@ -1245,6 +1245,73 @@ def test_kill_switch_flatten_survives_an_unexpected_broker_exception_on_one_symb
     assert "BBB" not in loop._positions  # unaffected by AAA's failure
 
 
+def test_kill_switch_flatten_retries_and_eventually_closes_a_position_that_failed_once():
+    # Regression test for a real production incident (2026-08-11): the
+    # kill switch's flatten used to be a one-shot flag consumed the
+    # instant a tick saw it -- a single failed close attempt on any
+    # symbol, for any reason, permanently abandoned the flatten for that
+    # symbol, with no further retry ever (unlike the end-of-day
+    # auto-flatten, which already re-checked its trigger every tick).
+    # This is what made the kill switch appear to silently "do nothing"
+    # whenever the very first attempt hit a transient failure. Fixed by
+    # driving the retry off risk_engine.kill_switch_active every tick,
+    # exactly like the auto-flatten -- this proves a symbol that failed
+    # once genuinely gets retried and actually closes, not just that the
+    # loop doesn't crash.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker, symbol="AAA", price=10.0)
+
+    original_submit = loop.order_manager.submit_signal
+    calls = {"count": 0}
+
+    def _fails_once_then_succeeds(signal, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("simulated transient broker failure")
+        return original_submit(signal, **kwargs)
+
+    loop.order_manager.submit_signal = _fails_once_then_succeeds
+
+    loop.engage_kill_switch_and_flatten("test halt")
+    loop._process_all_candidates(_IN_HOURS_NOW)  # tick 1: fails, must not raise
+    assert "AAA" in loop._positions
+
+    loop._process_all_candidates(_IN_HOURS_NOW)  # tick 2: retried, succeeds
+    assert "AAA" not in loop._positions
+    assert len(loop._trades) == 1
+    assert loop._trades[0].exit_reason == ExitReason.RISK_KILL_SWITCH
+
+
+def test_kill_switch_flatten_does_not_double_submit_while_a_close_is_still_pending():
+    # Regression test for a risk introduced by making the flatten retry
+    # every tick (see the test above): without a guard, a symbol whose
+    # close order is still pending (a real broker returns SUBMITTED, not
+    # an instant FILLED) would get a SECOND market exit order submitted
+    # against it on the very next tick, before the first one even
+    # resolved -- a real over-sell risk against a live broker.
+    broker = _FakeBroker(fills_after_polls=5)  # stays pending across both ticks below
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.engage_kill_switch_and_flatten("test halt")
+    loop._process_all_candidates(_IN_HOURS_NOW)  # submits the close -- stays pending
+    assert "TEST" in loop._pending_exit_orders
+    orders_placed_after_tick_1 = len(broker._orders)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)  # must NOT submit a second close
+    assert len(broker._orders) == orders_placed_after_tick_1
+
+
 # -- end-of-core-hours auto-flatten (distinct from the kill switch: no
 # risk_engine.kill_switch_active flip, just closes anything still open once
 # the regular 9:30am-4:00pm ET session ends) -------------------------------
