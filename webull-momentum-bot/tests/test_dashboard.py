@@ -347,6 +347,7 @@ def test_risk_settings_returns_current_config(loop, client):
     assert body["max_position_size_pct"] == loop.risk_engine.config.max_position_size_pct
     assert body["max_total_risk_pct"] == loop.risk_engine.config.max_total_risk_pct
     assert body["max_daily_loss_pct"] == loop.risk_engine.config.max_daily_loss_pct
+    assert body["max_simultaneous_positions"] == loop.risk_engine.config.max_simultaneous_positions
 
 
 def test_risk_settings_update_mutates_live_engine(loop, client):
@@ -383,6 +384,28 @@ def test_risk_settings_update_allows_ratio_field_over_100(loop, client):
     resp = client.post("/api/risk-settings", json={"min_risk_reward_ratio": 150})
     assert resp.status_code == 200
     assert loop.risk_engine.config.min_risk_reward_ratio == 150
+
+
+def test_risk_settings_update_allows_zero_max_simultaneous_positions(loop, client):
+    # Unlike every other adjustable field, 0 is a valid, meaningful value
+    # here (unlimited) rather than a rejected "must be greater than 0."
+    resp = client.post("/api/risk-settings", json={"max_simultaneous_positions": 0})
+    assert resp.status_code == 200
+    assert resp.json()["max_simultaneous_positions"] == 0
+    assert loop.risk_engine.config.max_simultaneous_positions == 0
+
+
+def test_risk_settings_update_rejects_negative_max_simultaneous_positions(loop, client):
+    resp = client.post("/api/risk-settings", json={"max_simultaneous_positions": -1})
+    assert resp.status_code == 422
+    assert loop.risk_engine.config.max_simultaneous_positions != -1
+
+
+def test_risk_settings_update_allows_max_simultaneous_positions_over_100(loop, client):
+    # Also not a percentage -- no 100 ceiling applies.
+    resp = client.post("/api/risk-settings", json={"max_simultaneous_positions": 250})
+    assert resp.status_code == 200
+    assert loop.risk_engine.config.max_simultaneous_positions == 250
 
 
 def test_position_settings_returns_current_config(loop, client):

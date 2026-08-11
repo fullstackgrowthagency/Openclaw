@@ -883,7 +883,7 @@ tuned thresholds.
 ## Risk sizing
 
 Once a `Strategy` emits a `Signal`, `RiskEngine.evaluate()` (`risk/risk_engine.py`)
-decides both *whether* to trade it and, if so, *how many shares*. Five of
+decides both *whether* to trade it and, if so, *how many shares*. Six of
 its `RiskConfig` fields are adjustable live from the dashboard's Settings
 button (top right -- see "Dashboard" below) via `GET`/`POST
 /api/risk-settings`, which mutate the running `RiskEngine.config` in place;
@@ -2080,7 +2080,7 @@ it's opt-in per open of the panel.
 Safety section's kill-switch button for the dashboard's other write path).
 Two separate config objects, two separate endpoint pairs, shown together
 in one modal:
-- `GET`/`POST /api/risk-settings` expose five `RiskConfig` fields (see
+- `GET`/`POST /api/risk-settings` expose six `RiskConfig` fields (see
   "Risk sizing" above), mutating `trading_loop.risk_engine.config` directly.
 - `GET`/`POST /api/position-settings` expose two `PositionManagementConfig`
   fields (`breakeven_trigger_pct`, `trailing_stop_pct` -- see "Position
@@ -2093,8 +2093,14 @@ dataclass's hardcoded defaults. Both are deliberately small, curated
 subsets of their respective config objects (`_ADJUSTABLE_RISK_FIELDS` /
 `_ADJUSTABLE_POSITION_FIELDS` in `dashboard/app.py`), not every field --
 matched to what's actually useful to tune without restarting versus a
-rarer, more structural decision (e.g. `max_simultaneous_positions`) better
-made by editing the config in code. One current limitation: both
+rarer, more structural decision (e.g. `max_trades_per_ticker_per_day`)
+better made by editing the config in code. One of the six risk fields,
+`max_simultaneous_positions`, is a whole-number position count rather than
+a percentage/ratio like the other five -- its validation is special-cased
+in `update_risk_settings` accordingly: 0 is accepted and means unlimited
+(the RiskEngine.evaluate() cap simply doesn't apply), not rejected as
+"must be greater than 0" like it would be for any of the percentage
+fields, and there's no 100 ceiling on it either. One current limitation: both
 `PositionManagementConfig` fields are natively `Optional[float]` (`None`
 disables the rule), but the update endpoint also uses `None` to mean
 "omitted from this request" -- so the dashboard can set either to a

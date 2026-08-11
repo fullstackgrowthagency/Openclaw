@@ -205,6 +205,23 @@ def test_rejects_when_max_positions_hit():
     assert not decision.approved
 
 
+def test_max_simultaneous_positions_zero_means_unlimited():
+    # 0 is a real, dashboard-settable value (not "reject everything," which
+    # a literal position-count reading of 0 would otherwise imply) -- see
+    # RiskConfig.max_simultaneous_positions's docstring.
+    engine = RiskEngine(RiskConfig(max_simultaneous_positions=0))
+    existing = [
+        Position(
+            symbol=f"SYM{i}", side=OrderSide.BUY, quantity=100, avg_entry_price=5.0,
+            stop_price=4.5, target_price=None, trailing_stop_pct=None,
+            opened_at=datetime.utcnow(), strategy_name="test",
+        )
+        for i in range(10)
+    ]
+    decision = _evaluate(engine, open_positions=existing)
+    assert decision.approved
+
+
 def test_enforces_max_trades_per_ticker_per_day():
     engine = RiskEngine(RiskConfig(max_trades_per_ticker_per_day=1, cooldown_minutes_after_loss=0))
     first = _evaluate(engine)

@@ -175,6 +175,10 @@
         <span>Daily loss limit <span class="muted">(% of equity, halts all new trades for the rest of the day once hit)</span></span>
         <input type="number" id="setting-max_daily_loss_pct" step="0.1" min="0.1" max="100" required>
       </label>
+      <label class="settings-field">
+        <span>Max simultaneous positions <span class="muted">(0 = unlimited)</span></span>
+        <input type="number" id="setting-max_simultaneous_positions" step="1" min="0" required>
+      </label>
       <h4 class="settings-subheading">Position management</h4>
       <p class="hint">Applies to every open position immediately -- not just new entries. See the "Position management" section of docs/ARCHITECTURE.md for the full exit-check order.</p>
       <label class="settings-field">

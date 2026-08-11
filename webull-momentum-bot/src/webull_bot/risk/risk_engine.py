@@ -65,6 +65,9 @@ class RiskConfig:
     # remaining risk budget" step anymore) -- it can only refuse the trade
     # outright once the ceiling is already breached by existing positions.
     max_total_risk_pct: float = 50.0
+    # Dashboard-adjustable (2026-08-11). 0 means unlimited -- not "reject
+    # every entry," which a literal 0-as-a-count reading would otherwise
+    # imply (see the `if` guard in evaluate() below).
     max_simultaneous_positions: int = 3
     max_trades_per_day: int = 15
     max_trades_per_ticker_per_day: int = 2
@@ -216,7 +219,7 @@ class RiskEngine:
             if now < cooldown_until:
                 return reject(RiskEventType.COOLDOWN_ACTIVE, f"{signal.symbol} is in post-loss cooldown until {cooldown_until.isoformat()}.")
 
-        if len(open_positions) >= self.config.max_simultaneous_positions:
+        if self.config.max_simultaneous_positions and len(open_positions) >= self.config.max_simultaneous_positions:
             return reject(RiskEventType.MAX_POSITIONS_HIT, "Max simultaneous positions reached.")
 
         spread_abs = snapshot.ask - snapshot.bid if snapshot.ask and snapshot.bid else 0.0
