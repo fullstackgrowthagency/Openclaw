@@ -883,7 +883,7 @@ tuned thresholds.
 ## Risk sizing
 
 Once a `Strategy` emits a `Signal`, `RiskEngine.evaluate()` (`risk/risk_engine.py`)
-decides both *whether* to trade it and, if so, *how many shares*. Four of
+decides both *whether* to trade it and, if so, *how many shares*. Five of
 its `RiskConfig` fields are adjustable live from the dashboard's Settings
 button (top right -- see "Dashboard" below) via `GET`/`POST
 /api/risk-settings`, which mutate the running `RiskEngine.config` in place;
@@ -918,6 +918,19 @@ replaying a 10am historical bar must gate against 10am, not 2am). Leaving
 `now` as `None` (every call site's implicit behavior before this) still
 falls back to `evaluate()`'s own `datetime.utcnow()`, which is what a
 caller with no natural notion of simulated time wants.
+
+**Daily loss limit** (`max_daily_loss_pct`, default 3% of equity,
+dashboard-adjustable) -- checked right after the core-hours gate, before
+any trade-count/cooldown/sizing checks. `RiskEngine._daily.realized_pnl`
+accumulates every `record_trade_closed` call for the current day (rolled
+over at midnight UTC via `_roll_day_if_needed`); once it's at or below
+`-max_daily_loss_pct% * account_equity`, every new entry is rejected
+(`RiskEventType.DAILY_LOSS_LIMIT_HIT`) for the rest of the day, regardless
+of ticker or strategy. Like the other adjustable fields, a dashboard
+change takes effect on the very next `Signal` evaluated. This only ever
+blocks *new* entries -- exits never route through `evaluate()` (see the
+core-hours gate note above), so an existing position can still be closed
+normally even after the daily limit trips.
 
 **1. Minimum reward:risk ratio** (`min_risk_reward_ratio`, default 2.0) --
 checked first, before any sizing math. If a signal specifies a
@@ -2067,7 +2080,7 @@ it's opt-in per open of the panel.
 Safety section's kill-switch button for the dashboard's other write path).
 Two separate config objects, two separate endpoint pairs, shown together
 in one modal:
-- `GET`/`POST /api/risk-settings` expose four `RiskConfig` fields (see
+- `GET`/`POST /api/risk-settings` expose five `RiskConfig` fields (see
   "Risk sizing" above), mutating `trading_loop.risk_engine.config` directly.
 - `GET`/`POST /api/position-settings` expose two `PositionManagementConfig`
   fields (`breakeven_trigger_pct`, `trailing_stop_pct` -- see "Position

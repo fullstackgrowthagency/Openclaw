@@ -64,12 +64,12 @@ def _last_transition_reason(notes: str) -> str | None:
     return last_line.split(": ", 1)[-1] if ": " in last_line else last_line
 
 
-# The four RiskConfig fields adjustable from the dashboard's Settings modal
+# The five RiskConfig fields adjustable from the dashboard's Settings modal
 # -- deliberately a small, curated subset of RiskConfig (not every field),
 # matched to what the Settings UI actually exposes. All are percentages
 # except min_risk_reward_ratio (a ratio, e.g. 2.0 = "at least 2x reward for
 # every 1x risked").
-_ADJUSTABLE_RISK_FIELDS = ("stop_loss_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct")
+_ADJUSTABLE_RISK_FIELDS = ("stop_loss_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct", "max_daily_loss_pct")
 
 
 class RiskSettingsUpdate(BaseModel):
@@ -77,6 +77,7 @@ class RiskSettingsUpdate(BaseModel):
     min_risk_reward_ratio: Optional[float] = None
     max_position_size_pct: Optional[float] = None
     max_total_risk_pct: Optional[float] = None
+    max_daily_loss_pct: Optional[float] = None
 
 
 # The two PositionManagementConfig fields adjustable from the same Settings
@@ -176,8 +177,8 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         """Mutates the live RiskEngine.config in place -- takes effect on the
         very next Signal it evaluates, no restart needed. Only fields present
         (non-None) in the request body are changed; omitted fields keep their
-        current value. All four fields are percentages/ratios that must be
-        positive, and the three percentage fields must not exceed 100."""
+        current value. All five fields are percentages/ratios that must be
+        positive, and the four percentage fields must not exceed 100."""
         config = trading_loop.risk_engine.config
         updates = update.model_dump(exclude_none=True)
         errors = []
