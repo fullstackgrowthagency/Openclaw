@@ -1465,10 +1465,16 @@ def test_reconcile_adopts_an_untracked_long_position():
     assert "TEST" in loop._positions
     position = loop._positions["TEST"]
     assert position.strategy_name == "reconciled_at_startup"
-    assert position.target_price is None
-    # _FakeBroker.get_snapshot always returns last_price=5.20; default
-    # risk_per_trade_pct is 5.0 -- see _armed_candidate_setup's RiskEngine.
+    # 100 shares of a $5.20 stock ($520 notional) is small relative to the
+    # $1250 risk budget (25_000 equity * 5% risk_per_trade_pct) -- the
+    # risk-budgeted per-share distance (12.50) would exceed the price
+    # itself, which is degenerate for a long (stop_price <= 0), so this
+    # falls back to the flat risk_per_trade_pct-as-distance stop -- see
+    # test_reconcile_computes_a_risk_budgeted_stop_and_target below for
+    # the real (non-fallback) formula exercised with a quantity that
+    # doesn't hit this edge case.
     assert position.stop_price == pytest.approx(5.20 * (1 - 0.05))
+    assert position.target_price == pytest.approx(5.20 * (1 + 0.05 * 2.0))  # min_risk_reward_ratio default 2.0
 
     assert "TEST" in loop.candidates
     assert loop.candidates["TEST"].state == CandidateState.MANAGING
@@ -1485,7 +1491,67 @@ def test_reconcile_computes_a_short_stop_above_current_price():
 
     loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
 
+    # Same degenerate-distance fallback as the long test above (25.0/share
+    # implied by the risk budget vs. a $5.20 stock) -- confirmed fixed
+    # 2026-08-11: this guard originally only checked the long side, so a
+    # short in this exact situation got a nonsensical stop_price=30.20 /
+    # target_price=-44.80 instead of falling back.
     assert loop._positions["TEST"].stop_price == pytest.approx(5.20 * (1 + 0.05))
+    assert loop._positions["TEST"].target_price == pytest.approx(5.20 * (1 - 0.05 * 2.0))
+
+
+def test_reconcile_computes_a_risk_budgeted_stop_and_target():
+    # A quantity small enough relative to equity that the risk-budgeted
+    # per-share distance stays sane (well under the price) -- exercises
+    # the real formula, not the flat-% fallback the two tests above hit.
+    broker = _FakeBroker(equity=25_000.0)
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=5, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, _ = _armed_candidate_setup(broker)
+    loop.candidates.clear()
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    # risk_budget = 25_000 * 5% = 1250; per_share_risk = 1250 / 5 = 250 --
+    # still degenerate (way over the $5.20 price), so this itself falls
+    # back too. Use a quantity large enough that per_share_risk < price:
+    # 1250 / 500 = 2.50/share, comfortably under $5.20.
+    broker2 = _FakeBroker(equity=25_000.0)
+    broker2._positions.append(Position(
+        symbol="TEST2", side=OrderSide.BUY, quantity=500, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop2, _ = _armed_candidate_setup(broker2)
+    loop2.candidates.clear()
+
+    loop2.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    position = loop2._positions["TEST2"]
+    per_share_risk = (25_000.0 * 0.05) / 500  # 2.50
+    assert position.stop_price == pytest.approx(5.20 - per_share_risk)
+    assert position.target_price == pytest.approx(5.20 + per_share_risk * 2.0)  # min_risk_reward_ratio default 2.0
+
+
+def test_reconcile_falls_back_to_flat_stop_when_get_account_equity_fails():
+    class _FailingEquityBroker(_FakeBroker):
+        def get_account_equity(self):
+            raise RuntimeError("simulated account_v2 failure")
+
+    broker = _FailingEquityBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=500, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, _ = _armed_candidate_setup(broker)
+    loop.candidates.clear()
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)  # must not raise
+
+    position = loop._positions["TEST"]
+    assert position.stop_price == pytest.approx(5.20 * (1 - 0.05))
+    assert position.target_price == pytest.approx(5.20 * (1 + 0.05 * 2.0))
 
 
 def test_reconcile_never_overwrites_a_position_already_tracked_this_process():
@@ -2568,11 +2634,12 @@ def test_reconcile_adopts_a_position_and_attaches_broker_bracket_when_supported(
 
     assert "TEST" in loop._positions
     position = loop._positions["TEST"]
-    # Adoption never sets a target, so this is always a lone resting stop,
-    # never a bracket -- see _attach_broker_bracket.
+    # Adoption now computes a real target_price too (2026-08-11 fix -- see
+    # reconcile_positions_from_broker's docstring), so this places a full
+    # stop+target OCO bracket, not just a lone stop.
     assert position.broker_stop_order_id is not None
-    assert position.broker_target_order_id is None
-    assert len(broker._lone_stops) == 1
+    assert position.broker_target_order_id is not None
+    assert len(broker._brackets) == 1
 
 
 def test_reconcile_cancels_resting_orders_when_dropping_an_externally_closed_position():

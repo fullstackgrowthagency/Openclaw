@@ -1191,19 +1191,50 @@ point while the process keeps running, not only right before it starts.
 An adopted position (direction 1) has no originating `Signal` to pull a
 real `stop_price`/`target_price` from (that only ever exists at the moment
 a strategy fires, and this position may have opened in a previous
-process's lifetime) -- deliberately conservative synthetic values instead
-of leaving it unprotected: `stop_price` is set to
-`risk_engine.config.risk_per_trade_pct` below the *current* price for a
-long (above it for a short), a plain %-off-current-price line rather than
-a real entry-to-stop risk calculation, and `target_price` is left `None`
-entirely -- it rides on the breakeven/trailing-stop rules only, same as
-any position whose target has already been hit (see "Position management"
-below). `strategy_name` is set to the sentinel `"reconciled_at_startup"`
-so an adopted position is always distinguishable from a real signal-driven
-one in the trade history. A `get_positions()` or per-symbol
-`get_snapshot()` failure during reconciliation is logged and skipped, not
-fatal to the rest -- consistent with every other broker-loop failure mode
-in this file (kill-switch flatten, batched snapshot fetch, etc.).
+process's lifetime) -- deliberately conservative values instead of
+leaving it unprotected, computed from the same two risk settings a real
+signal's stop distance ultimately governs sizing for, just solved in the
+other direction since the share count here is already fixed by whatever's
+actually held at the broker:
+
+```
+risk_budget_dollars = account_equity * risk_per_trade_pct / 100
+per_share_risk       = risk_budget_dollars / quantity
+stop_price            = current_price -+ per_share_risk        (long/short)
+target_price          = current_price +- per_share_risk * min_risk_reward_ratio
+```
+
+**Real bug fixed here (2026-08-11), not just a gap filled.** The
+original version used `risk_per_trade_pct` directly as a flat %-below/
+above-price stop distance (the default 5.0 meant a flat 5% stop
+regardless of position size or account equity) -- reusing the *number*
+without reusing its actual *meaning* ("% of account equity to risk on
+this trade"), so an adopted position's realized loss at the stop had no
+real relationship to the configured risk budget, and it never got a
+target price at all (rode on breakeven/trailing alone from the start).
+Solving for the stop that makes this position's already-fixed share
+count risk exactly `risk_per_trade_pct` of equity is what actually
+honors the setting, and gives `min_risk_reward_ratio` something real to
+compute a target from. Falls back to the old flat-%-of-price stop
+(now with a real `min_risk_reward_ratio`-derived target too, which it
+never had before) when `get_account_equity()` fails, or when the
+risk-budgeted per-share distance is degenerate relative to price --
+checked symmetrically for both sides after a bug where the guard only
+covered longs, letting a short's target go negative for an oversized
+position (`per_share_risk >= current_price` on the short side implies a
+stop that's multiples of the price away and a nonsensical target). A
+position sized very differently from what its `quantity` combined with
+current `risk_per_trade_pct`/equity would imply as sane (very small or
+very large relative to the risk budget) is exactly when this fallback
+triggers -- not a bug on its own, just the honest limit of trying to
+reverse-engineer a risk-consistent stop for a position this process
+never actually sized. `strategy_name` is set to the sentinel
+`"reconciled_at_startup"` so an adopted position is always
+distinguishable from a real signal-driven one in the trade history. A
+`get_positions()` or per-symbol `get_snapshot()` failure during
+reconciliation is logged and skipped, not fatal to the rest -- consistent
+with every other broker-loop failure mode in this file (kill-switch
+flatten, batched snapshot fetch, etc.).
 
 ## Position management (exits)
 

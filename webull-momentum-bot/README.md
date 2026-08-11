@@ -138,12 +138,22 @@ What's implemented and tested:
   every `position_reconcile_interval_seconds` (30s default) afterward,
   since an external close can happen at any time, not just before startup.
   Since there's no original strategy signal to pull a real stop from for an
-  adopted position, it's given a conservative synthetic one instead of
-  being left unprotected: `RiskConfig.risk_per_trade_pct` as a straight
-  %-below-current-price line (long) or %-above (short), no target -- it
-  rides on the breakeven/trailing-stop rules only. Tagged with
-  `strategy_name="reconciled_at_startup"` so it's always distinguishable
-  from a real signal-driven entry in the trade history. **Adoption always
+  adopted position, it's given a risk-consistent one instead of being left
+  unprotected -- **fixed 2026-08-11, a real bug, not just a gap**: the
+  original version used `risk_per_trade_pct` as a flat %-below/above-price
+  stop distance, reusing the *number* without its actual *meaning* ("% of
+  equity to risk"), and never set a target at all. Now solves for the
+  stop that makes this position's already-fixed share count risk exactly
+  `risk_per_trade_pct` of account equity
+  (`per_share_risk = equity * risk_per_trade_pct/100 / quantity`), then
+  derives a real `target_price` from `min_risk_reward_ratio` the same way
+  a fresh signal would -- falling back to the old flat-% stop (now with a
+  real target too) only when that distance is degenerate relative to
+  price. Tagged with `strategy_name="reconciled_at_startup"` so it's
+  always distinguishable from a real signal-driven entry in the trade
+  history. See `docs/ARCHITECTURE.md`'s "Risk sizing" section (the
+  `self._positions can drift...` paragraph) for the full formula and
+  fallback conditions. **Adoption always
   builds a fresh `Candidate` instead of advancing an existing one** -- an
   earlier version tried a direct single-hop jump to `MANAGING`, which is
   only ever legal from `ENTERED`; a candidate stuck in `TRIGGERED` (exactly
