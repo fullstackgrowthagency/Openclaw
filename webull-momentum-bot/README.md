@@ -206,6 +206,18 @@ What's implemented and tested:
   per-tick `get_positions()` cache (several candidates needing it in the
   same pass now share one real call). See `docs/ARCHITECTURE.md`'s
   "Performance/rate-limit rehaul" section for the full breakdown.
+- **Streaming market data -- researched, not yet wired up (2026-08-11).**
+  `subscribe_quotes` is still a stub; polling remains the biggest single
+  source of API call volume. Reading the installed SDK found real
+  progress: `mqtt_host=None` auto-resolves via a config file bundled
+  *inside* the SDK to `data-api.webull.com` (the known production host --
+  there's no separate sandbox entry for it anywhere in that file, unlike
+  the plain REST API which does have one). Whether that host actually
+  serves this sandbox account's data, or whether a separate data-streaming
+  entitlement is required, is unconfirmed -- `scripts/verify_streaming.py`
+  exists to settle it live before any real integration gets built. See
+  `docs/ARCHITECTURE.md`'s "Streaming market data" section for the full
+  writeup.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry

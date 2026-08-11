@@ -75,10 +75,20 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     scripts/verify_extended_hours_bars.py for the analogous check already
     written for get_raw_bars' trading_sessions parameter).
   - Streaming (DataStreamingClient, MQTT-based) is NOT implemented here.
-    Its constructor needs an http_host/mqtt_host; the production values are
-    documented (data-api.webull.com) but no sandbox equivalent was found or
-    confirmed live. Wire this up once that host is confirmed, rather than
-    guessing it.
+    Progress as of 2026-08-11 (static SDK inspection, NOT yet live-tested --
+    see scripts/verify_streaming.py, built specifically to finish this):
+    leaving `mqtt_host=None` lets the SDK auto-resolve it via its own
+    bundled `webull/core/data/endpoints.json`, which has exactly ONE "us"
+    quotes-api entry (`data-api.webull.com`, the already-documented
+    production host) -- there is no separate sandbox entry anywhere in
+    that file. Whether that one host actually serves this SANDBOX
+    account's data (vs. being production-only, or requiring a separate
+    "OpenAPI data-streaming entitlement" per user-provided research not
+    yet confirmed against Webull's own docs) is exactly what
+    scripts/verify_streaming.py exists to determine live. Do not wire this
+    up here until that script has actually run clean and printed real
+    ticks -- same rule as every other "is X really supported" question in
+    this project.
   - Rate limiting: firing 10 truly concurrent get_snapshot calls at the
     sandbox tripped a 429 TOO_MANY_REQUESTS on 2 of them (2026-08-08), with
     no data corruption or cross-request mixups -- the SDK itself is safe to
@@ -681,12 +691,13 @@ class WebullBrokerClient(BrokerClient):
 
     def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
         raise NotImplementedError(
-            "Streaming (DataStreamingClient, MQTT-based) is not wired up: its "
-            "constructor needs a confirmed sandbox mqtt_host, which was not "
-            "found or verified live during integration (only the production "
-            "host data-api.webull.com is documented). Confirm the sandbox "
-            "equivalent before implementing this rather than guessing it. "
-            "Poll get_snapshot()/get_bars() in the meantime."
+            "Streaming (DataStreamingClient, MQTT-based) is not wired up. As of "
+            "2026-08-11, static SDK inspection found the auto-resolved mqtt_host "
+            "is data-api.webull.com (the SDK's only bundled quotes-api entry -- "
+            "no separate sandbox host exists in it), but whether that host "
+            "actually serves this SANDBOX account's data is unconfirmed -- run "
+            "scripts/verify_streaming.py live before implementing this rather "
+            "than guessing it. Poll get_snapshot()/get_bars() in the meantime."
         )
 
     # -- orders --------------------------------------------------------------

@@ -1587,6 +1587,69 @@ symbol ever (not on every rescan -- see `TradingLoopConfig`'s docstring),
 which is judged acceptable rather than a further optimization target for
 now.
 
+### Streaming market data (researched, not yet wired up)
+
+The biggest remaining lever isn't better-scheduled polling -- it's not
+polling at all. `subscribe_quotes` has been an unimplemented stub since
+`WebullBrokerClient` was first built, blocked on "no sandbox mqtt_host was
+ever confirmed." Static inspection of the installed
+`webull-openapi-python-sdk` (2026-08-11) made real progress on that
+without fully resolving it:
+
+- `webull.data.data_streaming_client.DataStreamingClient` is a real,
+  implemented MQTT client (via `paho-mqtt`), matching the public docs.
+- Leaving its `mqtt_host` constructor arg as `None` lets the SDK
+  auto-resolve it via `DefaultEndpointResolver` ->
+  `LocalConfigRegionalEndpointResolver`, which reads a config file bundled
+  *inside* the SDK package itself (`webull/core/data/endpoints.json`).
+  For region `"us"` that file has exactly **one** `quotes-api` entry --
+  `data-api.webull.com`, the same production host this project's docs
+  already knew about. There is no separate sandbox entry anywhere in that
+  file for any API type, including the plain REST `api` entry (which
+  *does* have a distinct sandbox equivalent, `api.sandbox.webull.com`, per
+  the official Data API docs -- confirming sandbox/production *are*
+  meaningfully different hosts for REST, which makes the *absence* of a
+  distinct sandbox quotes-api entry a real, deliberate signal worth
+  taking seriously, not just an oversight in the bundled file).
+- `session_id` is not obtained via any special handshake -- it's a plain
+  caller-generated id (e.g. a UUID) passed to both the MQTT client
+  constructor and the subscribe REST call, purely to correlate one MQTT
+  connection with its REST-side subscription.
+- Connecting requires `on_connect_success` to be set *before* connecting
+  (the SDK's own internal on-connect handler raises
+  `SDK_INVALID_PARAMETER` otherwise), and the actual `client.subscribe(...)`
+  call belongs *inside* that callback per the class's own design -- the
+  MQTT connect happens on a background thread via
+  `connect_and_loop_start()` (non-blocking, unlike
+  `connect_and_loop_forever()`), so subscribing must wait until that
+  connection is confirmed established.
+
+**Not confirmed, and not safe to assume either way without a live test**:
+whether `data-api.webull.com` -- the only host the SDK knows about at all
+-- actually accepts and correctly streams data for *this sandbox
+account's* credentials, versus being production-only (in which case a
+sandbox connection attempt would most likely fail auth or silently
+receive nothing). User-provided research (not yet cross-checked against
+Webull's own official docs the way every other claim in this file has
+been) also mentions a separate "standalone OpenAPI data-streaming
+entitlement," distinct from a consumer app subscription -- whether this
+account has one, if it's even a real requirement, is equally unconfirmed.
+
+`scripts/verify_streaming.py` exists to settle exactly this, live, the
+same way every other "is X really supported" question in this project has
+been settled (`scripts/verify_bracket_orders.py` for the OCO bracket
+feature, the `support_trading_session` saga, etc.): connects
+non-blockingly, subscribes to one symbol's quotes, waits (bounded, default
+20s) for a real message, and reports precisely which stage succeeded or
+failed -- connect, subscribe, or an actual tick arriving. **Do not wire
+streaming into `WebullBrokerClient`/`TradingLoop` until this script has
+actually run clean and printed real ticks.** If it doesn't, its own output
+is written to distinguish "never connected at all" from "connected but
+never subscribed" from "subscribed but received nothing" -- each points at
+a different next step (network/host issue vs. a subscribe payload shape
+problem vs. a genuine sandbox-support or entitlement gap) rather than
+leaving the failure ambiguous.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right
