@@ -1307,6 +1307,41 @@ def test_auto_flatten_is_a_no_op_once_no_positions_remain():
     assert loop._trades == []
 
 
+# 19:58 UTC = 3:58pm ET -- inside the default 2-minute buffer, but BEFORE
+# the actual 4:00pm close. Confirmed live 2026-08-11 that firing the
+# flatten at/after the real close submits its exit order into an already-
+# ended CORE session, which Webull rejects outright -- see
+# market_hours.is_within_closing_buffer's docstring.
+_BUFFER_WINDOW_NOW = datetime(2026, 8, 10, 19, 58, 0)
+
+
+def test_open_position_is_flattened_inside_the_pre_close_buffer_not_just_after_the_close():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+
+    loop._process_all_candidates(_BUFFER_WINDOW_NOW)
+
+    assert "TEST" not in loop._positions
+    assert len(loop._trades) == 1
+    assert loop._trades[0].exit_reason == ExitReason.END_OF_CORE_HOURS
+
+
+def test_open_position_is_untouched_before_the_pre_close_buffer_starts():
+    # 19:50 UTC = 3:50pm ET -- 10 minutes before close, outside the default
+    # 2-minute buffer. Still core hours, still not time to flatten yet.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+
+    loop._process_all_candidates(datetime(2026, 8, 10, 19, 50, 0))
+
+    assert "TEST" in loop._positions
+    assert loop._trades == []
+
+
 # -- reconcile_positions_from_broker (startup adoption of a position this
 # process doesn't already know about -- closes a restart-survivability gap
 # distinct from, but symptomatically identical to, the get_positions()

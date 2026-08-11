@@ -12,7 +12,7 @@ against any BrokerClient implementation, not just Webull's.
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 EASTERN = ZoneInfo("America/New_York")
@@ -41,3 +41,37 @@ def is_after_core_trading_hours(now_utc: datetime) -> bool:
     if eastern.weekday() >= 5:
         return True
     return eastern.time() >= REGULAR_SESSION_CLOSE
+
+
+def is_within_closing_buffer(now_utc: datetime, buffer_minutes: float) -> bool:
+    """True once within `buffer_minutes` of the 4:00pm ET close (i.e. `now`
+    is at or past `close - buffer_minutes`), through the rest of the day,
+    or any time on a weekend. Deliberately NOT the same trigger as
+    `is_after_core_trading_hours` -- every order this project submits
+    (including the auto-flatten's own exit order) is scoped to the "CORE"
+    trading session (see `WebullBrokerClient._order_payload`'s
+    `support_trading_session` note). Observed live 2026-08-11: a position
+    still open right at the 4:00pm close never actually flattened -- the
+    auto-flatten was firing (confirmed via the dashboard/logs), just not
+    succeeding, tick after tick. The leading diagnosis (not independently
+    confirmed via a captured rejection message -- the fix below was
+    applied on the strength of this reasoning plus the symptom match, not
+    a proven root cause) is that a "CORE"-scoped order needs a still-live
+    CORE session to execute at all, and by the time
+    `is_after_core_trading_hours` first turns true that session has
+    already ended. Firing the auto-flatten `buffer_minutes` BEFORE the
+    close instead, while CORE is still unambiguously active, sidesteps
+    the question entirely regardless of the exact rejection mechanism.
+    Fires every tick from that point on (not just once), so a position
+    opened in the last few minutes before close -- RiskEngine still
+    allows entries right up to 4:00pm -- is caught on its very next tick,
+    not missed. If positions still don't flatten within the buffer
+    window, re-open this diagnosis rather than assuming the timing fix
+    alone was sufficient."""
+    eastern = now_utc.replace(tzinfo=timezone.utc).astimezone(EASTERN)
+    if eastern.weekday() >= 5:
+        return True
+    close = eastern.replace(
+        hour=REGULAR_SESSION_CLOSE.hour, minute=REGULAR_SESSION_CLOSE.minute, second=0, microsecond=0,
+    )
+    return eastern >= close - timedelta(minutes=buffer_minutes)

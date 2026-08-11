@@ -120,7 +120,7 @@ from ..enums import CandidateState, ExitReason, OrderSide, OrderStatus, SignalAc
 from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
-from ..market_hours import is_after_core_trading_hours
+from ..market_hours import is_within_closing_buffer
 from ..models import Candidate, MarketSnapshot, MomentumEvent, MomentumScore, Order, Position, Signal, Trade
 from ..position.position_manager import PositionManager
 from ..risk.risk_engine import RiskEngine
@@ -241,6 +241,20 @@ class TradingLoopConfig:
     # reconnect issue noted in WebullBrokerClient.subscribe_quotes'
     # docstring) rather than pacing normal operation.
     streaming_staleness_seconds: float = 10.0
+    # How many minutes before the 4:00pm ET core-session close the end-of-
+    # day auto-flatten fires -- see market_hours.is_within_closing_buffer's
+    # docstring for the full story: firing exactly at (or after) the
+    # close, as this loop did before 2026-08-11, left a position observed
+    # live to stay open indefinitely, retried every tick with no visible
+    # progress (leading diagnosis: the flatten's MARKET/CORE exit order
+    # needs a still-live CORE session, which has already ended by the
+    # time the old trigger first turned true -- not independently
+    # confirmed via a captured rejection message). 2 minutes is
+    # comfortably enough margin for a real order to submit and fill
+    # before the session actually closes without giving up meaningful
+    # trading time -- not itself live-tuned against how long a flatten
+    # order actually takes to fill.
+    end_of_day_flatten_buffer_minutes: float = 2.0
 
 
 class TradingLoop:
@@ -1810,28 +1824,40 @@ class TradingLoop:
             except Exception:
                 logger.exception("Unhandled error force-closing all positions for kill switch.")
 
-        # End-of-core-hours auto-flatten: unlike the kill switch above, this
+        # End-of-day auto-flatten: unlike the kill switch above, this
         # doesn't set risk_engine.kill_switch_active (that's a manual,
         # sticky halt meant to require a human to clear it -- see the
         # dashboard's kill-switch toggle) and isn't a one-shot flag either.
         # It just checks the clock every tick and calls the same
         # _close_all_positions_now this method already uses for the kill
         # switch, reusing its exact submit/pending/finalize path. Cheap to
-        # call on every tick once the session's closed: RiskEngine.evaluate
+        # call on every tick once inside the buffer window: RiskEngine.evaluate
         # already independently refuses any *new* entry outside core hours
         # (see market_hours.is_within_core_trading_hours there), so
         # self._positions only ever has something in it here if a position
-        # was still open right at the close -- after the first successful
+        # was still open going into the close -- after the first successful
         # flatten each day, this is a no-op loop over an empty dict.
-        if self._positions and is_after_core_trading_hours(now):
+        #
+        # Fires config.end_of_day_flatten_buffer_minutes BEFORE the actual
+        # 4:00pm ET close (is_within_closing_buffer), NOT at/after it --
+        # observed live 2026-08-11 that firing at the close itself left a
+        # position open indefinitely, retried every tick with no visible
+        # progress (leading diagnosis: the flatten's MARKET/CORE exit
+        # order needs a still-live CORE session, already ended by then --
+        # see is_within_closing_buffer's docstring for why this isn't
+        # independently confirmed via a captured rejection message). See
+        # that docstring for the full reasoning and why this still fires
+        # every tick (not just once) so a position opened in the last
+        # moments before the buffer window started is still caught.
+        if self._positions and is_within_closing_buffer(now, self.config.end_of_day_flatten_buffer_minutes):
             try:
                 self._close_all_positions_now(
-                    "Auto-flattening open position(s) at end of core trading hours.",
+                    "Auto-flattening open position(s) before end of core trading hours.",
                     now,
                     exit_reason=ExitReason.END_OF_CORE_HOURS,
                 )
             except Exception:
-                logger.exception("Unhandled error auto-flattening positions at end of core trading hours.")
+                logger.exception("Unhandled error auto-flattening positions before end of core trading hours.")
 
         if (
             self._last_position_reconcile is None

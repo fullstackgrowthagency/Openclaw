@@ -99,12 +99,12 @@ What's implemented and tested:
   there was no explicit guarantee anywhere that entries only ever happen in
   core hours in the first place. Exits are never affected (a stop-loss or
   the end-of-day auto-flatten below still fire any time) since
-  `OrderManager` never routes exits through `evaluate()` at all. Any open
-  position still open once core hours end is now automatically flattened
-  (`TradingLoop`'s end-of-core-hours auto-flatten, distinct from the manual
-  kill switch -- it never halts the *next* day's trading, it just closes
-  out today's) -- see `docs/ARCHITECTURE.md`'s "Core trading hours gate"
-  and "End-of-core-hours auto-flatten" sections.
+  `OrderManager` never routes exits through `evaluate()` at all. Any
+  position still open is now automatically flattened shortly before core
+  hours end (`TradingLoop`'s end-of-day auto-flatten, distinct from the
+  manual kill switch -- it never halts the *next* day's trading, it just
+  closes out today's) -- see `docs/ARCHITECTURE.md`'s "Core trading hours
+  gate" and "End-of-day auto-flatten" sections.
 - **Position tracking can be lost on a broker-side fill reconciliation
   failure -- fixed.** A real production incident: an entry filled during
   core hours, but a field-name mismatch in `WebullBrokerClient.get_positions()`
@@ -363,10 +363,16 @@ What's implemented and tested:
   with the fill going untracked -- see the position-tracking bullet above).
   New entries don't need `"ALL"` regardless -- they're never attempted
   outside core hours in the first place now (see the entry-gate bullet
-  above). Still open: whether a `"CORE"`-flagged order fired right at the
-  4:00pm ET close by the end-of-core-hours auto-flatten executes cleanly --
-  see `docs/ARCHITECTURE.md`'s "Webull integration" section for the full
-  history and what to watch for.
+  above). A `"CORE"`-flagged order fired right at the 4:00pm ET close
+  turned out to matter after all, just for the auto-flatten's own exit
+  order rather than entries -- observed live 2026-08-11 that a position
+  still open at the close never actually flattened. Rather than chase
+  down the exact rejection (the leading diagnosis: that order needs a
+  still-live CORE session it no longer has by then, not independently
+  confirmed via a captured error), the auto-flatten now fires 2 minutes
+  *before* the close instead (see the "End-of-day auto-flatten" bullet
+  above) -- see `docs/ARCHITECTURE.md`'s "Webull integration" section for
+  the full history.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

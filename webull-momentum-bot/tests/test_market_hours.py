@@ -1,6 +1,10 @@
 from datetime import datetime
 
-from webull_bot.market_hours import is_after_core_trading_hours, is_within_core_trading_hours
+from webull_bot.market_hours import (
+    is_after_core_trading_hours,
+    is_within_closing_buffer,
+    is_within_core_trading_hours,
+)
 
 
 def test_within_core_hours_at_open():
@@ -46,3 +50,30 @@ def test_after_core_hours_is_true_at_and_after_close():
 def test_after_core_hours_is_true_on_weekend():
     saturday = datetime(2026, 8, 15, 15, 0, 0)
     assert is_after_core_trading_hours(saturday) is True
+
+
+def test_within_closing_buffer_is_false_well_before_the_buffer_window():
+    # 19:50 UTC = 3:50pm ET -- 10 minutes before close, outside a 2-minute buffer.
+    assert is_within_closing_buffer(datetime(2026, 8, 10, 19, 50, 0), buffer_minutes=2.0) is False
+
+
+def test_within_closing_buffer_is_true_right_at_the_buffer_start():
+    # 19:58 UTC = 3:58pm ET exactly -- the buffer boundary itself is inclusive.
+    assert is_within_closing_buffer(datetime(2026, 8, 10, 19, 58, 0), buffer_minutes=2.0) is True
+
+
+def test_within_closing_buffer_is_true_one_second_into_the_buffer():
+    assert is_within_closing_buffer(datetime(2026, 8, 10, 19, 58, 1), buffer_minutes=2.0) is True
+
+
+def test_within_closing_buffer_stays_true_after_the_actual_close():
+    # Not a one-shot window -- must keep firing every tick after 4:00pm too,
+    # so a position that somehow didn't flatten in the buffer window (or
+    # opened in the last seconds before close) still gets caught.
+    well_after_close = datetime(2026, 8, 10, 23, 0, 0)  # 7:00pm ET
+    assert is_within_closing_buffer(well_after_close, buffer_minutes=2.0) is True
+
+
+def test_within_closing_buffer_is_true_all_weekend():
+    saturday = datetime(2026, 8, 15, 15, 0, 0)
+    assert is_within_closing_buffer(saturday, buffer_minutes=2.0) is True

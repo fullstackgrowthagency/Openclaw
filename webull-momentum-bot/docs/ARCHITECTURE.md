@@ -2241,15 +2241,22 @@ Four non-obvious things worth knowing if you're debugging this client:
    would actually work here. Do not re-attempt `"ALL"` again without a
    successful live order proving this specific account/endpoint accepts it
    -- the docs have now disagreed with the live API once and are not
-   sufficient evidence on their own. Practical consequence:
-   `RiskEngine.evaluate`'s core-hours entry gate (see "Risk sizing" above)
-   means `"CORE"` costs entries nothing, since one's never attempted outside
-   that window anyway -- but the end-of-core-hours auto-flatten's exit
-   order fires right at the 4:00pm ET close boundary, and it's not yet
-   confirmed whether a `"CORE"`-flagged order placed at that exact instant
-   executes cleanly or risks the original "accepted but won't execute"
-   symptom this field was first changed to fix. Watch for that specifically
-   the next time a position is still open at the close.
+   sufficient evidence on their own. Practical consequence: `RiskEngine.evaluate`'s
+   core-hours entry gate (see "Risk sizing" above) means `"CORE"` costs
+   entries nothing, since one's never attempted outside that window
+   anyway -- **observed live 2026-08-11 that it may cost the end-of-day
+   auto-flatten's own exit order**, though: a position still open right
+   at the 4:00pm ET close never actually flattened, retried every tick
+   with no visible progress. The leading diagnosis -- a `"CORE"`-scoped
+   order needs a still-live CORE session, already ended by the time the
+   old trigger fired -- was never independently confirmed via a captured
+   rejection message (unlike the `"ALL"` rejection two paragraphs above,
+   which was); it's the best explanation that fits the symptom and the
+   session's own documented scope, not a proven root cause. Fixed by
+   moving *when* the flatten fires, not the session flag itself -- see
+   "Position management"'s "End-of-day auto-flatten" section for
+   `is_within_closing_buffer`. If positions still don't flatten within
+   the new buffer window, this diagnosis needs revisiting.
 
 Streaming (`subscribe_quotes`) intentionally raises `NotImplementedError`:
 `DataStreamingClient` needs an `mqtt_host`, and only the production value
@@ -2328,16 +2335,40 @@ A `get_snapshot` failure for one symbol during a flatten is logged and
 skipped, not fatal to the rest -- one bad quote during an emergency stop
 shouldn't leave every other position uncautiously open.
 
-**End-of-core-hours auto-flatten** (distinct from the kill switch above,
-added at the same time as the core trading hours entry gate in "Risk
-sizing"): `_process_all_candidates` checks, every tick, whether
-`market_hours.is_after_core_trading_hours(now)` is true and
-`self._positions` is non-empty; if so it calls the exact same
+**End-of-day auto-flatten** (distinct from the kill switch above, added
+at the same time as the core trading hours entry gate in "Risk sizing"):
+`_process_all_candidates` checks, every tick, whether
+`market_hours.is_within_closing_buffer(now, config.end_of_day_flatten_buffer_minutes)`
+is true and `self._positions` is non-empty; if so it calls the exact same
 `_close_all_positions_now` the kill switch uses, just with
 `exit_reason=ExitReason.END_OF_CORE_HOURS` instead of the default
 `RISK_KILL_SWITCH` (`_close_all_positions_now` now takes that as a
-parameter for this reason). Two things make this deliberately *not* just
-"call `engage_kill_switch_and_flatten` on a timer":
+parameter for this reason).
+
+**Fires BEFORE the close, not at/after it (extended 2026-08-11).**
+Originally gated on `market_hours.is_after_core_trading_hours(now)` --
+true only at/after the literal 4:00pm ET close. Observed live the same
+day this was a real bug, not a theoretical one: a position still open
+right at the close never actually flattened, retried every tick with no
+visible progress. Leading diagnosis, not independently confirmed via a
+captured rejection message (the flatten's own error handling logs and
+swallows per-symbol failures rather than surfacing the exact reason) --
+every order this project submits (including the flatten's own exit
+order) is scoped to the `"CORE"` trading session (see
+`WebullBrokerClient._order_payload`'s `support_trading_session` note),
+and that session has, by definition, already ended by the time
+`is_after_core_trading_hours` first turns true, so a `"CORE"`-scoped
+order submitted then would need a still-live session it no longer has.
+`is_within_closing_buffer` fires
+`TradingLoopConfig.end_of_day_flatten_buffer_minutes` (2 minutes default)
+*before* the close instead, while the CORE session is still live enough
+for the exit order to actually execute. Still fires every tick from that
+point on (not a one-shot window), so a position opened in the last
+moments before the buffer started -- `RiskEngine.evaluate` still allows
+entries right up to 4:00pm -- is still caught, on its very next tick.
+
+Two things make this deliberately *not* just "call
+`engage_kill_switch_and_flatten` on a timer":
 
 1. It never sets `risk_engine.kill_switch_active`. The kill switch is a
    sticky, manual halt a human clears from the dashboard; forcing every
