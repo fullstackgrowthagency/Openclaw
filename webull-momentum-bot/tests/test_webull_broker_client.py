@@ -13,7 +13,7 @@ import pytest
 from webull_bot.brokers.webull import retry as retry_module
 from webull_bot.brokers.webull.client import WebullBrokerClient
 from webull_bot.enums import OrderSide, OrderStatus, OrderType, TimeInForce
-from webull_bot.models import Order
+from webull_bot.models import MarketSnapshot, Order
 
 
 @pytest.fixture(autouse=True)
@@ -955,6 +955,64 @@ def test_snapshot_from_streamed_result_defaults_missing_fields_to_last_price():
     assert snapshot.cumulative_volume == 0.0
 
 
+class _FakeAskBidResult:
+    def __init__(self, price, size):
+        self.price = price
+        self.size = size
+
+
+class _FakeQuoteResult:
+    def __init__(self, symbol, timestamp, asks=None, bids=None, trading_session="RTH"):
+        self.basic = _FakeBasicResult(symbol, timestamp, trading_session)
+        self.asks = asks or []
+        self.bids = bids or []
+
+
+def test_quote_top_of_book_maps_real_fields():
+    # Confirmed live 2026-08-11 (the very first verify_streaming.py run,
+    # before SNAPSHOT was confirmed): asks:[price:304.22,size:203],
+    # bids:[price:304.21,size:41].
+    client = _client()
+    result = _FakeQuoteResult(
+        symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS,
+        asks=[_FakeAskBidResult(304.22, 203)], bids=[_FakeAskBidResult(304.21, 41)],
+    )
+    symbol, bid, ask, bid_size, ask_size = client._quote_top_of_book(result)
+    assert symbol == "AAPL"
+    assert bid == 304.21
+    assert ask == 304.22
+    assert bid_size == 41.0
+    assert ask_size == 203.0
+
+
+def test_quote_top_of_book_defaults_to_zero_when_a_side_is_empty():
+    client = _client()
+    result = _FakeQuoteResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, asks=[], bids=[])
+    symbol, bid, ask, bid_size, ask_size = client._quote_top_of_book(result)
+    assert (bid, ask, bid_size, ask_size) == (0.0, 0.0, 0.0, 0.0)
+
+
+def test_merge_streamed_snapshot_returns_none_until_both_message_types_seen():
+    client = _streaming_client()
+
+    assert client._merge_streamed_snapshot("AAPL") is None
+
+    snapshot = MarketSnapshot(
+        symbol="AAPL", timestamp=datetime.utcnow(), last_price=304.39, bid=0.0, ask=0.0,
+        bid_size=0.0, ask_size=0.0, cumulative_volume=100.0, vwap=304.39, high_of_day=304.39,
+        low_of_day=304.39, open_price=304.39,
+    )
+    client._streaming_snapshot_cache["AAPL"] = snapshot
+    assert client._merge_streamed_snapshot("AAPL") is None  # still no quote data
+
+    client._streaming_quote_cache["AAPL"] = (304.21, 304.22, 41.0, 203.0)
+    merged = client._merge_streamed_snapshot("AAPL")
+    assert merged is not None
+    assert merged.last_price == 304.39  # from the snapshot cache
+    assert merged.bid == 304.21 and merged.ask == 304.22  # from the quote cache
+    assert merged.bid_size == 41.0 and merged.ask_size == 203.0
+
+
 class _FakeDataStreamingClient:
     """Stands in for webull.data.data_streaming_client.DataStreamingClient
     -- subscribe_quotes constructs one of these internally (not injectable
@@ -994,6 +1052,8 @@ def _streaming_client(trading_mode=None):
     )
     client._streaming_client = None
     client._streaming_subscribed_symbols = set()
+    client._streaming_snapshot_cache = {}
+    client._streaming_quote_cache = {}
     import threading
     client._streaming_lock = threading.Lock()
     return client
@@ -1057,32 +1117,49 @@ def test_subscribe_quotes_subscribes_on_connect_success(monkeypatch):
     fake._connected = True
     fake.on_connect_success(fake, None, "session-1")
 
-    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["SNAPSHOT"])]
+    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
 
 
-def test_subscribe_quotes_delivers_a_real_message_to_on_update(monkeypatch):
+def test_subscribe_quotes_delivers_a_merged_message_once_both_types_seen(monkeypatch):
     instances = _patch_streaming_client_factory(monkeypatch)
     client = _streaming_client()
     received = []
     client.subscribe_quotes(["AAPL"], received.append)
     fake = instances[0]
 
-    result = _FakeSnapshotResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=304.39, volume=100)
-    fake.on_quotes_message(fake, "snapshot", result)
+    snapshot_result = _FakeSnapshotResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=304.39, volume=100)
+    fake.on_quotes_message(fake, "snapshot", snapshot_result)
+    assert received == []  # no quote data cached yet -- must not fire with a fabricated bid/ask
+
+    quote_result = _FakeQuoteResult(
+        symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS,
+        asks=[_FakeAskBidResult(304.40, 100)], bids=[_FakeAskBidResult(304.38, 50)],
+    )
+    fake.on_quotes_message(fake, "quote", quote_result)
 
     assert len(received) == 1
     assert received[0].symbol == "AAPL"
-    assert received[0].last_price == 304.39
+    assert received[0].last_price == 304.39  # from the snapshot message
+    assert received[0].bid == 304.38 and received[0].ask == 304.40  # from the quote message
+
+    # A second snapshot tick re-merges with the still-cached quote data,
+    # firing again immediately -- doesn't wait for a fresh quote too.
+    fake.on_quotes_message(fake, "snapshot", _FakeSnapshotResult(
+        symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=305.00, volume=150,
+    ))
+    assert len(received) == 2
+    assert received[1].last_price == 305.00
+    assert received[1].bid == 304.38 and received[1].ask == 304.40
 
 
-def test_subscribe_quotes_ignores_non_snapshot_topics(monkeypatch):
+def test_subscribe_quotes_ignores_unknown_topics(monkeypatch):
     instances = _patch_streaming_client_factory(monkeypatch)
     client = _streaming_client()
     received = []
     client.subscribe_quotes(["AAPL"], received.append)
     fake = instances[0]
 
-    fake.on_quotes_message(fake, "quote", object())  # a different topic -- e.g. bid/ask QUOTE data
+    fake.on_quotes_message(fake, "tick", object())  # a payload type this project doesn't consume
 
     assert received == []
 
@@ -1096,9 +1173,14 @@ def test_subscribe_quotes_swallows_an_on_update_exception(monkeypatch):
 
     client.subscribe_quotes(["AAPL"], _boom)
     fake = instances[0]
+    quote_result = _FakeQuoteResult(
+        symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS,
+        asks=[_FakeAskBidResult(1.01, 10)], bids=[_FakeAskBidResult(1.00, 10)],
+    )
+    fake.on_quotes_message(fake, "quote", quote_result)  # cached only -- no merge yet, nothing to swallow
     result = _FakeSnapshotResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=1.0)
 
-    fake.on_quotes_message(fake, "snapshot", result)  # must not raise
+    fake.on_quotes_message(fake, "snapshot", result)  # triggers the merge + on_update -- must not raise
 
 
 def test_subscribe_quotes_reuses_the_existing_connection_for_new_symbols(monkeypatch):
@@ -1112,7 +1194,7 @@ def test_subscribe_quotes_reuses_the_existing_connection_for_new_symbols(monkeyp
 
     assert len(instances) == 1  # no second connection opened
     assert fake.connect_calls == 1
-    assert fake.subscribe_calls == [(["MSFT"], "US_STOCK", ["SNAPSHOT"])]  # only the NEW symbol
+    assert fake.subscribe_calls == [(["MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]  # only the NEW symbol
 
 
 def test_subscribe_quotes_skips_already_subscribed_symbols(monkeypatch):
@@ -1145,7 +1227,7 @@ def test_subscribe_quotes_defers_new_symbols_until_connected(monkeypatch):
     fake._connected = True
     fake.on_connect_success(fake, None, "session-1")
 
-    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["SNAPSHOT"])]
+    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
 
 
 def test_disconnect_stops_the_streaming_client():
@@ -1165,6 +1247,8 @@ def test_disconnect_stops_the_streaming_client():
     fake = _FakeStreamingClient()
     client._streaming_client = fake
     client._streaming_subscribed_symbols = {"AAPL"}
+    client._streaming_snapshot_cache = {"AAPL": object()}
+    client._streaming_quote_cache = {"AAPL": (1.0, 1.01, 10.0, 10.0)}
 
     client.disconnect()
 
@@ -1172,3 +1256,5 @@ def test_disconnect_stops_the_streaming_client():
     assert fake.disconnect_called is True
     assert client._streaming_client is None
     assert client._streaming_subscribed_symbols == set()
+    assert client._streaming_snapshot_cache == {}
+    assert client._streaming_quote_cache == {}

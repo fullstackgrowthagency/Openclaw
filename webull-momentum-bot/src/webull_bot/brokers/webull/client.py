@@ -138,6 +138,7 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from dataclasses import replace as _dataclass_replace
 from datetime import datetime, time, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
@@ -265,13 +266,28 @@ class WebullBrokerClient(BrokerClient):
         # per call.
         self._streaming_client: Optional[DataStreamingClient] = None
         self._streaming_subscribed_symbols: set[str] = set()
-        # Guards self._streaming_subscribed_symbols only -- it's written
-        # from whatever thread calls subscribe_quotes (TradingLoop's main
-        # thread in practice) and read from the MQTT client's own
-        # background network-loop thread inside _on_connect_success, which
-        # is exactly the kind of cross-thread structural access this
-        # project already uses a dedicated lock for elsewhere (see
-        # runtime/trading_loop.py's _candidates_lock and its docstring).
+        # Per-symbol caches used to merge the two streamed message types
+        # into one MarketSnapshot -- see subscribe_quotes' docstring for
+        # why both are subscribed and why a merge is needed at all
+        # (SNAPSHOT has no bid/ask; QUOTE has nothing else). Only
+        # SNAPSHOT-derived fields live in _streaming_snapshot_cache
+        # (bid/ask always 0.0 there, exactly _snapshot_from_streamed_result's
+        # normal output); _streaming_quote_cache holds the latest top-of-book
+        # (bid, ask, bid_size, ask_size) from the QUOTE feed. A merged
+        # snapshot is only ever handed to on_update once both caches have
+        # seen at least one real message for that symbol -- see
+        # _merge_streamed_snapshot's docstring for why a bid=0/ask=0
+        # snapshot must never reach a caller doing spread math.
+        self._streaming_snapshot_cache: dict[str, MarketSnapshot] = {}
+        self._streaming_quote_cache: dict[str, tuple[float, float, float, float]] = {}
+        # Guards all four of the streaming dicts/sets above -- they're
+        # written from whatever thread calls subscribe_quotes (TradingLoop's
+        # main thread in practice) and read/written from the MQTT client's
+        # own background network-loop thread inside _on_connect_success/
+        # _on_quotes_message, which is exactly the kind of cross-thread
+        # structural access this project already uses a dedicated lock for
+        # elsewhere (see runtime/trading_loop.py's _candidates_lock and its
+        # docstring).
         self._streaming_lock = threading.Lock()
 
     def connect(self) -> None:
@@ -296,6 +312,8 @@ class WebullBrokerClient(BrokerClient):
             self._streaming_client = None
             with self._streaming_lock:
                 self._streaming_subscribed_symbols = set()
+                self._streaming_snapshot_cache = {}
+                self._streaming_quote_cache = {}
         self._api_client = None
         self._trade_client = None
         self._data_client = None
@@ -749,11 +767,12 @@ class WebullBrokerClient(BrokerClient):
         echoes a stale pre-market value all day).
 
         No bid/ask -- this streaming message type doesn't carry top-of-
-        book data at all (that's the separate `QUOTE` type, also confirmed
-        live but deliberately not subscribed here -- see subscribe_quotes'
-        docstring for why: this feed is only used for already-open
-        positions' exit checks, which never read bid/ask; RiskEngine's
-        spread gate at entry time only ever sees a REST-fetched snapshot).
+        book data at all (that's the separate `QUOTE` type -- see
+        subscribe_quotes' docstring for how the two are merged into one
+        MarketSnapshot before reaching a caller). Always 0.0 here; never
+        pass this method's return value directly to `on_update` --
+        `_merge_streamed_snapshot` is what actually assembles the value
+        callers receive.
 
         `vwap` is not available from this feed either, matching the REST
         endpoint's own gap (see `_snapshot_from_dict`'s docstring) --
@@ -792,15 +811,67 @@ class WebullBrokerClient(BrokerClient):
             prev_close=float(result.pre_close) if result.pre_close is not None else None,
         )
 
+    def _quote_top_of_book(self, result) -> tuple[str, float, float, float, float]:
+        """Maps a live-streamed QuoteResult
+        (webull.data.quotes.subscribe.quote_result.QuoteResult) to
+        (symbol, bid, ask, bid_size, ask_size) -- top-of-book only
+        (`.asks[0]`/`.bids[0]`; `AskBidResult.price`/`.size`, read directly
+        from the SDK's own ask_bid_result.py source). Confirmed live
+        2026-08-11 (the very first verify_streaming.py run, before the
+        SNAPSHOT sub_type existed): a real message decoded as
+        `asks:[price:304.22,size:203],bids:[price:304.21,size:41]` --
+        ask > bid as expected, one level each, best price first. Falls
+        back to 0.0/0.0 if a side's level list is empty (thin/no quote at
+        that instant) rather than raising -- same fail-soft convention as
+        every other optional field mapped in this module."""
+        asks = result.asks
+        bids = result.bids
+        ask = float(asks[0].price) if asks and asks[0].price is not None else 0.0
+        ask_size = float(asks[0].size) if asks and asks[0].size is not None else 0.0
+        bid = float(bids[0].price) if bids and bids[0].price is not None else 0.0
+        bid_size = float(bids[0].size) if bids and bids[0].size is not None else 0.0
+        return result.basic.symbol, bid, ask, bid_size, ask_size
+
+    def _merge_streamed_snapshot(self, symbol: str) -> Optional[MarketSnapshot]:
+        """Combines the latest cached SNAPSHOT-derived MarketSnapshot
+        (price/OHLC/volume) with the latest cached QUOTE-derived top-of-
+        book (bid/ask/bid_size/ask_size) for `symbol` into one complete
+        MarketSnapshot -- or returns None if either side has never arrived
+        yet for this symbol.
+
+        Deliberately fails closed, not open: a snapshot with real
+        price/volume but bid=0/ask=0 would make
+        `metrics.calculations.bid_ask_spread` silently report a spread of
+        0.0 (its documented behavior for a non-positive bid or ask -- see
+        that function), which `CandidateWatcher.update`'s spread-eligibility
+        gate would then read as "spread is fine" when the truth is simply
+        "no real quote data yet." Returning None here instead makes that
+        case indistinguishable from "nothing has streamed for this symbol
+        at all" to `TradingLoop._get_streaming_snapshot`, which already
+        falls back to a REST snapshot (with a real bid/ask) whenever it
+        gets None -- so a symbol whose QUOTE stream hasn't caught up yet
+        never gets treated as spread-safe on fabricated data."""
+        with self._streaming_lock:
+            base = self._streaming_snapshot_cache.get(symbol)
+            quote = self._streaming_quote_cache.get(symbol)
+        if base is None or quote is None:
+            return None
+        bid, ask, bid_size, ask_size = quote
+        return _dataclass_replace(base, bid=bid, ask=ask, bid_size=bid_size, ask_size=ask_size)
+
     def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
         """Confirmed live and working (2026-08-11, see this module's
         docstring's "Streaming market data" note and
-        scripts/verify_streaming.py) -- subscribes to the `SNAPSHOT`
-        streaming message type (price/open/high/low/volume, confirmed live
-        with `--sub-type SNAPSHOT`; richer than the bare bid/ask `QUOTE`
-        type also confirmed live but not used here) for `symbols`, and
-        calls `on_update(snapshot)` every time a real update decodes for
-        one of them.
+        scripts/verify_streaming.py) -- subscribes to both the `SNAPSHOT`
+        (price/open/high/low/volume) and `QUOTE` (top-of-book bid/ask)
+        streaming message types for `symbols`, merges the latest of each
+        per symbol (see `_merge_streamed_snapshot`), and calls
+        `on_update(snapshot)` with the merged result every time either
+        message type updates for a symbol that already has data cached
+        for the other type too. A symbol's very first message (of either
+        type) is cached but does NOT trigger `on_update` yet -- only once
+        both a real SNAPSHOT and a real QUOTE have been seen for it, so
+        `on_update` never fires with a fabricated bid/ask=0.0.
 
         One persistent `DataStreamingClient`/MQTT connection is created
         lazily on the first call and reused for every subsequent call --
@@ -847,7 +918,7 @@ class WebullBrokerClient(BrokerClient):
         if self._streaming_client is not None:
             if self._streaming_client.get_connect_success():
                 try:
-                    self._streaming_client.subscribe(new_symbols, Category.US_STOCK.name, ["SNAPSHOT"])
+                    self._streaming_client.subscribe(new_symbols, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
                 except Exception:
                     logger.exception("Streaming subscribe failed for additional symbols %s", new_symbols)
             # else: still connecting -- _on_connect_success will subscribe
@@ -868,22 +939,38 @@ class WebullBrokerClient(BrokerClient):
                 session_id_, len(current_symbols),
             )
             try:
-                client_.subscribe(current_symbols, Category.US_STOCK.name, ["SNAPSHOT"])
+                client_.subscribe(current_symbols, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
             except Exception:
                 logger.exception("Streaming subscribe failed on connect for %s", current_symbols)
 
         def _on_quotes_message(client_, topic, payload):
-            if topic != "snapshot":
+            if topic == "snapshot":
+                try:
+                    snapshot = self._snapshot_from_streamed_result(payload)
+                except Exception:
+                    logger.exception("Failed to map a streamed snapshot payload: %r", payload)
+                    return
+                with self._streaming_lock:
+                    self._streaming_snapshot_cache[snapshot.symbol] = snapshot
+                symbol = snapshot.symbol
+            elif topic == "quote":
+                try:
+                    symbol, bid, ask, bid_size, ask_size = self._quote_top_of_book(payload)
+                except Exception:
+                    logger.exception("Failed to map a streamed quote payload: %r", payload)
+                    return
+                with self._streaming_lock:
+                    self._streaming_quote_cache[symbol] = (bid, ask, bid_size, ask_size)
+            else:
                 return
+
+            merged = self._merge_streamed_snapshot(symbol)
+            if merged is None:
+                return  # haven't seen both message types for this symbol yet
             try:
-                snapshot = self._snapshot_from_streamed_result(payload)
+                on_update(merged)
             except Exception:
-                logger.exception("Failed to map a streamed snapshot payload: %r", payload)
-                return
-            try:
-                on_update(snapshot)
-            except Exception:
-                logger.exception("subscribe_quotes on_update callback raised for %s", snapshot.symbol)
+                logger.exception("subscribe_quotes on_update callback raised for %s", symbol)
 
         client = DataStreamingClient(
             self.settings.webull.app_key, self.settings.webull.app_secret, _REGION, session_id,

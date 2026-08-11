@@ -313,6 +313,33 @@ class _StreamingBroker(_FakeBroker):
         return super().get_snapshot(symbol)
 
 
+def _watching_candidate_setup(broker):
+    """Same wiring as _armed_candidate_setup, but leaves the candidate in
+    WATCHING -- for tests covering the pre-entry (WATCHING/HEATING_UP/
+    ARMED) streaming path rather than the exit-management one."""
+    from webull_bot.state_machine import new_candidate, transition
+    from webull_bot.enums import CandidateState
+
+    candidate = new_candidate("TEST")
+    candidate.resistance_level = 5.10
+    transition(candidate, CandidateState.WATCHING)
+
+    risk_engine = RiskEngine(RiskConfig(stop_loss_required=True))
+    order_manager = OrderManager(broker, risk_engine, get_settings())
+    watcher = CandidateWatcher()
+    from webull_bot.scanner.trigger_engine import TriggerEngine
+
+    trigger_engine = TriggerEngine(strategies=[MomentumBreakoutStrategy()])
+    position_manager = PositionManager()
+    loop = TradingLoop(
+        broker, StaticUniverseProvider([]), BroadScanner(broker, _SingleSymbolFloatProvider("TEST", 1_000_000)),
+        watcher, trigger_engine, order_manager, position_manager, risk_engine,
+        config=TradingLoopConfig(universe_rescan_interval_seconds=3600),
+    )
+    loop.candidates["TEST"] = candidate
+    return loop, candidate
+
+
 def _armed_candidate_setup(broker):
     from webull_bot.state_machine import new_candidate, transition
     from webull_bot.enums import CandidateState
@@ -2681,3 +2708,90 @@ def test_process_all_candidates_excludes_a_fresh_streaming_symbol_from_the_rest_
     loop._process_all_candidates(_IN_HOURS_NOW)
 
     assert broker.individual_calls == []  # never fell back to its own get_snapshot() for TEST
+
+
+# -- live-streamed prices for WATCHING/HEATING_UP/ARMED candidates ----------
+# See WebullBrokerClient._merge_streamed_snapshot's docstring for why this
+# is safe now (real bid/ask merged in from the QUOTE stream) where it
+# wasn't when streaming only covered ENTERED/MANAGING exit checks.
+
+def test_process_candidate_prefers_a_fresh_streamed_snapshot_for_a_watching_candidate():
+    broker = _StreamingBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+
+    # REST (_FakeBroker.get_snapshot) always returns last_price=5.20 --
+    # the streamed price below is what should actually drive scoring.
+    streamed = _snapshot(_IN_HOURS_NOW, 7.00, 7.00, 600_000, 6.99, 7.01, 5.15)
+    loop._on_streaming_snapshot(streamed)
+
+    loop._process_candidate(candidate, _IN_HOURS_NOW)
+
+    assert candidate.last_price == 7.00  # CandidateWatcher.update stamps this from the snapshot it saw
+
+
+def test_process_all_candidates_subscribes_every_watch_stage_candidate():
+    broker = _StreamingBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert broker.subscribe_calls == [["TEST"]]
+
+
+def test_process_all_candidates_does_not_subscribe_a_rejected_or_cooldown_candidate():
+    from webull_bot.state_machine import transition
+
+    broker = _StreamingBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+    transition(candidate, CandidateState.REJECTED)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert broker.subscribe_calls == []
+
+
+def test_process_all_candidates_excludes_a_fresh_streaming_watch_stage_symbol_from_the_rest_batch():
+    broker = _StreamingBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+
+    streamed = _snapshot(_IN_HOURS_NOW, 7.00, 7.00, 600_000, 6.99, 7.01, 5.15)
+    loop._on_streaming_snapshot(streamed)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert broker.individual_calls == []  # never fell back to its own get_snapshot() for TEST
+
+
+def test_process_candidate_falls_back_to_rest_for_a_watching_candidate_with_no_stream_yet():
+    broker = _StreamingBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+
+    loop._process_candidate(candidate, _IN_HOURS_NOW)
+
+    assert candidate.last_price == 5.20  # _FakeBroker.get_snapshot's fixed REST price -- no stream pushed
+    assert broker.individual_calls == ["TEST"]
+
+
+def test_process_candidate_does_not_use_streaming_for_a_triggered_candidate():
+    from webull_bot.enums import SignalAction
+    from webull_bot.models import Signal
+    from webull_bot.state_machine import transition
+
+    broker = _StreamingBroker(fills_after_polls=5)
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    transition(candidate, CandidateState.TRIGGERED)
+    signal = Signal(
+        symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
+        strategy_name="test", strategy_version="v1", reference_price=5.20, suggested_stop=5.00,
+    )
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    # A streamed update exists, but TRIGGERED must still poll order status
+    # over REST, not read the stream -- _STREAMING_ELIGIBLE_STATES excludes it.
+    streamed = _snapshot(_IN_HOURS_NOW, 9.00, 9.00, 600_000, 8.99, 9.01, 5.15)
+    loop._on_streaming_snapshot(streamed)
+
+    loop._process_candidate(candidate, _IN_HOURS_NOW)
+
+    assert broker.individual_calls == ["TEST"]  # REST get_snapshot was still called

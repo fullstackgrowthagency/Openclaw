@@ -206,24 +206,36 @@ What's implemented and tested:
   per-tick `get_positions()` cache (several candidates needing it in the
   same pass now share one real call). See `docs/ARCHITECTURE.md`'s
   "Performance/rate-limit rehaul" section for the full breakdown.
-- **Streaming market data -- confirmed live and wired into production
-  (2026-08-11).** `WebullBrokerClient.subscribe_quotes` is a real
-  implementation now, not a stub: it connects to the confirmed sandbox
-  MQTT host **`data-api.sandbox.webull.com`** (found by ruling out a
-  timing-race theory and a cross-environment host mismatch -- see
+- **Streaming market data -- confirmed live and wired into production,
+  now covering pre-entry monitoring too (2026-08-11).**
+  `WebullBrokerClient.subscribe_quotes` is a real implementation, not a
+  stub: it connects to the confirmed sandbox MQTT host
+  **`data-api.sandbox.webull.com`** (found by ruling out a timing-race
+  theory and a cross-environment host mismatch -- see
   `docs/ARCHITECTURE.md`'s "Streaming market data" section for the full
-  writeup) and subscribes to the richer `SNAPSHOT` sub_type (price,
-  OHLC, volume, extended-hours variants). `TradingLoop` uses it for
-  exit-management price checks on positions already `ENTERED`/`MANAGING`
-  only -- a symbol is subscribed the moment its broker-side bracket is
-  attached (fresh fill or reconciled-on-restart adoption), falls back to
-  REST polling automatically if nothing has streamed in the last 10s, and
-  is excluded from that tick's batched REST `get_snapshots` call once
-  it's actively streaming. Pre-entry scoring and entry-time spread gating
-  are untouched -- they still poll REST, since the `SNAPSHOT` feed has no
-  bid/ask. One still-open loose end from the original verification: a
-  "Protocol not supported" MQTT error observed during the verify script's
-  own shutdown sequence on every test run, not yet understood.
+  writeup) and subscribes to **both** the `SNAPSHOT` sub_type (price,
+  OHLC, volume, extended-hours variants) and the `QUOTE` sub_type
+  (top-of-book bid/ask), merging the latest of each into one complete
+  snapshot per symbol before it ever reaches `TradingLoop` -- a symbol
+  with only one of the two cached never gets pushed at all, so a caller
+  can never see a fabricated `bid=0`/`ask=0` (which would otherwise read
+  as a fake zero spread to the entry-eligibility gate). `TradingLoop`
+  uses the merged stream for every pre-entry and exit-management state --
+  `WATCHING`/`HEATING_UP`/`ARMED` as well as `ENTERED`/`MANAGING` -- with
+  `DISCOVERED`/`TRIGGERED` excluded. A position's symbol is subscribed
+  the moment its broker-side bracket is attached; a watch-stage
+  candidate's symbol is (re-)subscribed once per tick (cheap once already
+  requested). Either way, it falls back to REST polling automatically if
+  nothing has streamed in the last 10s, and is excluded from that tick's
+  batched REST `get_snapshots` call once it's actively streaming. Known
+  open tradeoff: there's still no unsubscribe path for a symbol that
+  leaves every streaming-eligible state, so subscriptions only grow for
+  the life of the process -- now covering a much larger population than
+  just open positions, whether Webull's subscription count/rate has a
+  practical ceiling this could approach is not yet confirmed. One other
+  still-open loose end from the original verification: a "Protocol not
+  supported" MQTT error observed during the verify script's own shutdown
+  sequence on every test run, not yet understood.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry

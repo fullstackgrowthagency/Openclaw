@@ -1,29 +1,40 @@
 """
 Poll-based production run-loop.
 
-Streaming market data (2026-08-11): for a broker that implements
-`subscribe_quotes` (confirmed live for `WebullBrokerClient` against the
-sandbox MQTT host -- see that module's docstring), this loop uses a
-pushed live snapshot in place of a REST poll, but *only* for
-exit-management price checks on positions already in
-`CandidateState.ENTERED`/`MANAGING`. A symbol is subscribed the moment
-its broker-side bracket is attached (`_confirm_entry_filled`'s fresh-fill
-path and `reconcile_positions_from_broker`'s adoption-on-restart path,
-both via `_ensure_streaming_subscribed`); `_on_streaming_snapshot` stores
-each pushed update keyed by symbol, and `_get_streaming_snapshot` returns
-it only if it arrived within `TradingLoopConfig.streaming_staleness_seconds`
+Streaming market data (2026-08-11, extended 2026-08-11): for a broker that
+implements `subscribe_quotes` (confirmed live for `WebullBrokerClient`
+against the sandbox MQTT host -- see that module's docstring), this loop
+uses a pushed live snapshot in place of a REST poll for every state in
+`_STREAMING_ELIGIBLE_STATES` -- both exit-management price checks
+(`ENTERED`/`MANAGING`) and pre-entry monitoring
+(`WATCHING`/`HEATING_UP`/`ARMED`). `DISCOVERED` (never has anything to
+subscribe -- a candidate leaves it on its first tick) and `TRIGGERED`
+(`_poll_pending_entry` manages a pending order, not a live price) are
+excluded. A position's symbol is subscribed the moment its broker-side
+bracket is attached (`_confirm_entry_filled`'s fresh-fill path and
+`reconcile_positions_from_broker`'s adoption-on-restart path); a watch-
+stage candidate's symbol is (re-)subscribed once per tick in
+`_process_all_candidates` (a no-op once already requested -- see
+`_ensure_streaming_subscribed`). `_on_streaming_snapshot` stores each
+pushed update keyed by symbol, and `_get_streaming_snapshot` returns it
+only if it arrived within `TradingLoopConfig.streaming_staleness_seconds`
 (10s default) -- otherwise `_process_candidate_inner` falls back to the
 REST-polled snapshot exactly as before, and `_process_all_candidates`'s
 batched `get_snapshots` call skips any symbol already covered by a fresh
-stream. Pre-entry momentum scoring and entry-time spread gating are
-deliberately NOT switched to streaming -- the subscribed `SNAPSHOT`
-message type carries no bid/ask, and only exit-management
-(`PositionManager.check_exit`, which only ever reads
-`last_price`/`vwap`/`timestamp`/`symbol`) doesn't need it. If
-`subscribe_quotes` isn't implemented by the broker in use (e.g.
-`PaperBrokerClient`) or a subscribe call raises, this loop permanently
-falls back to pure REST polling for that run rather than retrying a call
-that can't succeed -- see `_ensure_streaming_subscribed`'s docstring.
+stream. Pre-entry momentum scoring and entry-time spread gating are safe
+to run on streamed data because `WebullBrokerClient.subscribe_quotes`
+subscribes both the `SNAPSHOT` (price/OHLC/volume) and `QUOTE` (top-of-
+book bid/ask) message types and merges them per symbol before this loop
+ever sees a pushed update -- see `WebullBrokerClient._merge_streamed_snapshot`'s
+docstring for why a symbol with only one of the two cached never reaches
+`on_update` at all (fails closed to "nothing streamed yet," not to a
+fabricated zero spread). If `subscribe_quotes` isn't implemented by the
+broker in use (e.g. `PaperBrokerClient`) or a subscribe call raises, this
+loop permanently falls back to pure REST polling for that run rather than
+retrying a call that can't succeed -- see `_ensure_streaming_subscribed`'s
+docstring, including its note on the still-unconfirmed long-run
+subscription-count/rate tradeoff of covering the much larger watch-stage
+population this way.
 
 Key design point: `WebullBrokerClient.place_order` returns status=SUBMITTED,
 not FILLED (a 2xx response means Webull accepted the order for processing,
@@ -234,6 +245,16 @@ class TradingLoop:
     # PositionManager's stop/target/trailing-stop rules take over from
     # there, never resistance_level. Used by _refresh_stale_resistance_levels.
     _RESISTANCE_REFRESH_STATES = (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED)
+
+    # States that use live-streamed prices in place of a REST poll -- see
+    # _get_streaming_snapshot/_ensure_streaming_subscribed. Deliberately
+    # excludes DISCOVERED (transient -- a candidate leaves it on its very
+    # first tick, before there's ever anything to subscribe) and TRIGGERED
+    # (_poll_pending_entry manages a pending order, not a live price).
+    _STREAMING_ELIGIBLE_STATES = (
+        CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
+        CandidateState.ENTERED, CandidateState.MANAGING,
+    )
 
     def __init__(
         self,
@@ -624,11 +645,13 @@ class TradingLoop:
     def _ensure_streaming_subscribed(self, symbols: list[str]) -> None:
         """Best-effort: asks the broker to start streaming live prices for
         `symbols` via broker.subscribe_quotes, so _get_streaming_snapshot
-        has something fresh to serve on subsequent ticks for a MANAGING/
-        ENTERED position -- see _confirm_entry_filled and
-        reconcile_positions_from_broker's adoption path for where this is
-        actually called (right when a position starts being tracked,
-        mirroring _attach_broker_bracket's own call sites).
+        has something fresh to serve on subsequent ticks for any candidate
+        in a _STREAMING_ELIGIBLE_STATES state. Called from two places:
+        _confirm_entry_filled/reconcile_positions_from_broker's adoption
+        path (right when a position starts being tracked, mirroring
+        _attach_broker_bracket's own call sites) for ENTERED/MANAGING, and
+        _process_all_candidates once per tick for every currently
+        WATCHING/HEATING_UP/ARMED candidate.
 
         subscribe_quotes is a required BrokerClient ABC method (unlike
         get_snapshots/list_open_orders/place_oco_bracket, which are
@@ -644,11 +667,21 @@ class TradingLoop:
 
         Only ever subscribes symbols not already requested this process's
         lifetime (self._streaming_requested_symbols) -- there is
-        deliberately no unsubscribe path for a symbol whose position later
-        closes (see this method's callers): the extra ticks for an
-        untracked symbol are harmless (nothing reads them -- only
-        MANAGING/ENTERED candidates ever call _get_streaming_snapshot) and
-        simpler than tracking exactly when it's safe to unsubscribe."""
+        deliberately no unsubscribe path for a symbol that later leaves
+        every _STREAMING_ELIGIBLE_STATES state (a closed position, a
+        candidate that cooled off back to REJECTED): the extra ticks for
+        an unwatched symbol are harmless (nothing reads them --
+        _get_streaming_snapshot is only ever consulted for a candidate
+        currently in one of those states) and simpler than tracking
+        exactly when it's safe to unsubscribe. Known tradeoff worth
+        watching in production, now that this covers the much larger
+        WATCHING/HEATING_UP/ARMED population rather than just open
+        positions: subscriptions only ever grow for the life of the
+        process, one entry per symbol BroadScanner has ever surfaced --
+        see docs/ARCHITECTURE.md's "Streaming market data" section for
+        whether Webull's per-session subscription count/rate has a
+        practical ceiling this could approach over a long trading day
+        (not yet confirmed either way)."""
         if self._streaming_supported is False:
             return
         new_symbols = [s for s in symbols if s not in self._streaming_requested_symbols]
@@ -661,8 +694,8 @@ class TradingLoop:
             return
         except Exception:
             logger.warning(
-                "subscribe_quotes failed for %s; these symbols' MANAGING/ENTERED price checks "
-                "fall back to REST polling instead.", new_symbols, exc_info=True,
+                "subscribe_quotes failed for %s; these symbols fall back to REST polling instead.",
+                new_symbols, exc_info=True,
             )
             return
         self._streaming_supported = True
@@ -700,15 +733,19 @@ class TradingLoop:
             return
 
         snapshot = None
-        if candidate.state in (CandidateState.ENTERED, CandidateState.MANAGING):
-            # Prefer a fresh live-streamed price over REST for exactly
-            # this state pair -- see _get_streaming_snapshot's docstring.
-            # Pre-entry states (WATCHING/HEATING_UP/ARMED/TRIGGERED) never
-            # take this path: momentum scoring needs volume-derived
-            # metrics and RiskEngine's spread gate needs bid/ask, neither
-            # of which the streamed SNAPSHOT feed carries (see
-            # WebullBrokerClient._snapshot_from_streamed_result's
-            # docstring) -- REST remains the only source for those.
+        if candidate.state in self._STREAMING_ELIGIBLE_STATES:
+            # Prefer a fresh live-streamed price over REST -- see
+            # _get_streaming_snapshot's docstring. Covers both exit
+            # management (ENTERED/MANAGING) and pre-entry monitoring
+            # (WATCHING/HEATING_UP/ARMED); DISCOVERED/TRIGGERED are
+            # excluded -- see _STREAMING_ELIGIBLE_STATES' comment. Safe to
+            # use for pre-entry scoring/spread gating too now that
+            # WebullBrokerClient merges the QUOTE stream's real bid/ask
+            # into the pushed snapshot (see
+            # WebullBrokerClient._merge_streamed_snapshot's docstring) --
+            # a symbol whose QUOTE side hasn't caught up yet simply has no
+            # merged snapshot at all yet (None here), same fallback as any
+            # other cold-start case.
             snapshot = self._get_streaming_snapshot(candidate.symbol, now)
 
         if snapshot is None:
@@ -1755,6 +1792,21 @@ class TradingLoop:
 
         candidates = self._snapshot_candidates()
 
+        # Keep every pre-entry candidate currently being monitored
+        # subscribed to live prices -- cheap to call every tick:
+        # _ensure_streaming_subscribed already no-ops for a symbol already
+        # requested this process's lifetime, so in steady state this is
+        # just a membership check per candidate, not a real subscribe call.
+        # ENTERED/MANAGING positions are subscribed separately, right when
+        # they start being tracked -- see _confirm_entry_filled and
+        # reconcile_positions_from_broker.
+        watch_stage_symbols = [
+            c.symbol for c in candidates
+            if c.state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED)
+        ]
+        if watch_stage_symbols:
+            self._ensure_streaming_subscribed(watch_stage_symbols)
+
         # Batch-fetch snapshots for every candidate that will actually need
         # one this cycle (mirrors _process_candidate_inner's own REJECTED/
         # COOLDOWN skip below) in as few Webull-paced round-trips as
@@ -1775,16 +1827,17 @@ class TradingLoop:
             symbols_needing_snapshot = [
                 c.symbol for c in candidates
                 if c.state not in (CandidateState.REJECTED, CandidateState.COOLDOWN)
-                # A MANAGING/ENTERED candidate with a fresh live-streamed
-                # price (see _get_streaming_snapshot) doesn't need this
-                # REST call at all -- _process_candidate_inner will use
-                # the streamed value directly. Excluding it here (not just
-                # having _process_candidate_inner prefer it once fetched)
-                # is what actually realizes streaming's rate-limit
-                # savings; leaving it in this batch would fetch it over
-                # REST anyway and simply discard that fetch unused.
+                # A candidate in any _STREAMING_ELIGIBLE_STATES state with
+                # a fresh live-streamed price (see _get_streaming_snapshot)
+                # doesn't need this REST call at all --
+                # _process_candidate_inner will use the streamed value
+                # directly. Excluding it here (not just having
+                # _process_candidate_inner prefer it once fetched) is what
+                # actually realizes streaming's rate-limit savings; leaving
+                # it in this batch would fetch it over REST anyway and
+                # simply discard that fetch unused.
                 and not (
-                    c.state in (CandidateState.ENTERED, CandidateState.MANAGING)
+                    c.state in self._STREAMING_ELIGIBLE_STATES
                     and self._get_streaming_snapshot(c.symbol, now) is not None
                 )
             ]

@@ -1644,48 +1644,80 @@ yet understood well enough to rule that out completely. Worth watching
 for whether it recurs once a long-running integration is built and left
 connected for real, rather than assumed away.
 
-`WebullBrokerClient.subscribe_quotes` is now implemented for real: it
-lazily creates one persistent `DataStreamingClient` per broker instance
-(reused across calls, not one per symbol), picks the confirmed
+`WebullBrokerClient.subscribe_quotes` is implemented for real: it lazily
+creates one persistent `DataStreamingClient` per broker instance (reused
+across calls, not one per symbol), picks the confirmed
 `data-api.sandbox.webull.com` host when `TradingMode.SANDBOX`
 (`mqtt_host=None`, letting the SDK auto-resolve to production, otherwise),
-subscribes each new symbol to the richer `SNAPSHOT` sub_type (price,
-open/high/low/volume, pre_close, plus `ext_*`/`ovn_*` extended-hours
-variants -- not the bare-bones `QUOTE` sub_type, which carries only
-bid/ask), and maps each message to a `MarketSnapshot` via
-`_snapshot_from_streamed_result`. Every callback is wrapped in its own
-try/except so one malformed message or a raising `on_update` can never
-kill the MQTT thread.
+and subscribes each new symbol to **both** streaming message types --
+`SNAPSHOT` (price, open/high/low/volume, pre_close, plus `ext_*`/`ovn_*`
+extended-hours variants) and `QUOTE` (top-of-book bid/ask, confirmed live
+back in the very first verification run, before `SNAPSHOT` was
+discovered). Each message type is mapped separately
+(`_snapshot_from_streamed_result` / `_quote_top_of_book`) and cached per
+symbol; `_merge_streamed_snapshot` combines the latest of each into one
+complete `MarketSnapshot` before it's ever handed to `on_update`. A
+symbol's very first message (of either type) is cached but does **not**
+trigger `on_update` -- only once both a real `SNAPSHOT` and a real
+`QUOTE` have been seen for it, so a caller never receives a snapshot with
+a fabricated `bid=0.0`/`ask=0.0`. This matters concretely:
+`metrics.calculations.bid_ask_spread` treats a non-positive bid or ask as
+"spread is 0.0" (its documented behavior for missing data), which would
+otherwise make `CandidateWatcher.update`'s spread-eligibility gate read a
+symbol whose quote side simply hasn't arrived yet as "spread is fine" --
+a fail-open this project isn't willing to accept for entry-risk logic.
+Every message callback is wrapped in its own try/except so one malformed
+message or a raising `on_update` can never kill the MQTT thread.
 
-**Where it's wired into `TradingLoop` -- and where it deliberately isn't**:
-streaming replaces polling *only* for exit-management price checks on
-positions already in `CandidateState.ENTERED`/`MANAGING`
-(`_process_candidate_inner` prefers `_get_streaming_snapshot` there,
-falling back to the prefetched/REST snapshot only when nothing fresh has
-streamed in the last `TradingLoopConfig.streaming_staleness_seconds`
-[10s default]). Pre-entry momentum scoring and entry-time spread gating
-still go through REST `get_snapshot`/`get_snapshots` exclusively, on
-purpose -- the `SNAPSHOT` feed carries no bid/ask, and
-`PositionManager.check_exit` for an already-open position only ever
-reads `last_price`/`vwap`/`timestamp`/`symbol`, so the field gap doesn't
-matter for that one narrow use.
+**Where it's wired into `TradingLoop`** (extended 2026-08-11 from
+exit-management-only to also cover pre-entry monitoring, now that the
+merge above supplies real bid/ask): streaming replaces polling for every
+state in `TradingLoop._STREAMING_ELIGIBLE_STATES` --
+`WATCHING`/`HEATING_UP`/`ARMED` (pre-entry momentum scoring and spread
+gating) as well as `ENTERED`/`MANAGING` (exit-management price checks).
+`DISCOVERED` (a candidate leaves it on its very first tick, before
+there's ever anything to subscribe) and `TRIGGERED`
+(`_poll_pending_entry` manages a pending order, not a live price) are
+excluded on purpose. `_process_candidate_inner` prefers
+`_get_streaming_snapshot` for any eligible state, falling back to the
+prefetched/REST snapshot only when nothing fresh has streamed in the
+last `TradingLoopConfig.streaming_staleness_seconds` (10s default).
 
-A symbol is subscribed exactly twice, both right after its position gets
-a broker-side bracket attached: once in `_confirm_entry_filled` (the
-normal fresh-entry path) and once in `reconcile_positions_from_broker`'s
-adoption loop (a position discovered already open on broker restart).
-`_ensure_streaming_subscribed` tracks already-requested symbols so a
-later call for the same symbol is a no-op, and if `subscribe_quotes`
-ever raises `NotImplementedError` (i.e. running against `PaperBrokerClient`,
-which deliberately doesn't implement streaming) it permanently flips
-`_streaming_supported = False` so every subsequent tick skips straight to
-REST polling instead of retrying a call that can never succeed. Any other
-exception (a real connection failure) is logged and swallowed without
-disabling streaming permanently, since that failure mode is worth retrying.
+Two different subscription triggers feed the same underlying mechanism:
+a position's symbol is subscribed exactly once, right after its
+broker-side bracket is attached (`_confirm_entry_filled`'s fresh-entry
+path, or `reconcile_positions_from_broker`'s adoption-on-restart path);
+a watch-stage candidate's symbol is (re-)subscribed once per tick from
+`_process_all_candidates`, for every currently `WATCHING`/`HEATING_UP`/
+`ARMED` candidate. `_ensure_streaming_subscribed` tracks already-
+requested symbols for the life of the process, so the per-tick call is
+cheap in steady state (a membership check, not a real subscribe) and a
+later call for an already-subscribed symbol is always a no-op. If
+`subscribe_quotes` ever raises `NotImplementedError` (i.e. running
+against `PaperBrokerClient`, which deliberately doesn't implement
+streaming) it permanently flips `_streaming_supported = False` so every
+subsequent tick skips straight to REST polling instead of retrying a
+call that can never succeed. Any other exception (a real connection
+failure) is logged and swallowed without disabling streaming
+permanently, since that failure mode is worth retrying.
 `_process_all_candidates`'s batched `get_snapshots` call for the tick
-also excludes any `ENTERED`/`MANAGING` symbol that already has a fresh
-streamed snapshot, so a covered symbol never pays for both a stream *and*
-a REST call on the same tick.
+also excludes any streaming-eligible-state symbol that already has a
+fresh streamed snapshot, so a covered symbol never pays for both a
+stream *and* a REST call on the same tick.
+
+**Known open tradeoff**: there is deliberately no unsubscribe path for a
+symbol that leaves every streaming-eligible state (a closed position, a
+candidate that gets `REJECTED`) -- subscriptions only ever grow for the
+life of the process. That was a reasonable simplification when only open
+positions (a handful at a time) were covered; now that every
+`WATCHING`/`HEATING_UP`/`ARMED` candidate BroadScanner has ever surfaced
+is included too, the subscribed-symbol count could grow meaningfully
+larger over a full trading day. Whether Webull's per-session subscription
+count or rate has a practical ceiling this could approach is **not yet
+confirmed either way** -- worth watching in production (and worth a
+live-verified unsubscribe path as a follow-up if it turns out to matter),
+consistent with this project's rule of not building for an unconfirmed
+constraint.
 
 ## Structural vs. temporary disqualification
 
