@@ -80,6 +80,25 @@ def test_order_payload_includes_limit_price_when_set():
     assert payload["limit_price"] == "25.5"
 
 
+def test_order_payload_includes_trailing_fields_when_set():
+    # NOT YET independently confirmed live for a US-market equity on this
+    # account -- see _ORDER_TYPE_TO_WEBULL's docstring and
+    # scripts/verify_trailing_stop.py. This only tests that the payload
+    # this codebase WOULD send matches the SDK's documented field names
+    # (webull.trade.request.place_order_request.py's set_trailing_type/
+    # set_trailing_stop_step), not that Webull accepts it.
+    client = _client()
+    order = Order(
+        symbol="GME", side=OrderSide.SELL, order_type=OrderType.TRAILING_STOP,
+        quantity=100, trailing_pct=3.0, client_order_id="x",
+    )
+    payload = client._order_payload(order)
+    assert payload["order_type"] == "TRAILING_STOP_LOSS"
+    assert payload["trailing_type"] == "PERCENTAGE"
+    assert payload["trailing_stop_step"] == "3.0"
+    assert "stop_price" not in payload
+
+
 def test_order_payload_maps_sell_short_to_short_side():
     client = _client()
     order = Order(

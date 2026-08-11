@@ -283,6 +283,15 @@ class Order:
     time_in_force: TimeInForce = TimeInForce.DAY
     limit_price: Optional[float] = None
     stop_price: Optional[float] = None
+    # Only set for order_type=TRAILING_STOP -- the trail distance as a
+    # percentage of price (e.g. 3.0 = trails 3% behind the high since the
+    # order was placed). Percentage-only in this model even though Webull
+    # also supports a fixed dollar AMOUNT trailing_type -- this bot only
+    # ever trails by PositionManagementConfig.trailing_stop_pct, a
+    # percentage, so there's no use case for the other mode yet. See
+    # WebullBrokerClient._order_payload for how this maps to Webull's
+    # trailing_type/trailing_stop_step fields.
+    trailing_pct: Optional[float] = None
     status: OrderStatus = OrderStatus.PENDING
     client_order_id: Optional[str] = None
     broker_order_id: Optional[str] = None
@@ -352,7 +361,25 @@ class Position:
     # via breakeven/trailing, with no way to reach the broker itself) so
     # _sync_broker_protective_orders only cancels+replaces the resting
     # order when the two have actually diverged, not on every tick.
+    # Meaningless (and unused) once broker_stop_is_trailing is True -- see
+    # that field.
     broker_stop_price_synced: Optional[float] = None
+    # True once broker_stop_order_id refers to a native TRAILING_STOP
+    # order (see OrderManager.place_resting_trailing_stop) rather than a
+    # plain STOP -- only ever set post-partial-exit, when
+    # PositionManager's own trailing-stop math would otherwise be pushing
+    # a moving stop_price to the broker via cancel+replace every time it
+    # ratchets (see _sync_broker_protective_orders). When True, the
+    # broker is trailing the order itself, so _sync_broker_protective_orders
+    # has nothing left to push -- it's a no-op for this position from here
+    # on, for as long as this stays True. Always False before the first
+    # partial exit (pre-partial, the resting order is a plain stop+target
+    # OCO bracket -- see RiskConfig.stop_loss_pct/_attach_broker_bracket's
+    # docstrings for why trailing never applies that early) and for any
+    # position too small to ever take a partial (see
+    # PositionManager.check_exit's docstring) -- those ride on a plain
+    # STOP for their whole lifetime, same as before this field existed.
+    broker_stop_is_trailing: bool = False
 
 
 @dataclass

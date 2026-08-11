@@ -261,7 +261,7 @@ class _RestingBroker(_FakeBroker):
         return stop_order, target_order
 
     def place_order(self, order):
-        if order.order_type == OrderType.STOP:
+        if order.order_type in (OrderType.STOP, OrderType.TRAILING_STOP):
             order.broker_order_id = order.client_order_id or f"lone-stop-{len(self._lone_stops)}"
             order.status = OrderStatus.SUBMITTED
             self._resting_orders[order.broker_order_id] = order
@@ -2066,6 +2066,15 @@ def test_attach_broker_bracket_places_stop_and_target_when_supported():
 
 
 def test_attach_broker_bracket_places_lone_stop_when_no_target():
+    # target_price=None here because it's too small to split into two
+    # whole-share halves (see _attach_broker_bracket's docstring) --
+    # partial_exit_taken is still False (defaults False, not passed), so
+    # this must NOT get a trailing stop either: a position that never
+    # takes a partial rides on a plain stop + breakeven for its whole
+    # lifetime (see PositionManager.check_exit's docstring). See
+    # test_attach_broker_bracket_uses_trailing_stop_once_partial_exit_taken
+    # below for the genuinely-post-partial case, which DOES get a trailing
+    # stop.
     broker = _RestingBroker()
     loop, candidate = _armed_candidate_setup(broker)
     position = Position(
@@ -2078,8 +2087,10 @@ def test_attach_broker_bracket_places_lone_stop_when_no_target():
 
     assert position.broker_stop_order_id is not None
     assert position.broker_target_order_id is None
+    assert position.broker_stop_is_trailing is False
     assert broker._brackets == []
     assert len(broker._lone_stops) == 1
+    assert broker._lone_stops[0].order_type == OrderType.STOP
 
 
 def test_attach_broker_bracket_is_a_noop_without_broker_support():
@@ -2115,6 +2126,70 @@ def test_attach_broker_bracket_never_rearms_target_after_partial_exit_taken():
     assert position.broker_target_order_id is None
     assert broker._brackets == []
     assert len(broker._lone_stops) == 1
+
+
+def test_attach_broker_bracket_uses_trailing_stop_once_partial_exit_taken():
+    # This is the genuinely-post-partial case (unlike the
+    # too-small-to-split case in test_attach_broker_bracket_places_lone_stop_when_no_target
+    # above, which also has target_price=None but partial_exit_taken=False)
+    # -- the remainder gets protected with a native broker-side
+    # TRAILING_STOP instead of a plain STOP, using the live
+    # PositionManager.config.trailing_stop_pct (default 3.0).
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=5, avg_entry_price=5.00,
+        stop_price=4.80, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test", partial_exit_taken=True,
+    )
+
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert position.broker_stop_order_id is not None
+    assert position.broker_target_order_id is None
+    assert position.broker_stop_is_trailing is True
+    assert len(broker._lone_stops) == 1
+    trailing_order = broker._lone_stops[0]
+    assert trailing_order.order_type == OrderType.TRAILING_STOP
+    assert trailing_order.trailing_pct == 3.0
+
+
+def test_attach_broker_bracket_falls_back_to_plain_stop_when_trailing_disabled():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.position_manager.config.trailing_stop_pct = None  # trailing rule disabled
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=5, avg_entry_price=5.00,
+        stop_price=4.80, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test", partial_exit_taken=True,
+    )
+
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert position.broker_stop_is_trailing is False
+    assert len(broker._lone_stops) == 1
+    assert broker._lone_stops[0].order_type == OrderType.STOP
+
+
+def test_attach_broker_bracket_cancels_a_leftover_resting_order_before_going_trailing():
+    # Defensive belt-and-suspenders case (see _attach_broker_bracket's
+    # docstring): if a resting order was somehow still attached when this
+    # transitions to trailing, it must be cancelled first -- a
+    # TRAILING_STOP can't be added while another resting sell order still
+    # reserves the same shares.
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=5, avg_entry_price=5.00,
+        stop_price=4.80, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test", partial_exit_taken=True,
+    )
+    position.broker_stop_order_id = "stale-stop-id"
+
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert "stale-stop-id" in broker._cancelled
+    assert position.broker_stop_is_trailing is True
 
 
 def test_confirm_entry_filled_attaches_broker_bracket_when_supported():
@@ -2320,13 +2395,15 @@ def test_poll_broker_bracket_finalizes_partial_exit_on_target_fill_and_reprotect
     assert position.partial_exit_taken is True
     assert len(trades) == 1
     assert trades[0].exit_reason == ExitReason.PARTIAL_PROFIT_TARGET
-    # The remainder was immediately re-protected with a fresh resting stop
-    # and no target (never re-armed after one partial -- see
-    # _attach_broker_bracket).
+    # The remainder was immediately re-protected with a fresh resting
+    # TRAILING_STOP (partial_exit_taken is now True) and no target (never
+    # re-armed after one partial -- see _attach_broker_bracket).
     assert position.broker_stop_order_id is not None
     assert position.broker_target_order_id is None
+    assert position.broker_stop_is_trailing is True
     assert len(broker._brackets) == 1  # no second bracket -- just a lone stop
     assert len(broker._lone_stops) == 1
+    assert broker._lone_stops[0].order_type == OrderType.TRAILING_STOP
 
 
 def test_sync_broker_protective_orders_replaces_stop_when_price_moved():
@@ -2370,6 +2447,30 @@ def test_sync_broker_protective_orders_replaces_both_legs_when_target_still_acti
     assert position.broker_target_order_id is not None
     assert position.broker_target_order_id != old_target_id
     assert len(broker._brackets) == 2  # original + the replacement
+
+
+def test_sync_broker_protective_orders_is_a_noop_for_a_trailing_stop():
+    # Once broker_stop_is_trailing is True, Webull is moving the resting
+    # order itself -- there is nothing left for this process to push, no
+    # matter how far position.stop_price has moved in software (that
+    # software value is purely informational/tracking at this point, see
+    # Position.broker_stop_is_trailing's docstring).
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=5, avg_entry_price=5.00,
+        stop_price=4.80, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test", partial_exit_taken=True,
+    )
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    assert position.broker_stop_is_trailing is True
+    trailing_order_id = position.broker_stop_order_id
+
+    position.stop_price = 5.50  # a large software-side trailing move
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+
+    assert trailing_order_id not in broker._cancelled
+    assert position.broker_stop_order_id == trailing_order_id
 
 
 def test_sync_broker_protective_orders_is_a_noop_when_stop_unchanged():

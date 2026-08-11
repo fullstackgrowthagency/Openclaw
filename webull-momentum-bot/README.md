@@ -197,6 +197,29 @@ What's implemented and tested:
   exactly the gap the RDGT incident exposed in the first place. See
   `docs/ARCHITECTURE.md`'s "Broker-side (resting) stop/target management"
   section (especially "Retrying a failed attach") for the full lifecycle.
+- **The post-partial-exit stop is now a native broker-side `TRAILING_STOP`
+  order, not a plain `STOP` this process keeps cancelling and
+  re-placing -- added 2026-08-11.** Once a position has taken its one
+  partial exit (target hit, half sold), `_attach_broker_bracket` now
+  places a real `TRAILING_STOP_LOSS` order (Webull trails it itself, via
+  `trailing_type`/`trailing_stop_step`) instead of a plain `STOP` that
+  `_sync_broker_protective_orders` would otherwise cancel+replace every
+  time `PositionManager`'s own trailing-stop math ratchets it. Wired in at
+  the account owner's explicit instruction that this order type is
+  supported for US equities on this account -- **NOT yet independently
+  live-verified the way the plain `OCO` bracket was** (the SDK's own
+  sample only demonstrates `TRAILING_STOP_LOSS` against the HK market);
+  `scripts/verify_trailing_stop.py` exists to confirm it during the next
+  core-hours window, and `WebullBrokerClient._ORDER_TYPE_TO_WEBULL`'s
+  docstring says exactly what to revert if that comes back negative.
+  Unaffected: the pre-partial stop+target bracket (still plain
+  `STOP`+`LIMIT`), and a too-small-to-split position that never takes a
+  partial (rides on a plain `STOP` + breakeven for its whole lifetime, as
+  before). Defensively cancels any leftover resting order before adding
+  the trailing stop, since a `TRAILING_STOP` can't be added while another
+  resting sell order still reserves the same shares. See
+  `docs/ARCHITECTURE.md`'s "Broker-side (resting) stop/target management"
+  section for the full lifecycle.
 - **A `TRIGGERED` entry gets a second, independent fill check -- added
   2026-08-11.** Order-status polling (`get_order_status`) was the only way
   this loop noticed an entry had filled, and this project has already

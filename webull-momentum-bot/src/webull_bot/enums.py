@@ -43,6 +43,12 @@ class OrderType(str, Enum):
     LIMIT = "limit"
     STOP = "stop"
     STOP_LIMIT = "stop_limit"
+    # A native broker-side trailing stop (see Order.trailing_pct) --
+    # Webull's TRAILING_STOP_LOSS. Only ever placed by
+    # OrderManager.place_resting_trailing_stop against a broker that
+    # supports resting orders; PaperBrokerClient/backtests never see this
+    # order type (see TradingLoop._attach_broker_bracket's docstring).
+    TRAILING_STOP = "trailing_stop"
 
 
 class TimeInForce(str, Enum):

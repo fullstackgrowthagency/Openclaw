@@ -209,6 +209,20 @@ _ORDER_TYPE_TO_WEBULL = {
     # regardless of order direction -- confirmed via webull.trade.common.order_type.
     OrderType.STOP: "STOP_LOSS",
     OrderType.STOP_LIMIT: "STOP_LOSS_LIMIT",
+    # webull.trade.common.order_type.OrderType lists TRAILING_STOP_LOSS as a
+    # real order type (trailing_type/trailing_stop_step fields -- see
+    # _order_payload). NOT YET independently confirmed live for a US-market
+    # equity on this account as of this writing -- the SDK's own sample
+    # (samples/trade/trade_client_v3.py) only demonstrates it against
+    # market="HK". scripts/verify_trailing_stop.py exists to confirm this
+    # the same way verify_bracket_orders.py confirmed the plain OCO
+    # bracket; wired in ahead of that confirmation at the user's explicit
+    # instruction ("I know for a fact trailing stop loss orders are
+    # allowed") rather than waiting for the next core-hours window -- if
+    # that verification comes back negative, this mapping and everything
+    # in TradingLoop that reads Position.broker_stop_is_trailing needs
+    # reverting, not just this one line.
+    OrderType.TRAILING_STOP: "TRAILING_STOP_LOSS",
 }
 
 _TIF_TO_WEBULL = {
@@ -1130,6 +1144,17 @@ class WebullBrokerClient(BrokerClient):
             # MARKET orders (see execution/order_manager.py), so this path
             # has not been exercised live. Confirm before relying on it.
             payload["stop_price"] = str(order.stop_price)
+        if order.trailing_pct is not None:
+            # PERCENTAGE-only -- see Order.trailing_pct's docstring for why
+            # this model has no AMOUNT-mode field to map from. Field names
+            # per webull.trade.request.place_order_request.py's
+            # set_trailing_type/set_trailing_stop_step and confirmed
+            # present in the SDK's own TRAILING_STOP_LOSS sample -- whether
+            # this account/endpoint actually ACCEPTS them for a US-market
+            # equity is the open question scripts/verify_trailing_stop.py
+            # exists to answer (see _ORDER_TYPE_TO_WEBULL's docstring).
+            payload["trailing_type"] = "PERCENTAGE"
+            payload["trailing_stop_step"] = str(order.trailing_pct)
         return payload
 
     def place_order(self, order: Order) -> Order:

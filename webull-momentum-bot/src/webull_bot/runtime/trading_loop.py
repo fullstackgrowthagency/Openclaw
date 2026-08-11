@@ -68,8 +68,16 @@ confirmed, `_poll_broker_bracket` notices when either leg fills (finalizing
 the trade the same way a software-submitted exit would, without this loop
 ever having submitted the fill-causing order itself), and
 `_sync_broker_protective_orders` cancels+replaces the resting stop whenever
-`PositionManager`'s own breakeven/trailing math moves `position.stop_price`.
-`PositionManager.check_exit` steps aside from its own stop/target checks
+`PositionManager`'s own breakeven/trailing math moves `position.stop_price`
+-- EXCEPT once a position's protective order has become a native
+TRAILING_STOP (see `Position.broker_stop_is_trailing`'s docstring):
+`_attach_broker_bracket` switches to that order type instead of a plain
+STOP the moment a position takes its one partial exit (never before --
+trailing only ever applies post-partial, same as the pure-software path),
+and from then on Webull moves the stop itself, so
+`_sync_broker_protective_orders` has nothing left to push and is a no-op
+for that position for its remaining lifetime. `PositionManager.check_exit`
+steps aside from its own stop/target checks
 for a broker-managed position (see its docstring) but still owns
 VWAP-failure/time-limit, which have no broker-side equivalent -- a
 software-submitted exit for either of those, and the kill-switch/end-of-
@@ -1239,6 +1247,37 @@ class TradingLoop:
             else:
                 target_price = None
 
+        # Post-partial-exit specifically (not just "no target leg" --
+        # see Position.broker_stop_is_trailing's docstring for why a
+        # too-small-to-split position, which also has target_price=None
+        # here but partial_exit_taken=False, must NOT take this branch),
+        # protect the remainder with a native broker-side TRAILING_STOP
+        # order instead of a plain STOP. PositionManager's own
+        # trailing-stop math (_maybe_update_trailing_stop) still runs and
+        # mutates position.stop_price every tick either way -- purely for
+        # display/tracking once this is True, since Webull is now the one
+        # actually moving the resting order (see
+        # _sync_broker_protective_orders' skip for this case). Disabled
+        # (falls through to a plain resting stop, identical to before this
+        # existed) if trailing itself is off (trailing_stop_pct None/0).
+        trailing_pct = self.position_manager.config.trailing_stop_pct
+        use_trailing_stop = target_price is None and position.partial_exit_taken and trailing_pct
+
+        # Defensive belt-and-suspenders, not load-bearing under normal
+        # operation: every call site of this method already guarantees no
+        # resting order is left over before calling in here (a fresh entry
+        # has none yet; _poll_broker_bracket clears both ids before
+        # re-attaching post-partial, since Webull's own OCO already
+        # auto-cancelled the sibling leg; _sync_broker_protective_orders
+        # cancels explicitly before replacing) -- but a broker-side
+        # TRAILING_STOP order specifically cannot be added while another
+        # resting sell order still reserves the same shares, so this
+        # cancels first regardless of whether anything should still be
+        # there, rather than trusting that invariant to hold forever as
+        # this code keeps changing.
+        if use_trailing_stop and (position.broker_stop_order_id is not None or position.broker_target_order_id is not None):
+            self._cancel_broker_protective_orders(candidate.symbol, position)
+
         try:
             if target_price is not None:
                 result = self.order_manager.place_resting_bracket(
@@ -1251,6 +1290,17 @@ class TradingLoop:
                 self._notify_order_update(stop_order)
                 self._notify_order_update(target_order)
                 position.broker_target_order_id = target_order.broker_order_id
+                position.broker_stop_is_trailing = False
+            elif use_trailing_stop:
+                stop_order = self.order_manager.place_resting_trailing_stop(
+                    candidate.symbol, exit_side, position.quantity, trailing_pct,
+                    strategy_name=position.strategy_name, now=now,
+                )
+                if stop_order is None:
+                    return
+                self._notify_order_update(stop_order)
+                position.broker_target_order_id = None
+                position.broker_stop_is_trailing = True
             else:
                 stop_order = self.order_manager.place_resting_stop(
                     candidate.symbol, exit_side, position.quantity, position.stop_price,
@@ -1260,6 +1310,7 @@ class TradingLoop:
                     return
                 self._notify_order_update(stop_order)
                 position.broker_target_order_id = None
+                position.broker_stop_is_trailing = False
         except Exception:
             logger.exception(
                 "Failed to attach broker-side protective order(s) for %s -- riding on software-only "
@@ -1269,6 +1320,7 @@ class TradingLoop:
             position.broker_stop_order_id = None
             position.broker_target_order_id = None
             position.broker_stop_price_synced = None
+            position.broker_stop_is_trailing = False
             return
 
         position.broker_stop_order_id = stop_order.broker_order_id
@@ -1307,6 +1359,7 @@ class TradingLoop:
         position.broker_stop_order_id = None
         position.broker_target_order_id = None
         position.broker_stop_price_synced = None
+        position.broker_stop_is_trailing = False
 
     def _sync_broker_protective_orders(self, candidate: Candidate, position: Position, now: datetime) -> None:
         """Keeps the broker-side resting stop in step with PositionManager's
@@ -1349,10 +1402,20 @@ class TradingLoop:
         orphans its sibling is unconfirmed either way -- cancelling both
         and placing a known-working fresh OCO (or lone stop, if no target
         is still active -- _attach_broker_bracket handles that branch on
-        its own) sidesteps both open questions entirely."""
+        its own) sidesteps both open questions entirely.
+
+        None of the above applies once position.broker_stop_is_trailing is
+        True: that means the resting order is already a native
+        TRAILING_STOP, which Webull moves on its own as price moves --
+        there is nothing left for this process to compute or push, so this
+        is unconditionally a no-op for as long as that stays True (see
+        that field's docstring, and _attach_broker_bracket for where it
+        gets set)."""
         if position.broker_stop_order_id is None:
             if getattr(self.broker, "place_oco_bracket", None) is not None:
                 self._attach_broker_bracket(candidate, position, now)
+            return
+        if position.broker_stop_is_trailing:
             return
         if position.stop_price is None or position.stop_price == position.broker_stop_price_synced:
             return
@@ -1462,6 +1525,7 @@ class TradingLoop:
             position.broker_stop_order_id = None
             position.broker_target_order_id = None
             position.broker_stop_price_synced = None
+            position.broker_stop_is_trailing = False
             self._dispatch_exit_finalization(candidate, position, status_order, exit_signal, now)
 
             if exit_signal.action == SignalAction.SCALE_OUT:

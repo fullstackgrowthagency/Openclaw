@@ -90,6 +90,14 @@ def test_place_resting_bracket_returns_none_when_broker_lacks_resting_support():
     assert result is None
 
 
+def test_place_resting_trailing_stop_returns_none_when_broker_lacks_resting_support():
+    broker = _NoRestingOrdersBroker()
+    om = _order_manager(broker)
+    result = om.place_resting_trailing_stop("AAPL", OrderSide.SELL, 100, 3.0)
+    assert result is None
+    assert broker._orders == []  # broker.place_order was never called
+
+
 # -- broker supports resting orders: build and forward the right Order(s) --
 
 def test_place_resting_stop_builds_a_stop_order_and_submits_it():
@@ -113,6 +121,27 @@ def test_place_resting_stop_builds_a_stop_order_and_submits_it():
     assert submitted.order_type == OrderType.STOP
     assert submitted.quantity == 100
     assert submitted.stop_price == 9.50
+    assert submitted.strategy_name == "test"
+
+
+def test_place_resting_trailing_stop_builds_a_trailing_stop_order_and_submits_it():
+    broker = _RestingOrdersBroker()
+    om = _order_manager(broker)
+
+    order = om.place_resting_trailing_stop(
+        "AAPL", OrderSide.SELL, 100, 3.0, strategy_name="test", now=datetime(2026, 8, 11, 15, 0, 0),
+    )
+
+    assert order is not None
+    assert order.status == OrderStatus.SUBMITTED
+    assert len(broker._orders) == 1
+    submitted = broker._orders[0]
+    assert submitted.symbol == "AAPL"
+    assert submitted.side == OrderSide.SELL
+    assert submitted.order_type == OrderType.TRAILING_STOP
+    assert submitted.quantity == 100
+    assert submitted.trailing_pct == 3.0
+    assert submitted.stop_price is None
     assert submitted.strategy_name == "test"
 
 

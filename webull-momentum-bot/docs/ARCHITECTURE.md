@@ -1427,11 +1427,30 @@ not.
    the position is big enough to split into two whole-share halves -- the
    same floor-to-half-share rule `OrderManager.submit_signal`'s `SCALE_OUT`
    path already uses) a resting `LIMIT` leg at half the quantity, and
-   places them as one `OCO` pair via `OrderManager.place_resting_bracket`
-   (or a lone `STOP` via `place_resting_stop` when there's no target --
-   adoption never has one). Stores both legs' broker order ids and the
-   synced stop price on `Position` (`broker_stop_order_id`,
-   `broker_target_order_id`, `broker_stop_price_synced`).
+   places them as one `OCO` pair via `OrderManager.place_resting_bracket`.
+   When there's no target -- which happens for two structurally different
+   reasons -- a lone resting order protects the full remaining quantity
+   instead: a too-small-to-split position (adoption never has a target
+   either) gets a plain `STOP` via `place_resting_stop`, riding on it plus
+   the breakeven rule for its whole lifetime, same as before this native
+   trailing-stop path existed; a position that's already taken its one
+   partial exit (`partial_exit_taken` is `True`) instead gets a native
+   `TRAILING_STOP` via `OrderManager.place_resting_trailing_stop` (added
+   2026-08-11 at the account owner's explicit instruction that Webull
+   supports this order type for US equities -- NOT yet independently
+   confirmed live the way the plain `OCO` bracket was; see
+   `scripts/verify_trailing_stop.py` and
+   `WebullBrokerClient._ORDER_TYPE_TO_WEBULL`'s docstring for the open
+   question and what to do if it turns out unsupported). Stores both legs'
+   broker order ids, the synced stop price, and whether the resting stop
+   is a trailing order on `Position` (`broker_stop_order_id`,
+   `broker_target_order_id`, `broker_stop_price_synced`,
+   `broker_stop_is_trailing`). Before placing a trailing stop specifically,
+   defensively cancels any resting order still attached to this position
+   first (a `TRAILING_STOP` can't be added while another resting sell
+   order still reserves the same shares) -- every call site already
+   guarantees this holds without the extra cancel, but this doesn't rely
+   on that invariant holding forever.
 2. **`PositionManager.check_exit` steps aside** for checks ①/② the instant
    `position.broker_stop_order_id` is set (`broker_managed` in that
    method) -- the broker is already watching for that exact price cross,
@@ -1451,25 +1470,31 @@ not.
    would (`_dispatch_exit_finalization`) but without this loop ever having
    submitted the fill-causing order itself. If the target leg filled,
    finalizes a `SCALE_OUT` (`PARTIAL_PROFIT_TARGET`) the same way, **then
-   immediately re-attaches a fresh lone resting stop for the remainder**
+   immediately re-attaches a fresh lone resting order for the remainder**
    (`_attach_broker_bracket` again, now with no target -- `partial_exit_taken`
-   is `True`): Webull's `OCO` logic auto-cancels the sibling leg the
+   is `True`, so this is the trailing-stop branch described in step 1, not
+   a plain `STOP`): Webull's `OCO` logic auto-cancels the sibling leg the
    instant one fills, so the original stop (which was sized for the FULL
    original quantity) is gone the moment the target fills, and the
-   remaining shares would otherwise be naked until the next breakeven/
-   trailing sync happened to run.
+   remaining shares would otherwise be naked until the next tick's sync.
 4. **Sync on a stop-price change** (`TradingLoop._sync_broker_protective_orders`,
    called from `_manage_position` whenever `check_exit` runs and finds no
-   exit condition). Compares `position.stop_price` (which `check_exit`'s
-   breakeven/trailing math may have just moved) against
-   `broker_stop_price_synced`; if they differ, cancels **every** resting
-   leg for this position (not just the stop) and calls
-   `_attach_broker_bracket` again for a completely fresh resting order (or
-   pair, if a target is still active). Cancelling both legs together,
-   rather than trying to update just the stop leg's price in place, is
-   deliberate: it sidesteps both `modify_order`'s inconclusive live result
-   *and* the unconfirmed question of whether cancelling a single leg of an
-   already-placed `OCO` combo cancels or orphans its sibling.
+   exit condition) -- **unconditionally a no-op once
+   `position.broker_stop_is_trailing` is `True`**, since Webull is already
+   moving that resting order on its own; `PositionManager`'s software-side
+   trailing math still runs and mutates `position.stop_price` every tick
+   either way, but purely for tracking/display at that point, with nothing
+   left to push to the broker. Before that point (a plain `STOP`, pre- or
+   never-partial), compares `position.stop_price` (which `check_exit`'s
+   breakeven math may have just moved) against `broker_stop_price_synced`;
+   if they differ, cancels **every** resting leg for this position (not
+   just the stop) and calls `_attach_broker_bracket` again for a
+   completely fresh resting order (or pair, if a target is still active).
+   Cancelling both legs together, rather than trying to update just the
+   stop leg's price in place, is deliberate: it sidesteps both
+   `modify_order`'s inconclusive live result *and* the unconfirmed
+   question of whether cancelling a single leg of an already-placed `OCO`
+   combo cancels or orphans its sibling.
 5. **Cancel before any software-submitted exit** -- a full `EXIT` for a
    broker-managed position can still happen (VWAP failure, time limit,
    the kill switch's flatten, the end-of-core-hours auto-flatten), and

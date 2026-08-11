@@ -140,7 +140,7 @@ class OrderManager:
         return self.broker.get_order_status(broker_order_id)
 
     # -- broker-side (resting) protective orders --------------------------
-    # These three back TradingLoop's broker-side stop/target bracket
+    # These four back TradingLoop's broker-side stop/target bracket
     # feature (see position_manager.py's module docstring and
     # WebullBrokerClient.place_oco_bracket). They deliberately don't go
     # through submit_signal: there is no Signal here (this manages an
@@ -160,7 +160,7 @@ class OrderManager:
         # market regardless of order_type, so a "resting" stop placed
         # through their plain place_order would close the position
         # immediately instead of waiting for price to cross it; gating all
-        # three methods below on this same capability check keeps that
+        # three placement methods below on this same capability check keeps that
         # broker on its existing pure-software PositionManager path
         # unchanged, exactly as it behaved before this feature existed.
         return getattr(self.broker, "place_oco_bracket", None) is not None
@@ -178,6 +178,31 @@ class OrderManager:
         order = Order(
             symbol=symbol, side=exit_side, order_type=OrderType.STOP, quantity=quantity,
             stop_price=stop_price, status=OrderStatus.PENDING, client_order_id=str(uuid.uuid4()),
+            created_at=ts, updated_at=ts, strategy_name=strategy_name,
+        )
+        return self.broker.place_order(order)
+
+    def place_resting_trailing_stop(
+        self, symbol: str, exit_side, quantity: float, trailing_pct: float,
+        *, strategy_name: Optional[str] = None, now: Optional[datetime] = None,
+    ) -> Optional[Order]:
+        """Places a lone resting protective TRAILING_STOP order -- Webull
+        trails it itself from here (see WebullBrokerClient._order_payload's
+        trailing_type/trailing_stop_step mapping), so unlike
+        place_resting_stop's plain STOP this never needs a cancel+replace
+        to move it (see TradingLoop._sync_broker_protective_orders' skip
+        for Position.broker_stop_is_trailing). Only ever called by
+        _attach_broker_bracket post-partial-exit, when PositionManager's
+        own trailing-stop math would otherwise be the thing moving the
+        resting order every tick. Returns None (without calling the broker
+        at all) if the connected broker doesn't support resting orders --
+        see _broker_supports_resting_orders."""
+        if not self._broker_supports_resting_orders():
+            return None
+        ts = now or datetime.utcnow()
+        order = Order(
+            symbol=symbol, side=exit_side, order_type=OrderType.TRAILING_STOP, quantity=quantity,
+            trailing_pct=trailing_pct, status=OrderStatus.PENDING, client_order_id=str(uuid.uuid4()),
             created_at=ts, updated_at=ts, strategy_name=strategy_name,
         )
         return self.broker.place_order(order)
