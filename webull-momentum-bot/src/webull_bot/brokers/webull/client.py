@@ -74,21 +74,27 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     session before trusting the exact field names (see
     scripts/verify_extended_hours_bars.py for the analogous check already
     written for get_raw_bars' trading_sessions parameter).
-  - Streaming (DataStreamingClient, MQTT-based) is NOT implemented here.
-    Progress as of 2026-08-11 (static SDK inspection, NOT yet live-tested --
-    see scripts/verify_streaming.py, built specifically to finish this):
-    leaving `mqtt_host=None` lets the SDK auto-resolve it via its own
-    bundled `webull/core/data/endpoints.json`, which has exactly ONE "us"
-    quotes-api entry (`data-api.webull.com`, the already-documented
-    production host) -- there is no separate sandbox entry anywhere in
-    that file. Whether that one host actually serves this SANDBOX
-    account's data (vs. being production-only, or requiring a separate
-    "OpenAPI data-streaming entitlement" per user-provided research not
-    yet confirmed against Webull's own docs) is exactly what
-    scripts/verify_streaming.py exists to determine live. Do not wire this
-    up here until that script has actually run clean and printed real
-    ticks -- same rule as every other "is X really supported" question in
-    this project.
+  - Streaming (DataStreamingClient, MQTT-based) is NOT YET WIRED INTO THIS
+    CLIENT, but is CONFIRMED LIVE AND WORKING as of 2026-08-11 (see
+    scripts/verify_streaming.py). The SDK's own auto-resolution
+    (`mqtt_host=None`) only knows `data-api.webull.com` -- the PRODUCTION
+    host -- via its bundled `webull/core/data/endpoints.json`, which has
+    no sandbox entry for quotes-api at all. Passing that resolved host
+    explicitly against sandbox credentials connected over MQTT
+    successfully but the subscribe REST call was rejected with `417
+    INVALID_SESSION` ("Mqtt connection not exist for session") --
+    confirmed NOT a timing race (identical result with a 2s delay added
+    before subscribing) -- consistent with the MQTT session having been
+    registered against the production quotes system while the subscribe
+    REST call correctly targeted `api.sandbox.webull.com`, two systems
+    with no shared session state. The correct sandbox host, confirmed live
+    by explicitly passing it, is **`data-api.sandbox.webull.com`**
+    (mirroring the already-known `api.webull.com` -> `api.sandbox.webull.com`
+    REST split) -- real quote ticks (bid/ask price+size, `trading_session:
+    RTH`) arrived within seconds of subscribing. `WebullBrokerClient`
+    itself still doesn't implement `subscribe_quotes` (see that method) --
+    this host is the missing piece integration was blocked on, not yet
+    wired into production code.
   - Rate limiting: firing 10 truly concurrent get_snapshot calls at the
     sandbox tripped a 429 TOO_MANY_REQUESTS on 2 of them (2026-08-08), with
     no data corruption or cross-request mixups -- the SDK itself is safe to
@@ -691,13 +697,12 @@ class WebullBrokerClient(BrokerClient):
 
     def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
         raise NotImplementedError(
-            "Streaming (DataStreamingClient, MQTT-based) is not wired up. As of "
-            "2026-08-11, static SDK inspection found the auto-resolved mqtt_host "
-            "is data-api.webull.com (the SDK's only bundled quotes-api entry -- "
-            "no separate sandbox host exists in it), but whether that host "
-            "actually serves this SANDBOX account's data is unconfirmed -- run "
-            "scripts/verify_streaming.py live before implementing this rather "
-            "than guessing it. Poll get_snapshot()/get_bars() in the meantime."
+            "Streaming is CONFIRMED LIVE AND WORKING as of 2026-08-11 (real quote "
+            "ticks received against the sandbox account via scripts/verify_streaming.py "
+            "--mqtt-host data-api.sandbox.webull.com -- see this module's docstring), "
+            "but this method itself is still not implemented -- the confirmed host was "
+            "the missing piece, not the reason to keep polling. Poll get_snapshot()/ "
+            "get_bars() until this is actually built."
         )
 
     # -- orders --------------------------------------------------------------

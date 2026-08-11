@@ -1587,68 +1587,70 @@ symbol ever (not on every rescan -- see `TradingLoopConfig`'s docstring),
 which is judged acceptable rather than a further optimization target for
 now.
 
-### Streaming market data (researched, not yet wired up)
+### Streaming market data -- CONFIRMED LIVE (2026-08-11), not yet wired into production
 
-The biggest remaining lever isn't better-scheduled polling -- it's not
-polling at all. `subscribe_quotes` has been an unimplemented stub since
-`WebullBrokerClient` was first built, blocked on "no sandbox mqtt_host was
-ever confirmed." Static inspection of the installed
-`webull-openapi-python-sdk` (2026-08-11) made real progress on that
-without fully resolving it:
+`subscribe_quotes` has been an unimplemented stub since `WebullBrokerClient`
+was first built, blocked on "no sandbox mqtt_host was ever confirmed."
+That blocker is now resolved, in three stages -- static SDK inspection,
+then two live tests that each ruled out a wrong hypothesis before the
+third one confirmed the fix:
 
-- `webull.data.data_streaming_client.DataStreamingClient` is a real,
-  implemented MQTT client (via `paho-mqtt`), matching the public docs.
-- Leaving its `mqtt_host` constructor arg as `None` lets the SDK
-  auto-resolve it via `DefaultEndpointResolver` ->
-  `LocalConfigRegionalEndpointResolver`, which reads a config file bundled
-  *inside* the SDK package itself (`webull/core/data/endpoints.json`).
-  For region `"us"` that file has exactly **one** `quotes-api` entry --
-  `data-api.webull.com`, the same production host this project's docs
-  already knew about. There is no separate sandbox entry anywhere in that
-  file for any API type, including the plain REST `api` entry (which
-  *does* have a distinct sandbox equivalent, `api.sandbox.webull.com`, per
-  the official Data API docs -- confirming sandbox/production *are*
-  meaningfully different hosts for REST, which makes the *absence* of a
-  distinct sandbox quotes-api entry a real, deliberate signal worth
-  taking seriously, not just an oversight in the bundled file).
-- `session_id` is not obtained via any special handshake -- it's a plain
-  caller-generated id (e.g. a UUID) passed to both the MQTT client
-  constructor and the subscribe REST call, purely to correlate one MQTT
-  connection with its REST-side subscription.
-- Connecting requires `on_connect_success` to be set *before* connecting
-  (the SDK's own internal on-connect handler raises
-  `SDK_INVALID_PARAMETER` otherwise), and the actual `client.subscribe(...)`
-  call belongs *inside* that callback per the class's own design -- the
-  MQTT connect happens on a background thread via
-  `connect_and_loop_start()` (non-blocking, unlike
-  `connect_and_loop_forever()`), so subscribing must wait until that
-  connection is confirmed established.
+1. **Static inspection**: `webull.data.data_streaming_client.DataStreamingClient`
+   is a real, implemented MQTT client (via `paho-mqtt`). Leaving its
+   `mqtt_host` constructor arg as `None` lets the SDK auto-resolve it via
+   a config file bundled *inside* the SDK package
+   (`webull/core/data/endpoints.json`), which has exactly **one**
+   `quotes-api` entry for region `"us"` -- `data-api.webull.com`, the
+   known production host, with no sandbox equivalent in that file at all
+   (unlike the plain REST `api` entry, which *does* have a distinct
+   `api.sandbox.webull.com`). `session_id` needs no special handshake --
+   a plain caller-generated id (e.g. a UUID) passed to both the MQTT
+   client and the subscribe REST call. `on_connect_success` must be set
+   *before* connecting, and `client.subscribe(...)` belongs *inside* that
+   callback per the class's own design (the MQTT connect happens on a
+   background thread via non-blocking `connect_and_loop_start()`).
+2. **First live test** (`scripts/verify_streaming.py`, using the
+   auto-resolved `data-api.webull.com`): MQTT connected successfully, but
+   the subscribe REST call was rejected outright with `417
+   INVALID_SESSION` ("Mqtt connection not exist for session"). Looked at
+   first like a timing race (REST-side session registry not yet caught up
+   to the MQTT handshake) -- a second run with a 2s delay inserted before
+   subscribing got the byte-for-byte identical error, **ruling that theory
+   out**.
+3. **Second live test**, explicitly passing `--mqtt-host
+   data-api.sandbox.webull.com` (the natural next hypothesis: a
+   sandbox-specific quotes host mirroring the already-confirmed
+   `api.webull.com` -> `api.sandbox.webull.com` REST split, which the
+   SDK's bundled config simply doesn't know about) -- **confirmed
+   correct**: MQTT connected, the subscribe REST call was accepted (200),
+   and real quote ticks arrived within seconds:
+   ```
+   topic='quote' payload=basic: symbol:AAPL,instrument_id:913256135,
+   timestamp:1786474351120,trading_session:RTH,
+   asks:[price:304.22,size:203],bids:[price:304.21,size:41]
+   ```
+   Confirmed live, during real core trading hours, against the real
+   sandbox account this project runs against.
 
-**Not confirmed, and not safe to assume either way without a live test**:
-whether `data-api.webull.com` -- the only host the SDK knows about at all
--- actually accepts and correctly streams data for *this sandbox
-account's* credentials, versus being production-only (in which case a
-sandbox connection attempt would most likely fail auth or silently
-receive nothing). User-provided research (not yet cross-checked against
-Webull's own official docs the way every other claim in this file has
-been) also mentions a separate "standalone OpenAPI data-streaming
-entitlement," distinct from a consumer app subscription -- whether this
-account has one, if it's even a real requirement, is equally unconfirmed.
+**Still open**: an MQTT CONNACK return code 1 ("Protocol not supported")
+appeared during the SDK's own automatic reconnect attempt, ~4-10s after
+each test run's own shutdown sequence (`loop_stop()`/`disconnect()`)
+started -- present on all three live runs regardless of which mqtt_host
+was used or whether the run succeeded. Most likely a reconnect-during-
+shutdown artifact specific to this short-lived verification script (which
+disconnects the instant it's satisfied, rather than running long-lived),
+not evidence of instability in the streaming service itself -- but not
+yet understood well enough to rule that out completely. Worth watching
+for whether it recurs once a long-running integration is built and left
+connected for real, rather than assumed away.
 
-`scripts/verify_streaming.py` exists to settle exactly this, live, the
-same way every other "is X really supported" question in this project has
-been settled (`scripts/verify_bracket_orders.py` for the OCO bracket
-feature, the `support_trading_session` saga, etc.): connects
-non-blockingly, subscribes to one symbol's quotes, waits (bounded, default
-20s) for a real message, and reports precisely which stage succeeded or
-failed -- connect, subscribe, or an actual tick arriving. **Do not wire
-streaming into `WebullBrokerClient`/`TradingLoop` until this script has
-actually run clean and printed real ticks.** If it doesn't, its own output
-is written to distinguish "never connected at all" from "connected but
-never subscribed" from "subscribed but received nothing" -- each points at
-a different next step (network/host issue vs. a subscribe payload shape
-problem vs. a genuine sandbox-support or entitlement gap) rather than
-leaving the failure ambiguous.
+`WebullBrokerClient.subscribe_quotes` itself is **still not implemented**
+-- the confirmed host was the blocker, not a reason on its own to keep
+polling once it existed, but wiring streaming market data into
+`TradingLoop`'s actual hot path (replacing/augmenting the
+`get_snapshot`/`get_snapshots` polling this whole "Performance/rate-limit
+rehaul" section above was built around) is a separate, sizable follow-up
+build, not done as part of this confirmation.
 
 ## Structural vs. temporary disqualification
 
