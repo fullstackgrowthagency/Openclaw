@@ -156,8 +156,8 @@
     <p class="hint">Changes apply immediately to the live risk engine -- no restart needed. Only affects new signals; open positions are left alone.</p>
     <form id="settings-form">
       <label class="settings-field">
-        <span>Risk per trade <span class="muted">(% of equity risked, entry-to-stop)</span></span>
-        <input type="number" id="setting-risk_per_trade_pct" step="0.1" min="0.1" max="100" required>
+        <span>Stop loss <span class="muted">(% below entry for a long / above entry for a short)</span></span>
+        <input type="number" id="setting-stop_loss_pct" step="0.1" min="0.1" max="100" required>
       </label>
       <label class="settings-field">
         <span>Minimum reward:risk ratio <span class="muted">(e.g. 2 = at least 2x reward for every 1x risked)</span></span>

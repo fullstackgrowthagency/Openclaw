@@ -63,17 +63,6 @@ class PositionManagementConfig:
     vwap_failure_buffer_pct: float = 0.5  # how far below VWAP counts as "failed"
 
 
-def calculate_position_size(account_equity: float, risk_per_trade_pct: float, entry_price: float, stop_price: float) -> int:
-    """Shares sized so that (entry - stop) * shares == the dollar amount at risk.
-    This mirrors the sizing logic in RiskEngine.evaluate and is exposed
-    separately for use in backtests/tools that want the number directly."""
-    if entry_price <= stop_price or stop_price <= 0:
-        return 0
-    risk_amount = account_equity * risk_per_trade_pct / 100.0
-    per_share_risk = entry_price - stop_price
-    return int(risk_amount // per_share_risk)
-
-
 class PositionManager:
     def __init__(self, config: Optional[PositionManagementConfig] = None):
         self.config = config or PositionManagementConfig()

@@ -71,8 +71,14 @@ def test_full_pipeline_enters_on_breakout_and_partially_exits_on_target():
     # management" section). The candidate stays MANAGING with a reduced
     # open position rather than moving to COOLDOWN.
     engine = BacktestEngine(
+        # max_position_size_pct pinned below the 100%-of-buying-power default
+        # so the sized order's notional (computed off the signal's reference
+        # price) still clears PaperBrokerClient's cash check once the actual
+        # fill price is nudged up by simulated slippage -- sizing at exactly
+        # 100% of buying power leaves zero room for that and the order gets
+        # rejected for insufficient funds before ever filling.
         strategies=[MomentumBreakoutStrategy()],
-        risk_config=RiskConfig(risk_per_trade_pct=0.5, stop_loss_required=True),
+        risk_config=RiskConfig(stop_loss_required=True, max_position_size_pct=90.0),
         watcher_config=WatcherConfig(heating_up_score_threshold=15.0, armed_score_threshold=35.0),
     )
 

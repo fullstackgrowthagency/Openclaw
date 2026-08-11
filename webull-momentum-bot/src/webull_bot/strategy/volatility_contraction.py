@@ -28,6 +28,10 @@ this to the live RiskEngine.config.min_risk_reward_ratio (the same value
 adjustable from the dashboard's Settings panel) so every strategy's target
 moves together when that setting changes. Defaults to a fixed 2.0 when not
 supplied (tests, standalone use).
+
+stop_price is likewise computed from stop_loss_pct_fn(), wired to the live
+RiskEngine.config.stop_loss_pct -- see that field's docstring. Defaults to
+a fixed 2.5 when not supplied.
 """
 from __future__ import annotations
 
@@ -45,16 +49,22 @@ class VolatilityContractionConfig:
     min_broader_range_pct: float = 1.0    # price_range_pct_15m must be at least this -- excludes names that are just quiet everywhere, not contracting from a real move
     min_volume_acceleration: float = 2.0  # the volume kick confirming expansion out of the range
     max_spread_pct: float = 2.0
-    initial_stop_pct: float = 2.5
 
 
 class VolatilityContractionBreakoutStrategy(Strategy):
     name = "volatility_contraction"
     version = "v1"
 
-    def __init__(self, config: Optional[VolatilityContractionConfig] = None, *, reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0):
+    def __init__(
+        self,
+        config: Optional[VolatilityContractionConfig] = None,
+        *,
+        reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0,
+        stop_loss_pct_fn: Callable[[], float] = lambda: 2.5,
+    ):
         self.config = config or VolatilityContractionConfig()
         self._reward_risk_ratio_fn = reward_risk_ratio_fn
+        self._stop_loss_pct_fn = stop_loss_pct_fn
 
     def on_snapshot(self, candidate: Candidate, snapshot: MarketSnapshot) -> Optional[Signal]:
         if candidate.state != CandidateState.ARMED:
@@ -77,7 +87,7 @@ class VolatilityContractionBreakoutStrategy(Strategy):
             return None
 
         entry_price = snapshot.last_price
-        stop_price = entry_price * (1 - self.config.initial_stop_pct / 100.0)
+        stop_price = entry_price * (1 - self._stop_loss_pct_fn() / 100.0)
         risk_per_share = entry_price - stop_price
         if risk_per_share <= 0:
             return None

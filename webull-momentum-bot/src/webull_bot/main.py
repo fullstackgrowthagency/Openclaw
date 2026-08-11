@@ -190,6 +190,14 @@ def build_trading_loop(
     # own signal can never fail that gate on account of the target it just computed.
     reward_risk_ratio_fn = lambda: risk_engine.config.min_risk_reward_ratio  # noqa: E731
 
+    # Same live-closure pattern as reward_risk_ratio_fn above, but only handed
+    # to the five strategies whose stop is a flat %-from-entry (RiskConfig.
+    # stop_loss_pct's docstring calls these out by name). The other three
+    # (VWAPReclaim, BreakoutPullback, IgnitionPullback) anchor their stop to a
+    # technical level instead and keep their own strategy-local buffer % --
+    # see each one's own config for why.
+    stop_loss_pct_fn = lambda: risk_engine.config.stop_loss_pct  # noqa: E731
+
     # Ordered most-selective/confirmed first, most-permissive last -- the
     # first strategy to return a Signal for a given tick wins (see
     # TriggerEngine), so a broad catch-all placed early would pre-empt
@@ -197,14 +205,14 @@ def build_trading_loop(
     # docs/ARCHITECTURE.md's "Entry strategies" section for what each one
     # catches and why it's ordered here the way it is.
     trigger_engine = TriggerEngine(strategies=[
-        RefinedBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
-        OpeningRangeBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        RefinedBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn),
+        OpeningRangeBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn),
         VWAPReclaimStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
-        MomentumBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        MomentumBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn),
         BreakoutPullbackStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
         IgnitionPullbackStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
-        VolatilityContractionBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
-        VolumeIgnitionStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
+        VolatilityContractionBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn),
+        VolumeIgnitionStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn),
     ])
     order_manager = OrderManager(broker, risk_engine, settings)
     position_manager = PositionManager()

@@ -19,7 +19,26 @@ from ..models import MarketSnapshot, Position, RiskDecision, RiskEvent, Signal
 
 @dataclass
 class RiskConfig:
-    risk_per_trade_pct: float = 5.0          # % of account equity risked per trade (entry-to-stop)
+    # Renamed from risk_per_trade_pct (2026-08-11) -- and not just a rename,
+    # a real change in what this number MEANS. It used to be "% of account
+    # equity to risk on this trade" (an entry-to-stop dollar budget that,
+    # combined with the stop distance, determined share count -- see
+    # max_shares_by_risk in a prior version of evaluate() below). It's now
+    # a genuine per-position stop-loss distance: % below entry (long) / above
+    # entry (short) the stop is placed. Read live by every "flat %" entry
+    # strategy (momentum_breakout, refined_breakout, opening_range_breakout,
+    # volatility_contraction, volume_ignition) via a stop_loss_pct_fn closure
+    # -- see main.py's build_trading_loop -- the same live-wiring pattern
+    # already used for min_risk_reward_ratio below, so a dashboard change
+    # here moves every one of those strategies' stops together. The three
+    # "buffer below a technical level" strategies (breakout_pullback,
+    # ignition_pullback, vwap_reclaim) are NOT wired to this -- their stop
+    # is anchored to a pullback low / VWAP, a fundamentally different,
+    # much smaller-scale concept (a safety margin below a level the entry
+    # is betting will hold, not "how far the stop should be from entry");
+    # forcing them to share this value would corrupt their design intent.
+    # No longer used for position sizing at all -- see max_position_size_pct.
+    stop_loss_pct: float = 5.0
     # Minimum reward:risk ratio required on any signal that specifies a
     # suggested_target (e.g. 2.0 means the distance from entry to target
     # must be at least 2x the distance from entry to stop). Signals with no
@@ -27,14 +46,24 @@ class RiskConfig:
     # instead of a fixed target) skip this check entirely -- there's no
     # reward distance to compare against.
     min_risk_reward_ratio: float = 2.0
-    max_position_size_pct: float = 100.0     # max notional as % of buying power in a single position
+    # The ONLY thing governing position size (2026-08-11, see evaluate()
+    # below): max notional as % of buying power in a single position. A
+    # signal's stop distance is no longer a sizing input at all -- it only
+    # ever determined WHERE the stop sits, never HOW MANY shares to buy.
+    max_position_size_pct: float = 100.0
     max_daily_loss_pct: float = 3.0          # halts all new trades for the day once hit
     # Total $-at-risk ceiling: the sum of entry-to-stop risk across every
-    # open position, plus this trade's own budgeted risk, can't exceed this
-    # % of account equity. Distinct from a notional-exposure cap (the old
-    # max_account_exposure_pct) -- two positions with the same total dollar
-    # size but very different stop distances carry very different amounts
-    # of *risk*, and this is meant to bound the latter, not the former.
+    # currently open position can't exceed this % of account equity --
+    # rejects a NEW entry outright once already at/over the cap. Distinct
+    # from a notional-exposure cap (the old max_account_exposure_pct) --
+    # two positions with the same total dollar size but very different stop
+    # distances carry very different amounts of *risk*, and this is meant
+    # to bound the latter, not the former. Since sizing is now purely
+    # notional-based (max_position_size_pct), this is a coarser gate than
+    # it used to be: it no longer trims a new trade's OWN size to fit
+    # whatever room remains (there is no "size the trade to fit the
+    # remaining risk budget" step anymore) -- it can only refuse the trade
+    # outright once the ceiling is already breached by existing positions.
     max_total_risk_pct: float = 50.0
     max_simultaneous_positions: int = 3
     max_trades_per_day: int = 15
@@ -220,42 +249,48 @@ class RiskEngine:
         # Total assumed risk across every open position (entry-to-stop $ risk,
         # not notional size -- see RiskConfig.max_total_risk_pct's docstring
         # for why this is a materially different cap than a plain notional
-        # exposure ceiling).
+        # exposure ceiling). A pure reject-gate now (2026-08-11) -- it no
+        # longer trims this trade's OWN size to fit remaining room, since
+        # sizing isn't risk-budget-driven anymore; see max_position_size_pct
+        # below for what actually determines share count.
         total_open_risk = sum(
             max(0.0, p.avg_entry_price - p.stop_price) * p.quantity
             for p in open_positions
             if p.stop_price is not None
         )
         max_total_risk = account_equity * self.config.max_total_risk_pct / 100.0
-        remaining_risk_room = max_total_risk - total_open_risk
-        if remaining_risk_room <= 0:
+        if total_open_risk >= max_total_risk:
             return reject(RiskEventType.MAX_EXPOSURE_HIT, "Max total assumed risk across open positions reached.")
 
-        # Position sizing from $ risk between entry and stop (never fall back to a
-        # position size that ignores the stop distance). The risk actually
-        # budgeted for this trade is capped by whatever total-risk room is
-        # left, so one trade can't single-handedly blow through the fleet-wide
-        # ceiling even if its own risk_per_trade_pct budget would allow it.
         entry_price = signal.reference_price
         stop_price = signal.suggested_stop
-        budgeted_risk = account_equity * self.config.risk_per_trade_pct / 100.0
-        risk_amount = min(budgeted_risk, remaining_risk_room)
-        max_shares_by_risk = None
         if stop_price is not None and entry_price > stop_price > 0:
-            per_share_risk = entry_price - stop_price
-            max_shares_by_risk = int(risk_amount // per_share_risk) if per_share_risk > 0 else 0
+            pass  # a valid long stop -- nothing further needed for sizing
         elif self.config.stop_loss_required:
             return reject(RiskEventType.TRADE_REJECTED, "Stop price must be below entry price for a long signal.")
 
+        # Position sizing (2026-08-11): purely notional, from
+        # max_position_size_pct of buying power -- the stop distance no
+        # longer plays any role in HOW MANY shares to buy, only in WHERE
+        # the stop sits (see RiskConfig.stop_loss_pct's docstring for why
+        # that split was made). A signal simply can't be sized at all
+        # without account_buying_power > 0 or entry_price > 0.
         max_notional = account_buying_power * self.config.max_position_size_pct / 100.0
-        max_shares_by_notional = int(max_notional // entry_price) if entry_price > 0 else 0
-
-        max_shares = min(v for v in (max_shares_by_risk, max_shares_by_notional) if v is not None)
+        max_shares = int(max_notional // entry_price) if entry_price > 0 else 0
 
         if max_shares <= 0:
             return reject(RiskEventType.TRADE_REJECTED, "Computed position size is zero given current risk/exposure limits.")
 
         self._daily.trade_count += 1
         self._daily.trades_per_ticker[signal.symbol] = ticker_trades + 1
+
+        # Informational only (2026-08-11) -- the actual $ this specific,
+        # already-sized trade would lose if its stop is hit. Purely
+        # descriptive now, computed AFTER sizing rather than driving it;
+        # None whenever there's no valid stop distance to compute from
+        # (stop_loss_required=False and no suggested_stop).
+        risk_amount = None
+        if stop_price is not None and entry_price > stop_price > 0:
+            risk_amount = (entry_price - stop_price) * max_shares
 
         return RiskDecision(approved=True, reason="OK", max_shares=max_shares, risk_amount=risk_amount)

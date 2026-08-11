@@ -22,6 +22,10 @@ this to the live RiskEngine.config.min_risk_reward_ratio (the same value
 adjustable from the dashboard's Settings panel) so every strategy's target
 moves together when that setting changes. Defaults to a fixed 2.0 when not
 supplied (tests, standalone use).
+
+stop_price is likewise computed from stop_loss_pct_fn(), wired to the live
+RiskEngine.config.stop_loss_pct -- see that field's docstring. Defaults to
+a fixed 3.0 when not supplied.
 """
 from __future__ import annotations
 
@@ -38,16 +42,22 @@ class OpeningRangeBreakoutConfig:
     breakout_buffer_pct: float = 0.1
     min_volume_acceleration: float = 1.3
     max_spread_pct: float = 2.0
-    initial_stop_pct: float = 3.0
 
 
 class OpeningRangeBreakoutStrategy(Strategy):
     name = "opening_range_breakout"
     version = "v1"
 
-    def __init__(self, config: Optional[OpeningRangeBreakoutConfig] = None, *, reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0):
+    def __init__(
+        self,
+        config: Optional[OpeningRangeBreakoutConfig] = None,
+        *,
+        reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0,
+        stop_loss_pct_fn: Callable[[], float] = lambda: 3.0,
+    ):
         self.config = config or OpeningRangeBreakoutConfig()
         self._reward_risk_ratio_fn = reward_risk_ratio_fn
+        self._stop_loss_pct_fn = stop_loss_pct_fn
 
     def on_snapshot(self, candidate: Candidate, snapshot: MarketSnapshot) -> Optional[Signal]:
         if candidate.state != CandidateState.ARMED:
@@ -65,7 +75,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
             return None
 
         entry_price = snapshot.last_price
-        stop_price = min(candidate.opening_range_high, entry_price * (1 - self.config.initial_stop_pct / 100.0))
+        stop_price = min(candidate.opening_range_high, entry_price * (1 - self._stop_loss_pct_fn() / 100.0))
         risk_per_share = entry_price - stop_price
         if risk_per_share <= 0:
             return None

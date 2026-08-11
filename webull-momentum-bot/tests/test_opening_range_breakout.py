@@ -68,7 +68,7 @@ def test_no_signal_when_volume_acceleration_too_low():
 def test_stop_clamped_to_opening_range_high_when_flat_pct_would_sit_above_it():
     # A very tight flat-pct stop (1%) would land above opening_range_high --
     # the strategy clamps down to opening_range_high as a structural floor.
-    strategy = OpeningRangeBreakoutStrategy(OpeningRangeBreakoutConfig(initial_stop_pct=1.0))
+    strategy = OpeningRangeBreakoutStrategy(stop_loss_pct_fn=lambda: 1.0)
     candidate = _candidate(opening_range_high=10.0)
     signal = strategy.on_snapshot(candidate, _snapshot(10.5))
     assert signal is not None
@@ -76,7 +76,7 @@ def test_stop_clamped_to_opening_range_high_when_flat_pct_would_sit_above_it():
 
 
 def test_stop_uses_flat_pct_when_it_sits_below_opening_range_high():
-    strategy = OpeningRangeBreakoutStrategy(OpeningRangeBreakoutConfig(initial_stop_pct=10.0))
+    strategy = OpeningRangeBreakoutStrategy(stop_loss_pct_fn=lambda: 10.0)
     candidate = _candidate(opening_range_high=10.0)
     signal = strategy.on_snapshot(candidate, _snapshot(10.5))
     assert signal is not None

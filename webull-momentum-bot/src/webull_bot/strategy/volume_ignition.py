@@ -31,6 +31,11 @@ The remaining half after the partial still rides the
 breakeven/trailing-stop exits exactly as it did before. See main.py's
 build_trading_loop for the live wiring to
 RiskEngine.config.min_risk_reward_ratio.
+
+stop_price is likewise computed from stop_loss_pct_fn(), wired to the live
+RiskEngine.config.stop_loss_pct -- see that field's docstring. Defaults to
+a fixed 2.5 when not supplied (tighter than the breakout strategies' 3% --
+no resistance/pullback level to lean on instead).
 """
 from __future__ import annotations
 
@@ -47,16 +52,22 @@ class VolumeIgnitionConfig:
     min_volume_acceleration: float = 3.0     # candidate.latest_metrics.volume_accel_1m_3m must exceed this...
     min_float_velocity_5m: Optional[float] = 0.03  # ...OR this (3% of float traded in 5 min) -- either alone qualifies
     max_spread_pct: float = 2.0
-    initial_stop_pct: float = 2.5            # tighter than the breakout strategies' 3% -- no resistance/pullback level to lean on instead
 
 
 class VolumeIgnitionStrategy(Strategy):
     name = "volume_ignition"
     version = "v1"
 
-    def __init__(self, config: Optional[VolumeIgnitionConfig] = None, *, reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0):
+    def __init__(
+        self,
+        config: Optional[VolumeIgnitionConfig] = None,
+        *,
+        reward_risk_ratio_fn: Callable[[], float] = lambda: 2.0,
+        stop_loss_pct_fn: Callable[[], float] = lambda: 2.5,
+    ):
         self.config = config or VolumeIgnitionConfig()
         self._reward_risk_ratio_fn = reward_risk_ratio_fn
+        self._stop_loss_pct_fn = stop_loss_pct_fn
 
     def on_snapshot(self, candidate: Candidate, snapshot: MarketSnapshot) -> Optional[Signal]:
         if candidate.state != CandidateState.ARMED:
@@ -81,7 +92,7 @@ class VolumeIgnitionStrategy(Strategy):
             return None
 
         entry_price = snapshot.last_price
-        stop_price = entry_price * (1 - self.config.initial_stop_pct / 100.0)
+        stop_price = entry_price * (1 - self._stop_loss_pct_fn() / 100.0)
         risk_per_share = entry_price - stop_price
         target_price = entry_price + risk_per_share * self._reward_risk_ratio_fn()
 

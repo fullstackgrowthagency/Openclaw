@@ -1684,39 +1684,24 @@ class TradingLoop:
         An adopted position (case 1) has no original strategy Signal to
         pull stop_price/target_price from (that only exists at the moment a
         Signal fires, and this position may have opened in a previous
-        process's lifetime), so it can't be given the same kind of
-        risk-accurate, entry-to-stop budgeted stop a real signal produces.
+        process's lifetime). Given a flat stop/target instead, from the
+        same two risk settings a real signal's flat-% strategies (see
+        RiskConfig.stop_loss_pct's docstring for which ones) use:
 
-        Instead, it's given a stop/target computed from the SAME two risk
-        settings a real signal's stop distance ultimately governs sizing
-        for -- just solved in the other direction, since here the share
-        count is already fixed by whatever's actually held at the broker
-        and there's no technical level (resistance, VWAP, pullback low)
-        to lean on:
+            stop_price = current_price -+ stop_loss_pct%      (long/short)
+            target_price = current_price +- stop_loss_pct% * min_risk_reward_ratio
 
-            risk_budget_dollars = account_equity * risk_per_trade_pct / 100
-            per_share_risk = risk_budget_dollars / quantity
-            stop_price = current_price -+ per_share_risk (long/short)
-            target_price = current_price +- per_share_risk * min_risk_reward_ratio
-
-        This is a genuine fix (2026-08-11), not just filling in a gap:
-        the previous version used `risk_per_trade_pct` directly as a flat
-        %-below/above-price stop distance (e.g. the default 5.0 meant a
-        flat 5% stop) -- reusing the number without reusing its actual
-        meaning ("% of account equity to risk on this trade"), so an
-        adopted position's realized loss at the stop had no real
-        relationship to the configured risk budget at all, and it never
-        got a target price (rode on breakeven/trailing alone). Solving
-        for the stop that makes THIS position's fixed share count risk
-        exactly `risk_per_trade_pct` of equity is what actually honors
-        the setting, and gives `min_risk_reward_ratio` something to
-        compute a real target from too. Falls back to the old flat-%
-        stop (still with a real min_risk_reward_ratio target now, unlike
-        before) if `get_account_equity()` fails or the computed distance
-        is degenerate (a wildly oversized adopted position relative to
-        equity could otherwise imply a stop_price <= 0 for a long) --
-        never leaving the position completely unprotected is the one
-        non-negotiable part of this."""
+        Simplified 2026-08-11 back to this flat-%-of-price form (it briefly
+        tried to reverse-engineer a stop from account_equity/quantity so an
+        adopted position's realized loss at the stop would equal a fixed %
+        of equity -- that only made sense while risk_per_trade_pct meant
+        "% of equity to risk," and stopped being correct the moment that
+        field was renamed to stop_loss_pct and repurposed as a genuine
+        per-position stop distance instead; the equity-based version would
+        have quietly gone back to computing the wrong thing). No
+        get_account_equity() call needed at all now -- a flat % is
+        well-defined regardless of share count, so there's no degenerate
+        case to fall back from either."""
         now = now or datetime.utcnow()
         try:
             # _get_positions_for_tick, not broker.get_positions() directly:
@@ -1776,52 +1761,14 @@ class TradingLoop:
                 continue
 
             is_short = position.side == OrderSide.SELL_SHORT
-            per_share_risk = None
-            if position.quantity > 0:
-                try:
-                    account_equity = self.broker.get_account_equity()
-                except Exception:
-                    logger.warning(
-                        "reconcile_positions_from_broker: get_account_equity failed for %s; "
-                        "falling back to a flat risk_per_trade_pct-as-distance stop.", symbol, exc_info=True,
-                    )
-                    account_equity = None
-                if account_equity is not None and account_equity > 0:
-                    risk_budget = account_equity * self.risk_engine.config.risk_per_trade_pct / 100.0
-                    per_share_risk = risk_budget / position.quantity
-                    # Degenerate if the risk budget this position's
-                    # (already-fixed) share count implies is as large as, or
-                    # larger than, the price itself: for a long that makes
-                    # stop_price <= 0 (meaningless); for a short it makes
-                    # target_price <= 0 (equally meaningless, and the stop
-                    # would sit multiples of the price away). A wildly
-                    # oversized adopted position relative to current equity
-                    # is exactly the case this could happen for, on either
-                    # side; fall back to the flat-% stop below rather than
-                    # emit a nonsense price.
-                    if per_share_risk >= snapshot.last_price:
-                        per_share_risk = None
-
+            stop_pct = self.risk_engine.config.stop_loss_pct / 100.0
             reward_risk_ratio = self.risk_engine.config.min_risk_reward_ratio
-            if per_share_risk is not None and per_share_risk > 0:
-                if is_short:
-                    position.stop_price = snapshot.last_price + per_share_risk
-                    position.target_price = snapshot.last_price - per_share_risk * reward_risk_ratio
-                else:
-                    position.stop_price = snapshot.last_price - per_share_risk
-                    position.target_price = snapshot.last_price + per_share_risk * reward_risk_ratio
+            if is_short:
+                position.stop_price = snapshot.last_price * (1 + stop_pct)
+                position.target_price = snapshot.last_price * (1 - stop_pct * reward_risk_ratio)
             else:
-                # Fallback: the old flat-%-of-price stop distance, kept
-                # only for the degenerate cases above (get_account_equity
-                # failed, or the risk-budgeted distance was nonsensical) --
-                # still given a real target now, unlike before this fix.
-                stop_pct = self.risk_engine.config.risk_per_trade_pct / 100.0
-                if is_short:
-                    position.stop_price = snapshot.last_price * (1 + stop_pct)
-                    position.target_price = snapshot.last_price * (1 - stop_pct * reward_risk_ratio)
-                else:
-                    position.stop_price = snapshot.last_price * (1 - stop_pct)
-                    position.target_price = snapshot.last_price * (1 + stop_pct * reward_risk_ratio)
+                position.stop_price = snapshot.last_price * (1 - stop_pct)
+                position.target_price = snapshot.last_price * (1 + stop_pct * reward_risk_ratio)
             position.strategy_name = "reconciled_at_startup"
             self._positions[symbol] = position
 
@@ -1876,10 +1823,10 @@ class TradingLoop:
 
             logger.warning(
                 "Adopted untracked broker position at startup: %s qty=%s side=%s "
-                "risk-budgeted stop_price=%.4f target_price=%.4f (risk_per_trade_pct=%.1f%%, "
+                "stop_price=%.4f target_price=%.4f (stop_loss_pct=%.1f%%, "
                 "min_risk_reward_ratio=%.2f, current price %.4f).",
                 symbol, position.quantity, position.side.value, position.stop_price,
-                position.target_price, self.risk_engine.config.risk_per_trade_pct,
+                position.target_price, self.risk_engine.config.stop_loss_pct,
                 self.risk_engine.config.min_risk_reward_ratio, snapshot.last_price,
             )
 

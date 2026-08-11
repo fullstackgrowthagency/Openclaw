@@ -67,35 +67,38 @@ def _evaluate(engine, signal=None, *, account_equity=10_000, account_buying_powe
 
 def test_approves_valid_signal_with_correct_sizing():
     # max_position_size_pct pinned low here (vs. the new 100%-of-buying-power
-    # default) specifically to exercise the notional cap binding before the
-    # risk-based size does.
-    engine = RiskEngine(RiskConfig(risk_per_trade_pct=1.0, max_position_size_pct=10.0))
+    # default) specifically to exercise the notional cap.
+    engine = RiskEngine(RiskConfig(max_position_size_pct=10.0))
     decision = _evaluate(engine)
     assert decision.approved
-    # $-risk sizing alone would allow 100/0.3 = 333 shares, but a 10% of
-    # buying-power notional cap ($10,000 * 10% = $1,000 at $10/share) caps
-    # it lower first: 1,000 // 10 = 100 shares.
+    # 10% of buying-power notional cap ($10,000 * 10% = $1,000 at $10/share)
+    # -> 1,000 // 10 = 100 shares.
     assert decision.max_shares == 100
 
 
-def test_sizing_is_risk_based_when_notional_cap_is_not_binding():
-    # max_position_size_pct=100.0 is now the default, but kept explicit here
-    # since the point of this test is exercising the un-capped risk-based path.
-    engine = RiskEngine(RiskConfig(risk_per_trade_pct=1.0, max_position_size_pct=100.0))
-    decision = _evaluate(engine)
-    assert decision.approved
-    # risk_amount = 1% of 10,000 = 100; per-share risk = 10 - 9.7 = 0.3 -> 333 shares
-    assert decision.max_shares == 333
+def test_sizing_is_purely_notional_and_ignores_stop_distance():
+    # Position sizing (2026-08-11) no longer factors in stop distance at
+    # all -- it's driven solely by max_position_size_pct of buying power.
+    # A signal with a stop just a few cents away gets the exact same share
+    # count as one with a stop far away, given the same entry/buying power.
+    engine_tight = RiskEngine(RiskConfig(max_position_size_pct=100.0))
+    tight = _evaluate(engine_tight, _signal(suggested_stop=9.99))
+    engine_wide = RiskEngine(RiskConfig(max_position_size_pct=100.0))
+    wide = _evaluate(engine_wide, _signal(suggested_stop=5.0))
+    assert tight.approved and wide.approved
+    # 10,000 buying power * 100% // $10 entry -> 1,000 shares, identical
+    # regardless of how far away each signal's stop was.
+    assert tight.max_shares == wide.max_shares == 1000
 
 
 def test_position_size_cap_uses_buying_power_not_equity():
     # Buying power much lower than equity (e.g. capital already committed
     # elsewhere) should cap the position even though equity alone would allow more.
-    engine = RiskEngine(RiskConfig(risk_per_trade_pct=100.0, max_position_size_pct=100.0))
+    engine = RiskEngine(RiskConfig(max_position_size_pct=100.0))
     decision = _evaluate(engine, account_equity=10_000, account_buying_power=2_000)
     assert decision.approved
     # Buying power cap: $2,000 * 100% = $2,000 notional at $10/share -> 200 shares,
-    # well below what a 100%-of-equity risk budget would otherwise allow.
+    # well below what sizing off the full equity would otherwise allow.
     assert decision.max_shares == 200
 
 
@@ -299,16 +302,16 @@ def test_reward_risk_check_skipped_when_no_target():
 
 
 def test_rejects_when_total_assumed_risk_exhausted():
-    # Existing position's own stop-loss risk already consumes the entire
-    # total-risk ceiling: (5.0 - 4.9) * 10,000 shares = $1,000 = 50% of a
-    # $2,000 equity account (max_total_risk_pct default 50%).
+    # Existing position's own stop-loss risk already exceeds the total-risk
+    # ceiling: (5.0 - 4.85) * 10,000 shares = $1,500, comfortably above 50%
+    # of a $2,000 equity account (max_total_risk_pct default 50% -> $1,000).
     engine = RiskEngine(RiskConfig(max_total_risk_pct=50.0))
     existing = Position(
         symbol="EFGH",
         side=OrderSide.BUY,
         quantity=10_000,
         avg_entry_price=5.0,
-        stop_price=4.9,
+        stop_price=4.85,
         target_price=None,
         trailing_stop_pct=None,
         opened_at=datetime.utcnow(),
@@ -319,26 +322,31 @@ def test_rejects_when_total_assumed_risk_exhausted():
     assert "risk" in decision.reason.lower()
 
 
-def test_total_assumed_risk_shrinks_new_trades_budget():
-    # Existing position already assumes $400 of risk. Total ceiling is 50%
-    # of $2,000 equity = $1,000, leaving only $600 of room -- even though
-    # risk_per_trade_pct alone would budget $1,000 (50% of equity) for this
-    # new trade, it gets shrunk to the $600 remaining.
-    engine = RiskEngine(RiskConfig(max_total_risk_pct=50.0, risk_per_trade_pct=50.0, max_position_size_pct=100.0))
+def test_total_risk_gate_is_binary_and_no_longer_shrinks_new_trades_size():
+    # Existing position assumes $400 of risk; the ceiling is 50% of $2,000
+    # equity = $1,000, so it isn't breached yet. Under the OLD risk-budgeted
+    # model this would have shrunk the new trade's size to fit the $600 of
+    # remaining room. Under the new notional-only sizing model (2026-08-11)
+    # this gate is a pure accept/reject check -- the new trade is approved
+    # and sized purely from max_position_size_pct, with NO trimming to fit
+    # whatever risk headroom remains.
+    engine = RiskEngine(RiskConfig(max_total_risk_pct=50.0, max_position_size_pct=100.0))
     existing = Position(
         symbol="EFGH",
         side=OrderSide.BUY,
         quantity=1_000,
         avg_entry_price=5.0,
-        stop_price=4.6,  # $0.40/share * 1,000 = $400 assumed risk
+        stop_price=4.6,  # $0.40/share * 1,000 = $400 assumed risk, under the $1,000 ceiling
         target_price=None,
         trailing_stop_pct=None,
         opened_at=datetime.utcnow(),
         strategy_name="test",
     )
-    decision = _evaluate(engine, account_equity=2_000, open_positions=[existing])
+    decision = _evaluate(engine, account_equity=2_000, account_buying_power=2_000, open_positions=[existing])
     assert decision.approved
-    # Remaining risk room = 1,000 - 400 = 600; per-share risk = 10 - 9.7 = 0.3
-    # -> 2,000 shares by risk, well above the notional cap, so risk_amount
-    # itself should reflect the shrunk $600, not the full $1,000 budget.
-    assert decision.risk_amount == pytest.approx(600.0)
+    # Sized purely notionally: 2,000 buying power * 100% // $10 entry -> 200 shares.
+    assert decision.max_shares == 200
+    # risk_amount is informational only now, computed from the actual sized
+    # trade's own stop distance -- (10 - 9.7) * 200 = 60, NOT the $600 of
+    # "remaining risk room" the old model would have capped it to.
+    assert decision.risk_amount == pytest.approx(60.0)

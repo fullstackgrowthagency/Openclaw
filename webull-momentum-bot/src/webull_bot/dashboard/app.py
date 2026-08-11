@@ -69,11 +69,11 @@ def _last_transition_reason(notes: str) -> str | None:
 # matched to what the Settings UI actually exposes. All are percentages
 # except min_risk_reward_ratio (a ratio, e.g. 2.0 = "at least 2x reward for
 # every 1x risked").
-_ADJUSTABLE_RISK_FIELDS = ("risk_per_trade_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct")
+_ADJUSTABLE_RISK_FIELDS = ("stop_loss_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct")
 
 
 class RiskSettingsUpdate(BaseModel):
-    risk_per_trade_pct: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
     min_risk_reward_ratio: Optional[float] = None
     max_position_size_pct: Optional[float] = None
     max_total_risk_pct: Optional[float] = None

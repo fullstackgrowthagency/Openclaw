@@ -90,7 +90,13 @@ def _build_loop(broker, **extra_kwargs) -> TradingLoop:
     from webull_bot.scanner.trigger_engine import TriggerEngine
 
     trigger_engine = TriggerEngine(strategies=[MomentumBreakoutStrategy()])
-    risk_engine = RiskEngine(RiskConfig(risk_per_trade_pct=0.5, stop_loss_required=True))
+    # max_position_size_pct pinned below the 100%-of-buying-power default so
+    # a sized order's notional (computed off the signal's reference price)
+    # still clears PaperBrokerClient's cash check once the actual fill price
+    # is nudged up by simulated slippage -- sizing at exactly 100% of buying
+    # power leaves zero room for that and the order gets rejected for
+    # insufficient funds before ever filling.
+    risk_engine = RiskEngine(RiskConfig(stop_loss_required=True, max_position_size_pct=90.0))
     order_manager = OrderManager(broker, risk_engine, get_settings())
     position_manager = PositionManager()
 
@@ -1465,16 +1471,12 @@ def test_reconcile_adopts_an_untracked_long_position():
     assert "TEST" in loop._positions
     position = loop._positions["TEST"]
     assert position.strategy_name == "reconciled_at_startup"
-    # 100 shares of a $5.20 stock ($520 notional) is small relative to the
-    # $1250 risk budget (25_000 equity * 5% risk_per_trade_pct) -- the
-    # risk-budgeted per-share distance (12.50) would exceed the price
-    # itself, which is degenerate for a long (stop_price <= 0), so this
-    # falls back to the flat risk_per_trade_pct-as-distance stop -- see
-    # test_reconcile_computes_a_risk_budgeted_stop_and_target below for
-    # the real (non-fallback) formula exercised with a quantity that
-    # doesn't hit this edge case.
+    # Flat stop_loss_pct-as-distance formula (2026-08-11) -- quantity/equity
+    # play no role at all, only the current price and RiskConfig.stop_loss_pct
+    # (default 5.0) / min_risk_reward_ratio (default 2.0) do. See
+    # reconcile_positions_from_broker's docstring.
     assert position.stop_price == pytest.approx(5.20 * (1 - 0.05))
-    assert position.target_price == pytest.approx(5.20 * (1 + 0.05 * 2.0))  # min_risk_reward_ratio default 2.0
+    assert position.target_price == pytest.approx(5.20 * (1 + 0.05 * 2.0))
 
     assert "TEST" in loop.candidates
     assert loop.candidates["TEST"].state == CandidateState.MANAGING
@@ -1491,67 +1493,46 @@ def test_reconcile_computes_a_short_stop_above_current_price():
 
     loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
 
-    # Same degenerate-distance fallback as the long test above (25.0/share
-    # implied by the risk budget vs. a $5.20 stock) -- confirmed fixed
-    # 2026-08-11: this guard originally only checked the long side, so a
-    # short in this exact situation got a nonsensical stop_price=30.20 /
-    # target_price=-44.80 instead of falling back.
+    # Same flat stop_loss_pct-as-distance formula as the long test above,
+    # mirrored for a short: stop above price, target below. Confirmed fixed
+    # 2026-08-11 (back when this was still equity/quantity-based): this
+    # guard originally only checked the long side, so a short in a
+    # degenerate case got a nonsensical stop/target pair instead of falling
+    # back -- the flat formula below sidesteps that whole class of bug by
+    # never depending on quantity/equity to begin with.
     assert loop._positions["TEST"].stop_price == pytest.approx(5.20 * (1 + 0.05))
     assert loop._positions["TEST"].target_price == pytest.approx(5.20 * (1 - 0.05 * 2.0))
 
 
-def test_reconcile_computes_a_risk_budgeted_stop_and_target():
-    # A quantity small enough relative to equity that the risk-budgeted
-    # per-share distance stays sane (well under the price) -- exercises
-    # the real formula, not the flat-% fallback the two tests above hit.
-    broker = _FakeBroker(equity=25_000.0)
-    broker._positions.append(Position(
+def test_reconcile_stop_and_target_are_independent_of_quantity_and_equity():
+    # Position sizing at entry time depends on max_position_size_pct, but
+    # adoption at startup never had a real entry -- there's no signal, no
+    # sizing decision, nothing to reconstruct. The flat stop_loss_pct
+    # formula (2026-08-11) reflects that: two positions in the same symbol
+    # at the same price get an identical stop/target regardless of how many
+    # shares are actually held or what the account's equity happens to be.
+    broker_small = _FakeBroker(equity=25_000.0)
+    broker_small._positions.append(Position(
         symbol="TEST", side=OrderSide.BUY, quantity=5, avg_entry_price=5.00, stop_price=None,
         target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
     ))
-    loop, _ = _armed_candidate_setup(broker)
-    loop.candidates.clear()
+    loop_small, _ = _armed_candidate_setup(broker_small)
+    loop_small.candidates.clear()
+    loop_small.reconcile_positions_from_broker(_IN_HOURS_NOW)
 
-    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
-
-    # risk_budget = 25_000 * 5% = 1250; per_share_risk = 1250 / 5 = 250 --
-    # still degenerate (way over the $5.20 price), so this itself falls
-    # back too. Use a quantity large enough that per_share_risk < price:
-    # 1250 / 500 = 2.50/share, comfortably under $5.20.
-    broker2 = _FakeBroker(equity=25_000.0)
-    broker2._positions.append(Position(
-        symbol="TEST2", side=OrderSide.BUY, quantity=500, avg_entry_price=5.00, stop_price=None,
+    broker_large = _FakeBroker(equity=250_000.0)
+    broker_large._positions.append(Position(
+        symbol="TEST2", side=OrderSide.BUY, quantity=50_000, avg_entry_price=5.00, stop_price=None,
         target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
     ))
-    loop2, _ = _armed_candidate_setup(broker2)
-    loop2.candidates.clear()
+    loop_large, _ = _armed_candidate_setup(broker_large)
+    loop_large.candidates.clear()
+    loop_large.reconcile_positions_from_broker(_IN_HOURS_NOW)
 
-    loop2.reconcile_positions_from_broker(_IN_HOURS_NOW)
-
-    position = loop2._positions["TEST2"]
-    per_share_risk = (25_000.0 * 0.05) / 500  # 2.50
-    assert position.stop_price == pytest.approx(5.20 - per_share_risk)
-    assert position.target_price == pytest.approx(5.20 + per_share_risk * 2.0)  # min_risk_reward_ratio default 2.0
-
-
-def test_reconcile_falls_back_to_flat_stop_when_get_account_equity_fails():
-    class _FailingEquityBroker(_FakeBroker):
-        def get_account_equity(self):
-            raise RuntimeError("simulated account_v2 failure")
-
-    broker = _FailingEquityBroker()
-    broker._positions.append(Position(
-        symbol="TEST", side=OrderSide.BUY, quantity=500, avg_entry_price=5.00, stop_price=None,
-        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
-    ))
-    loop, _ = _armed_candidate_setup(broker)
-    loop.candidates.clear()
-
-    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)  # must not raise
-
-    position = loop._positions["TEST"]
-    assert position.stop_price == pytest.approx(5.20 * (1 - 0.05))
-    assert position.target_price == pytest.approx(5.20 * (1 + 0.05 * 2.0))
+    small = loop_small._positions["TEST"]
+    large = loop_large._positions["TEST2"]
+    assert small.stop_price == pytest.approx(large.stop_price) == pytest.approx(5.20 * (1 - 0.05))
+    assert small.target_price == pytest.approx(large.target_price) == pytest.approx(5.20 * (1 + 0.05 * 2.0))
 
 
 def test_reconcile_never_overwrites_a_position_already_tracked_this_process():

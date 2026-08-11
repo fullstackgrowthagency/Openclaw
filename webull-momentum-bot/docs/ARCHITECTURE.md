@@ -16,9 +16,9 @@ CandidateWatcher         (recomputes MomentumMetrics + Momentum Ignition
 TriggerEngine             (only looks at ARMED candidates; asks each
       |                    Strategy for an entry Signal on real-time data)
       v  Signal
-RiskEngine.evaluate()      (deterministic: risk-per-trade sizing, exposure/
-      |                     position/trade-count caps, spread/liquidity
-      |                     gates, cooldowns, kill switch)
+RiskEngine.evaluate()      (deterministic: notional-only position sizing,
+      |                     exposure/position/trade-count caps, spread/
+      |                     liquidity gates, cooldowns, kill switch)
       v  RiskDecision(approved, max_shares)
 OrderManager                (the ONLY thing allowed to call the broker)
       |
@@ -940,37 +940,60 @@ with identical dollar size but very different stop distances carry very
 different amounts of real risk, and a notional-only cap (the old
 `max_account_exposure_pct`) couldn't tell them apart. If the existing
 positions alone already consume the full ceiling, the new signal is
-rejected (`MAX_EXPOSURE_HIT`). Otherwise, whatever risk-room remains
-becomes a ceiling on this trade's own budgeted risk (see #3) -- shrinking
-it rather than rejecting outright, so one trade can't single-handedly blow
-through the fleet-wide ceiling even when its own per-trade budget would
-otherwise allow more.
+rejected (`MAX_EXPOSURE_HIT`). **Renamed from a shrink-the-trade gate to a
+pure accept/reject gate (2026-08-11)**: since sizing is no longer
+risk-budget-driven (see #3 below), there's no "budgeted risk" left to trim
+to fit remaining room -- this can only refuse a trade outright once
+existing positions have already breached the ceiling, never resize one.
 
-**3. Risk-based position sizing** (`risk_per_trade_pct`, default 5% of
-equity) -- the primary sizing driver. Budgeted risk = `equity *
-risk_per_trade_pct / 100`, capped by whatever room #2 left; shares = that
-dollar amount divided by the entry-to-stop distance. A tighter stop lets
-this budget buy more shares (same dollar risk, smaller per-share risk); a
-wider stop buys fewer. `RiskDecision.risk_amount` reports the actual
-(post-cap) dollar amount budgeted, for transparency into what really drove
-the sizing.
+**3. Stop-loss distance** (`stop_loss_pct`, default 5%) -- **not a sizing
+input at all** (2026-08-11 redesign). This field only ever determines
+*where a strategy's stop sits*, never *how many shares to buy*. It's read
+live by the five strategies whose stop is a flat %-from-entry
+(`momentum_breakout`, `refined_breakout`, `opening_range_breakout`,
+`volatility_contraction`, `volume_ignition`) via a `stop_loss_pct_fn`
+closure -- the same live-wiring pattern `min_risk_reward_ratio` already
+used (see `main.py`'s `build_trading_loop`), so a dashboard change moves
+every one of those strategies' stops together on the very next signal. The
+other three strategies (`vwap_reclaim`, `breakout_pullback`,
+`ignition_pullback`) anchor their stop to a technical level (VWAP / a
+pullback low) plus a small strategy-local buffer instead, and are
+deliberately **not** wired to this field -- see each one's own config for
+why forcing them to share a single flat % would corrupt their design
+intent. This field used to be named `risk_per_trade_pct` and meant "% of
+account equity to risk on this trade," an entry-to-stop dollar budget that
+(combined with the stop distance) determined share count. That coupling
+was removed entirely: see #4 below for what determines share count now.
 
 **4. Position-size ceiling** (`max_position_size_pct`, default 100% of
-**buying power**, not equity) -- an independent cap on any single
-position's notional size (`shares * entry_price`), regardless of how
-favorable the stop distance made #3's math. Buying power (`broker.get_buying_power()`)
-is used rather than equity specifically so this reflects capital actually
-available to deploy right now, not total account value that may already
-be committed to other open positions.
+**buying power**, not equity) -- **the only thing that determines share
+count** (2026-08-11). `max_shares = int((buying_power *
+max_position_size_pct / 100) // entry_price)`. Buying power
+(`broker.get_buying_power()`) is used rather than equity specifically so
+this reflects capital actually available to deploy right now, not total
+account value that may already be committed to other open positions. A
+signal's stop distance plays no role here whatsoever -- a tight stop and a
+wide stop on the same symbol at the same price get the exact same share
+count. If this comes out to zero, the trade is rejected (`Computed
+position size is zero...`).
 
-**Final sizing**: `max_shares = min(shares from #3, shares from #4)`. If
-that comes out to zero (e.g. no risk-room left after #2, or a
-degenerate stop distance), the trade is rejected
-(`Computed position size is zero...`) rather than silently shrunk to
-something nonsensical.
+**`RiskDecision.risk_amount`**: informational only now, computed *after*
+sizing rather than driving it -- the actual dollar amount this specific,
+already-sized trade would lose if its stop is hit (`(entry_price -
+stop_price) * max_shares`). `None` whenever there's no valid stop distance
+to compute it from (`stop_loss_required=False` and no `suggested_stop`).
+No consumer in this codebase reads it yet; it exists purely for
+transparency into what a filled trade's real dollar risk turned out to be.
 
-**Verification status**: `tests/test_risk_engine.py` covers all four
-mechanics above (including the shrink-not-reject behavior of #2 and the
+**Why the split**: the old model coupled "how far away is the stop" and
+"how many shares to buy" through a single risk-budget number, which meant
+changing one strategy's stop distance silently changed its position size
+too. The new model decouples them completely -- `stop_loss_pct` answers
+"where does the stop go," `max_position_size_pct` answers "how many
+shares," and neither one affects the other's math.
+
+**Verification status**: `tests/test_risk_engine.py` covers all of the
+above (including the accept/reject-only behavior of #2 and the
 buying-power-vs-equity distinction in #4), but -- like every other
 threshold in this codebase -- these defaults are unvalidated starting
 points, not backtested or run live yet.
@@ -1192,43 +1215,30 @@ An adopted position (direction 1) has no originating `Signal` to pull a
 real `stop_price`/`target_price` from (that only ever exists at the moment
 a strategy fires, and this position may have opened in a previous
 process's lifetime) -- deliberately conservative values instead of
-leaving it unprotected, computed from the same two risk settings a real
-signal's stop distance ultimately governs sizing for, just solved in the
-other direction since the share count here is already fixed by whatever's
-actually held at the broker:
+leaving it unprotected, computed from the same flat `stop_loss_pct` /
+`min_risk_reward_ratio` pair a real signal's flat-% strategies use (see
+`RiskConfig.stop_loss_pct`'s docstring for which strategies those are):
 
 ```
-risk_budget_dollars = account_equity * risk_per_trade_pct / 100
-per_share_risk       = risk_budget_dollars / quantity
-stop_price            = current_price -+ per_share_risk        (long/short)
-target_price          = current_price +- per_share_risk * min_risk_reward_ratio
+stop_price   = current_price -+ stop_loss_pct%      (long/short)
+target_price = current_price +- stop_loss_pct% * min_risk_reward_ratio
 ```
 
-**Real bug fixed here (2026-08-11), not just a gap filled.** The
-original version used `risk_per_trade_pct` directly as a flat %-below/
-above-price stop distance (the default 5.0 meant a flat 5% stop
-regardless of position size or account equity) -- reusing the *number*
-without reusing its actual *meaning* ("% of account equity to risk on
-this trade"), so an adopted position's realized loss at the stop had no
-real relationship to the configured risk budget, and it never got a
-target price at all (rode on breakeven/trailing alone from the start).
-Solving for the stop that makes this position's already-fixed share
-count risk exactly `risk_per_trade_pct` of equity is what actually
-honors the setting, and gives `min_risk_reward_ratio` something real to
-compute a target from. Falls back to the old flat-%-of-price stop
-(now with a real `min_risk_reward_ratio`-derived target too, which it
-never had before) when `get_account_equity()` fails, or when the
-risk-budgeted per-share distance is degenerate relative to price --
-checked symmetrically for both sides after a bug where the guard only
-covered longs, letting a short's target go negative for an oversized
-position (`per_share_risk >= current_price` on the short side implies a
-stop that's multiples of the price away and a nonsensical target). A
-position sized very differently from what its `quantity` combined with
-current `risk_per_trade_pct`/equity would imply as sane (very small or
-very large relative to the risk budget) is exactly when this fallback
-triggers -- not a bug on its own, just the honest limit of trying to
-reverse-engineer a risk-consistent stop for a position this process
-never actually sized. `strategy_name` is set to the sentinel
+**Simplified back to this flat-%-of-price form (2026-08-11), after briefly
+being equity/quantity-based.** An earlier version of this formula solved
+for the stop that would make this position's already-fixed share count
+risk exactly a configured % of account equity (`risk_budget_dollars =
+account_equity * risk_per_trade_pct / 100`, then `per_share_risk =
+risk_budget_dollars / quantity`) -- that only made sense while the
+underlying config field (`risk_per_trade_pct`) meant "% of equity to risk
+on this trade." The moment that field was renamed to `stop_loss_pct` and
+repurposed to mean a genuine per-position stop distance instead (see
+"Position sizing" above), the equity-based version would have quietly
+started computing the wrong thing, so it was reverted to the simple flat
+form shown above. No `get_account_equity()` call, and no degenerate-
+distance fallback, are needed at all now -- a flat % is well-defined
+regardless of share count or account equity, so there's no edge case to
+fall back from. `strategy_name` is set to the sentinel
 `"reconciled_at_startup"` so an adopted position is always
 distinguishable from a real signal-driven one in the trade history. A
 `get_positions()` or per-symbol `get_snapshot()` failure during

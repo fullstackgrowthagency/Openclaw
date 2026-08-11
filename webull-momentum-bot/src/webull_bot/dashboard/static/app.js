@@ -176,7 +176,7 @@ function initInfoModal() {
 // model's fields and the input ids ("setting-<key>") in index.html's
 // settings modal.
 const SETTINGS_GROUPS = [
-  { endpoint: "/api/risk-settings", fields: ["risk_per_trade_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct"] },
+  { endpoint: "/api/risk-settings", fields: ["stop_loss_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct"] },
   { endpoint: "/api/position-settings", fields: ["breakeven_trigger_pct", "trailing_stop_pct"] },
 ];
 
