@@ -285,6 +285,34 @@ class _RestingBroker(_FakeBroker):
         return [o for o in self._resting_orders.values() if o.status == OrderStatus.SUBMITTED]
 
 
+@dataclass
+class _StreamingBroker(_FakeBroker):
+    """Adds a working subscribe_quotes -- the capability TradingLoop
+    detects via a try/except around the call itself (subscribe_quotes is
+    a required BrokerClient ABC method, unlike get_snapshots/
+    place_oco_bracket/list_open_orders, so there's no getattr presence
+    check to use instead -- see _ensure_streaming_subscribed's
+    docstring). Captures the on_update callback so a test can simulate a
+    real streamed message arriving via push_stream_snapshot, exactly the
+    way WebullBrokerClient._on_quotes_message would call it from the
+    MQTT client's own background thread in production."""
+    subscribe_calls: list = field(default_factory=list)
+    individual_calls: list = field(default_factory=list)
+    _stream_callback: object = None
+
+    def subscribe_quotes(self, symbols, on_update):
+        self.subscribe_calls.append(list(symbols))
+        self._stream_callback = on_update
+
+    def push_stream_snapshot(self, snapshot):
+        assert self._stream_callback is not None, "subscribe_quotes was never called"
+        self._stream_callback(snapshot)
+
+    def get_snapshot(self, symbol):
+        self.individual_calls.append(symbol)
+        return super().get_snapshot(symbol)
+
+
 def _armed_candidate_setup(broker):
     from webull_bot.state_machine import new_candidate, transition
     from webull_bot.enums import CandidateState
@@ -2472,3 +2500,184 @@ def test_verify_via_positions_reverts_to_armed_when_no_signal_on_record():
 
     assert candidate.state.value == "armed"
     assert candidate.symbol not in loop._pending_entry_orders
+
+
+# -- live-streamed prices for MANAGING/ENTERED positions ---------------------
+
+def test_on_streaming_snapshot_stores_a_live_snapshot():
+    broker = _FakeBroker()
+    loop, _ = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+
+    loop._on_streaming_snapshot(snapshot)
+
+    assert loop._get_streaming_snapshot("TEST", _IN_HOURS_NOW) is snapshot
+
+
+def test_get_streaming_snapshot_returns_none_when_nothing_ever_streamed():
+    broker = _FakeBroker()
+    loop, _ = _armed_candidate_setup(broker)
+    assert loop._get_streaming_snapshot("TEST", _IN_HOURS_NOW) is None
+
+
+def test_get_streaming_snapshot_returns_none_once_stale(monkeypatch):
+    # _on_streaming_snapshot stamps receipt time with the real wall clock
+    # (datetime.utcnow()) -- correct in production, where a streamed
+    # message's arrival and TradingLoop's own `now` are both real time --
+    # but this suite otherwise runs everything off the fixed simulated
+    # _IN_HOURS_NOW (see the module comment above it). So the "received
+    # at" clock has to be faked here too, or it'd be comparing a real
+    # today's-date receipt time against a fixed 2026-08-10 `now`.
+    from webull_bot.runtime import trading_loop as trading_loop_module
+
+    fake_now = {"value": _IN_HOURS_NOW}
+
+    class _FakeDateTime(datetime):
+        @classmethod
+        def utcnow(cls):
+            return fake_now["value"]
+
+    monkeypatch.setattr(trading_loop_module, "datetime", _FakeDateTime)
+
+    broker = _FakeBroker()
+    loop, _ = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._on_streaming_snapshot(snapshot)
+
+    fresh_check = _IN_HOURS_NOW + timedelta(seconds=loop.config.streaming_staleness_seconds - 1)
+    assert loop._get_streaming_snapshot("TEST", fresh_check) is snapshot
+
+    stale_check = _IN_HOURS_NOW + timedelta(seconds=loop.config.streaming_staleness_seconds + 1)
+    assert loop._get_streaming_snapshot("TEST", stale_check) is None
+
+
+def test_ensure_streaming_subscribed_calls_broker_subscribe_quotes():
+    broker = _StreamingBroker()
+    loop, _ = _armed_candidate_setup(broker)
+
+    loop._ensure_streaming_subscribed(["TEST"])
+
+    assert broker.subscribe_calls == [["TEST"]]
+    assert loop._streaming_supported is True
+    assert loop._streaming_requested_symbols == {"TEST"}
+
+
+def test_ensure_streaming_subscribed_only_sends_new_symbols():
+    broker = _StreamingBroker()
+    loop, _ = _armed_candidate_setup(broker)
+
+    loop._ensure_streaming_subscribed(["TEST"])
+    loop._ensure_streaming_subscribed(["TEST", "OTHER"])
+
+    assert broker.subscribe_calls == [["TEST"], ["OTHER"]]
+
+
+def test_ensure_streaming_subscribed_is_a_noop_for_already_subscribed_symbols():
+    broker = _StreamingBroker()
+    loop, _ = _armed_candidate_setup(broker)
+
+    loop._ensure_streaming_subscribed(["TEST"])
+    loop._ensure_streaming_subscribed(["TEST"])
+
+    assert broker.subscribe_calls == [["TEST"]]
+
+
+def test_ensure_streaming_subscribed_permanently_disables_on_not_implemented():
+    # _FakeBroker.subscribe_quotes raises NotImplementedError, exactly
+    # matching PaperBrokerClient's own deliberate behavior.
+    broker = _FakeBroker()
+    loop, _ = _armed_candidate_setup(broker)
+
+    loop._ensure_streaming_subscribed(["TEST"])
+    assert loop._streaming_supported is False
+
+    # A later call for a different symbol must short-circuit immediately
+    # rather than calling subscribe_quotes (and hitting the same
+    # NotImplementedError) again.
+    calls_before = getattr(broker, "subscribe_calls", None)
+    loop._ensure_streaming_subscribed(["OTHER"])
+    assert loop._streaming_requested_symbols == set()  # never actually subscribed to anything
+
+
+def test_ensure_streaming_subscribed_survives_an_unexpected_exception():
+    class _BrokenStreamingBroker(_FakeBroker):
+        def subscribe_quotes(self, symbols, on_update):
+            raise RuntimeError("simulated streaming connection failure")
+
+    broker = _BrokenStreamingBroker()
+    loop, _ = _armed_candidate_setup(broker)
+
+    loop._ensure_streaming_subscribed(["TEST"])  # must not raise
+
+    assert loop._streaming_supported is None  # unknown, not permanently disabled -- worth retrying later
+    assert loop._streaming_requested_symbols == set()
+
+
+def test_confirm_entry_filled_subscribes_to_streaming():
+    from webull_bot.enums import SignalAction
+    from webull_bot.models import Signal
+    from webull_bot.state_machine import transition
+
+    broker = _StreamingBroker(fills_after_polls=1)
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    transition(candidate, CandidateState.TRIGGERED)
+    signal = Signal(
+        symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
+        strategy_name="test", strategy_version="v1", reference_price=5.20, suggested_stop=5.00,
+    )
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+    loop._poll_pending_entry(candidate, snapshot.timestamp)
+
+    assert broker.subscribe_calls == [["TEST"]]
+
+
+def test_process_candidate_prefers_a_fresh_streamed_snapshot_for_a_managing_position():
+    broker = _StreamingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=_IN_HOURS_NOW, strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+
+    # REST (_FakeBroker.get_snapshot) always returns last_price=5.20, well
+    # above the 4.50 stop -- would NOT trigger an exit. The streamed price
+    # below is what should actually be acted on instead.
+    streamed = _snapshot(_IN_HOURS_NOW, 4.00, 4.00, 600_000, 3.99, 4.01, 4.50)
+    loop._on_streaming_snapshot(streamed)
+
+    loop._process_candidate(candidate, _IN_HOURS_NOW)
+
+    assert candidate.symbol in loop._pending_exit_orders  # exit submitted -- acted on the streamed price
+
+
+def test_process_all_candidates_excludes_a_fresh_streaming_symbol_from_the_rest_batch():
+    broker = _StreamingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=_IN_HOURS_NOW, strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    broker._positions.append(position)  # reconcile must still see it as a real broker position
+
+    streamed = _snapshot(_IN_HOURS_NOW, 6.00, 6.00, 600_000, 5.99, 6.01, 5.15)
+    loop._on_streaming_snapshot(streamed)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert broker.individual_calls == []  # never fell back to its own get_snapshot() for TEST

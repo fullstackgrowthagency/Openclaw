@@ -870,3 +870,305 @@ def test_list_open_orders_uses_normal_priority_by_default(monkeypatch):
     client.list_open_orders()
 
     assert calls == [retry_module.CallPriority.NORMAL]
+
+
+# -- streaming (subscribe_quotes / _snapshot_from_streamed_result) ----------
+# Confirmed live 2026-08-11 (scripts/verify_streaming.py --sub-type SNAPSHOT)
+# against the real sandbox account -- field names below are read directly
+# from the SDK's own snapshot_result.py, matching that live output.
+
+class _FakeBasicResult:
+    def __init__(self, symbol, timestamp, trading_session="RTH"):
+        self.symbol = symbol
+        self.timestamp = timestamp
+        self.trading_session = trading_session
+
+
+class _FakeSnapshotResult:
+    def __init__(
+        self, symbol, timestamp, price=None, open=None, high=None, low=None, pre_close=None,
+        volume=None, ext_price=None, ext_high=None, ext_low=None, ext_volume=None, trading_session="RTH",
+    ):
+        self.basic = _FakeBasicResult(symbol, timestamp, trading_session)
+        self.price = price
+        self.open = open
+        self.high = high
+        self.low = low
+        self.pre_close = pre_close
+        self.volume = volume
+        self.ext_price = ext_price
+        self.ext_high = ext_high
+        self.ext_low = ext_low
+        self.ext_volume = ext_volume
+
+
+def test_snapshot_from_streamed_result_maps_real_fields():
+    client = _client()
+    result = _FakeSnapshotResult(
+        symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=304.39, open=307.75,
+        high=309.97, low=302.79, pre_close=308.26, volume=22042211,
+    )
+    snapshot = client._snapshot_from_streamed_result(result)
+    assert snapshot.symbol == "AAPL"
+    assert snapshot.last_price == 304.39
+    assert snapshot.open_price == 307.75
+    assert snapshot.high_of_day == 309.97
+    assert snapshot.low_of_day == 302.79
+    assert snapshot.prev_close == 308.26
+    assert snapshot.cumulative_volume == 22042211.0
+    assert snapshot.vwap == snapshot.last_price  # not carried by this feed -- same fallback as REST
+    assert snapshot.bid == 0.0 and snapshot.ask == 0.0  # not carried by this feed at all
+
+
+def test_snapshot_from_streamed_result_ignores_ext_fields_during_regular_hours():
+    client = _client()
+    result = _FakeSnapshotResult(
+        symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=304.39, volume=100,
+        ext_price=999.0, ext_volume=999,
+    )
+    snapshot = client._snapshot_from_streamed_result(result)
+    assert snapshot.last_price == 304.39
+    assert snapshot.cumulative_volume == 100.0
+
+
+def test_snapshot_from_streamed_result_honors_ext_fields_during_premarket():
+    client = _client()
+    result = _FakeSnapshotResult(
+        symbol="AAPL", timestamp=_PREMARKET_QUOTE_TIME_MS, price=304.39, volume=100,
+        ext_price=310.0, ext_volume=555, ext_high=311.0, ext_low=309.0,
+    )
+    snapshot = client._snapshot_from_streamed_result(result)
+    assert snapshot.last_price == 310.0
+    assert snapshot.cumulative_volume == 555.0
+    assert snapshot.high_of_day == 311.0
+    assert snapshot.low_of_day == 309.0
+
+
+def test_snapshot_from_streamed_result_defaults_missing_fields_to_last_price():
+    client = _client()
+    result = _FakeSnapshotResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=304.39)
+    snapshot = client._snapshot_from_streamed_result(result)
+    assert snapshot.high_of_day == 304.39
+    assert snapshot.low_of_day == 304.39
+    assert snapshot.open_price == 304.39
+    assert snapshot.prev_close is None
+    assert snapshot.cumulative_volume == 0.0
+
+
+class _FakeDataStreamingClient:
+    """Stands in for webull.data.data_streaming_client.DataStreamingClient
+    -- subscribe_quotes constructs one of these internally (not injectable
+    via a normal argument), so tests monkeypatch the DataStreamingClient
+    name inside the client module with this factory instead."""
+
+    def __init__(self, app_key, app_secret, region, session_id, http_host=None, mqtt_host=None):
+        self.app_key = app_key
+        self.app_secret = app_secret
+        self.region = region
+        self.session_id = session_id
+        self.http_host = http_host
+        self.mqtt_host = mqtt_host
+        self.on_connect_success = None
+        self.on_quotes_message = None
+        self.connect_calls = 0
+        self.subscribe_calls = []
+        self._connected = False
+
+    def connect_and_loop_start(self):
+        self.connect_calls += 1
+
+    def get_connect_success(self):
+        return self._connected
+
+    def subscribe(self, symbols, category, sub_types):
+        self.subscribe_calls.append((list(symbols), category, list(sub_types)))
+
+
+def _streaming_client(trading_mode=None):
+    from webull_bot.config import TradingMode
+
+    client = _client()
+    client.settings = SimpleNamespace(
+        trading_mode=trading_mode or TradingMode.SANDBOX,
+        webull=SimpleNamespace(app_key="test-key", app_secret="test-secret", base_url="api.sandbox.webull.com"),
+    )
+    client._streaming_client = None
+    client._streaming_subscribed_symbols = set()
+    import threading
+    client._streaming_lock = threading.Lock()
+    return client
+
+
+def _patch_streaming_client_factory(monkeypatch):
+    from webull_bot.brokers.webull import client as client_module
+
+    instances = []
+
+    def _factory(*args, **kwargs):
+        instance = _FakeDataStreamingClient(*args, **kwargs)
+        instances.append(instance)
+        return instance
+
+    monkeypatch.setattr(client_module, "DataStreamingClient", _factory)
+    return instances
+
+
+def test_subscribe_quotes_creates_a_streaming_connection_on_first_call(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+
+    assert len(instances) == 1
+    fake = instances[0]
+    assert fake.connect_calls == 1
+    assert fake.on_connect_success is not None
+    assert fake.on_quotes_message is not None
+
+
+def test_subscribe_quotes_uses_the_confirmed_sandbox_host(monkeypatch):
+    from webull_bot.config import TradingMode
+
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client(trading_mode=TradingMode.SANDBOX)
+
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+
+    assert instances[0].mqtt_host == "data-api.sandbox.webull.com"
+
+
+def test_subscribe_quotes_lets_the_sdk_auto_resolve_the_host_when_live(monkeypatch):
+    from webull_bot.config import TradingMode
+
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client(trading_mode=TradingMode.LIVE)
+
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+
+    assert instances[0].mqtt_host is None
+
+
+def test_subscribe_quotes_subscribes_on_connect_success(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL", "MSFT"], lambda snap: None)
+    fake = instances[0]
+
+    fake._connected = True
+    fake.on_connect_success(fake, None, "session-1")
+
+    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["SNAPSHOT"])]
+
+
+def test_subscribe_quotes_delivers_a_real_message_to_on_update(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    received = []
+    client.subscribe_quotes(["AAPL"], received.append)
+    fake = instances[0]
+
+    result = _FakeSnapshotResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=304.39, volume=100)
+    fake.on_quotes_message(fake, "snapshot", result)
+
+    assert len(received) == 1
+    assert received[0].symbol == "AAPL"
+    assert received[0].last_price == 304.39
+
+
+def test_subscribe_quotes_ignores_non_snapshot_topics(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    received = []
+    client.subscribe_quotes(["AAPL"], received.append)
+    fake = instances[0]
+
+    fake.on_quotes_message(fake, "quote", object())  # a different topic -- e.g. bid/ask QUOTE data
+
+    assert received == []
+
+
+def test_subscribe_quotes_swallows_an_on_update_exception(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+
+    def _boom(snap):
+        raise RuntimeError("simulated callback failure")
+
+    client.subscribe_quotes(["AAPL"], _boom)
+    fake = instances[0]
+    result = _FakeSnapshotResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=1.0)
+
+    fake.on_quotes_message(fake, "snapshot", result)  # must not raise
+
+
+def test_subscribe_quotes_reuses_the_existing_connection_for_new_symbols(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+    fake._connected = True
+
+    client.subscribe_quotes(["MSFT"], lambda snap: None)
+
+    assert len(instances) == 1  # no second connection opened
+    assert fake.connect_calls == 1
+    assert fake.subscribe_calls == [(["MSFT"], "US_STOCK", ["SNAPSHOT"])]  # only the NEW symbol
+
+
+def test_subscribe_quotes_skips_already_subscribed_symbols(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+    fake._connected = True
+    fake.subscribe_calls.clear()
+
+    client.subscribe_quotes(["AAPL"], lambda snap: None)  # already subscribed -- no-op
+
+    assert fake.subscribe_calls == []
+
+
+def test_subscribe_quotes_defers_new_symbols_until_connected(monkeypatch):
+    # Second call arrives before the first connection has finished
+    # connecting (get_connect_success() still False) -- the new symbol
+    # must not be dropped, just picked up once _on_connect_success fires
+    # and reads the full (by-then-updated) subscribed-symbols set.
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+    assert fake._connected is False
+
+    client.subscribe_quotes(["MSFT"], lambda snap: None)
+    assert fake.subscribe_calls == []  # not connected yet -- nothing sent directly
+
+    fake._connected = True
+    fake.on_connect_success(fake, None, "session-1")
+
+    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["SNAPSHOT"])]
+
+
+def test_disconnect_stops_the_streaming_client():
+    client = _streaming_client()
+
+    class _FakeStreamingClient:
+        def __init__(self):
+            self.loop_stop_called = False
+            self.disconnect_called = False
+
+        def loop_stop(self):
+            self.loop_stop_called = True
+
+        def disconnect(self):
+            self.disconnect_called = True
+
+    fake = _FakeStreamingClient()
+    client._streaming_client = fake
+    client._streaming_subscribed_symbols = {"AAPL"}
+
+    client.disconnect()
+
+    assert fake.loop_stop_called is True
+    assert fake.disconnect_called is True
+    assert client._streaming_client is None
+    assert client._streaming_subscribed_symbols == set()

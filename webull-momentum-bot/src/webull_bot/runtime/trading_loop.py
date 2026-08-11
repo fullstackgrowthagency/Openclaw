@@ -1,12 +1,29 @@
 """
 Poll-based production run-loop.
 
-Webull streaming (subscribe_quotes) is not implemented yet -- no sandbox
-MQTT host was ever confirmed (see brokers/webull/client.py). Until that
-exists, this loop polls `broker.get_snapshot()` per candidate on a timer
-instead of reacting to a push feed. Swapping in streaming later should only
-require changing how snapshots arrive at `_process_candidate`, not the
-state-machine/order logic below.
+Streaming market data (2026-08-11): for a broker that implements
+`subscribe_quotes` (confirmed live for `WebullBrokerClient` against the
+sandbox MQTT host -- see that module's docstring), this loop uses a
+pushed live snapshot in place of a REST poll, but *only* for
+exit-management price checks on positions already in
+`CandidateState.ENTERED`/`MANAGING`. A symbol is subscribed the moment
+its broker-side bracket is attached (`_confirm_entry_filled`'s fresh-fill
+path and `reconcile_positions_from_broker`'s adoption-on-restart path,
+both via `_ensure_streaming_subscribed`); `_on_streaming_snapshot` stores
+each pushed update keyed by symbol, and `_get_streaming_snapshot` returns
+it only if it arrived within `TradingLoopConfig.streaming_staleness_seconds`
+(10s default) -- otherwise `_process_candidate_inner` falls back to the
+REST-polled snapshot exactly as before, and `_process_all_candidates`'s
+batched `get_snapshots` call skips any symbol already covered by a fresh
+stream. Pre-entry momentum scoring and entry-time spread gating are
+deliberately NOT switched to streaming -- the subscribed `SNAPSHOT`
+message type carries no bid/ask, and only exit-management
+(`PositionManager.check_exit`, which only ever reads
+`last_price`/`vwap`/`timestamp`/`symbol`) doesn't need it. If
+`subscribe_quotes` isn't implemented by the broker in use (e.g.
+`PaperBrokerClient`) or a subscribe call raises, this loop permanently
+falls back to pure REST polling for that run rather than retrying a call
+that can't succeed -- see `_ensure_streaming_subscribed`'s docstring.
 
 Key design point: `WebullBrokerClient.place_order` returns status=SUBMITTED,
 not FILLED (a 2xx response means Webull accepted the order for processing,
@@ -196,6 +213,17 @@ class TradingLoopConfig:
     # tick float noise, not a meaningful loosening of how tightly the stop
     # actually trails price.
     stop_sync_min_move_pct: float = 0.25
+    # How long a live-streamed snapshot for a MANAGING/ENTERED position's
+    # symbol stays usable before _get_streaming_snapshot considers it
+    # stale and falls back to REST polling for that symbol instead --
+    # see that method and _ensure_streaming_subscribed's docstrings.
+    # Deliberately looser than poll_interval_seconds (5s default): a
+    # genuinely healthy stream delivers ticks far more often than that, so
+    # this mostly guards against the stream having silently stopped
+    # entirely (a dropped connection, the known-but-not-yet-understood
+    # reconnect issue noted in WebullBrokerClient.subscribe_quotes'
+    # docstring) rather than pacing normal operation.
+    streaming_staleness_seconds: float = 10.0
 
 
 class TradingLoop:
@@ -298,6 +326,31 @@ class TradingLoop:
         # accessed; also None for the whole pass if the broker doesn't
         # support list_open_orders at all.
         self._tick_open_orders_cache: Optional[dict[str, Order]] = None
+        # Live-streamed prices for MANAGING/ENTERED positions (see
+        # _ensure_streaming_subscribed/_on_streaming_snapshot/
+        # _get_streaming_snapshot) -- {symbol: (MarketSnapshot, received_at)}.
+        # Written from the broker's own MQTT background thread (never the
+        # main processing thread this class otherwise runs on -- see
+        # WebullBrokerClient.subscribe_quotes's docstring), so all access
+        # goes through _live_snapshots_lock, the same "dedicated lock for
+        # cross-thread structural access" pattern this module already uses
+        # for self.candidates (_candidates_lock, see this module's
+        # docstring's Concurrency model section). received_at is this
+        # process's own wall-clock receipt time, not the snapshot's own
+        # (Webull-reported) timestamp -- used purely to detect the stream
+        # going quiet for a symbol, independent of any clock skew between
+        # this process and Webull's servers.
+        self._live_snapshots: dict[str, tuple[MarketSnapshot, datetime]] = {}
+        self._live_snapshots_lock = threading.Lock()
+        # None until the first _ensure_streaming_subscribed call resolves
+        # one way or the other; False once broker.subscribe_quotes has
+        # raised NotImplementedError (PaperBrokerClient/backtests, or any
+        # broker that doesn't implement streaming) -- permanent for this
+        # process's lifetime, so every later call short-circuits instead of
+        # retrying a call already known to fail. True once at least one
+        # real subscription has succeeded.
+        self._streaming_supported: Optional[bool] = None
+        self._streaming_requested_symbols: set[str] = set()
         self._persisted_transition_counts: dict[str, int] = {}  # symbol -> len(state_history) already flushed
         # Set by engage_kill_switch_and_flatten (callable from any thread,
         # e.g. the dashboard's request thread) and consumed by
@@ -532,6 +585,89 @@ class TradingLoop:
             stored = self.candidates.setdefault(symbol, candidate)
         return stored, None, was_newly_added
 
+    # -- live-streamed prices for MANAGING/ENTERED positions --------------
+
+    def _on_streaming_snapshot(self, snapshot: MarketSnapshot) -> None:
+        """Passed to broker.subscribe_quotes as its on_update callback --
+        called from the broker's own MQTT background thread (see
+        WebullBrokerClient.subscribe_quotes's docstring), never this
+        loop's own main processing thread. Only stores the snapshot under
+        self._live_snapshots_lock; all real decision-making
+        (PositionManager.check_exit, etc.) still happens on the main
+        thread the next time it reads this via _get_streaming_snapshot --
+        same "write from any thread under a lock, read fresh on your own
+        thread" pattern this module already uses for self.candidates (see
+        this module's docstring's Concurrency model section)."""
+        with self._live_snapshots_lock:
+            self._live_snapshots[snapshot.symbol] = (snapshot, datetime.utcnow())
+
+    def _get_streaming_snapshot(self, symbol: str, now: datetime) -> Optional[MarketSnapshot]:
+        """Returns the most recent live-streamed snapshot for `symbol` if
+        one exists and is no older than
+        TradingLoopConfig.streaming_staleness_seconds, else None (either
+        nothing has ever streamed for this symbol -- not subscribed,
+        streaming unsupported by this broker, or no message has arrived
+        yet -- or the stream has gone quiet for it). Callers must treat
+        None as "fall back to REST polling for this symbol", exactly the
+        same fallback contract every other optional/best-effort broker
+        capability in this codebase already follows (get_snapshots,
+        list_open_orders, place_oco_bracket, ...)."""
+        with self._live_snapshots_lock:
+            entry = self._live_snapshots.get(symbol)
+        if entry is None:
+            return None
+        snapshot, received_at = entry
+        if now - received_at > timedelta(seconds=self.config.streaming_staleness_seconds):
+            return None
+        return snapshot
+
+    def _ensure_streaming_subscribed(self, symbols: list[str]) -> None:
+        """Best-effort: asks the broker to start streaming live prices for
+        `symbols` via broker.subscribe_quotes, so _get_streaming_snapshot
+        has something fresh to serve on subsequent ticks for a MANAGING/
+        ENTERED position -- see _confirm_entry_filled and
+        reconcile_positions_from_broker's adoption path for where this is
+        actually called (right when a position starts being tracked,
+        mirroring _attach_broker_bracket's own call sites).
+
+        subscribe_quotes is a required BrokerClient ABC method (unlike
+        get_snapshots/list_open_orders/place_oco_bracket, which are
+        optional/getattr-gated), but PaperBrokerClient's implementation of
+        it deliberately raises NotImplementedError rather than doing
+        something meaningful -- so the capability check here has to be a
+        try/except around the call itself rather than a getattr presence
+        check. self._streaming_supported=False is set permanently the
+        first time that happens, so every later call this process makes
+        short-circuits immediately instead of retrying a call already
+        known to fail for this broker every single tick a new position
+        opens.
+
+        Only ever subscribes symbols not already requested this process's
+        lifetime (self._streaming_requested_symbols) -- there is
+        deliberately no unsubscribe path for a symbol whose position later
+        closes (see this method's callers): the extra ticks for an
+        untracked symbol are harmless (nothing reads them -- only
+        MANAGING/ENTERED candidates ever call _get_streaming_snapshot) and
+        simpler than tracking exactly when it's safe to unsubscribe."""
+        if self._streaming_supported is False:
+            return
+        new_symbols = [s for s in symbols if s not in self._streaming_requested_symbols]
+        if not new_symbols:
+            return
+        try:
+            self.broker.subscribe_quotes(new_symbols, self._on_streaming_snapshot)
+        except NotImplementedError:
+            self._streaming_supported = False
+            return
+        except Exception:
+            logger.warning(
+                "subscribe_quotes failed for %s; these symbols' MANAGING/ENTERED price checks "
+                "fall back to REST polling instead.", new_symbols, exc_info=True,
+            )
+            return
+        self._streaming_supported = True
+        self._streaming_requested_symbols.update(new_symbols)
+
     # -- per-candidate processing ---------------------------------------------
 
     def _process_candidate(
@@ -563,11 +699,24 @@ class TradingLoop:
                 transition(candidate, CandidateState.WATCHING, now=now, reason="cooldown expired")
             return
 
-        try:
-            snapshot = prefetched_snapshot if prefetched_snapshot is not None else self.broker.get_snapshot(candidate.symbol)
-        except Exception:
-            logger.warning("get_snapshot failed for %s this cycle; skipping.", candidate.symbol, exc_info=True)
-            return
+        snapshot = None
+        if candidate.state in (CandidateState.ENTERED, CandidateState.MANAGING):
+            # Prefer a fresh live-streamed price over REST for exactly
+            # this state pair -- see _get_streaming_snapshot's docstring.
+            # Pre-entry states (WATCHING/HEATING_UP/ARMED/TRIGGERED) never
+            # take this path: momentum scoring needs volume-derived
+            # metrics and RiskEngine's spread gate needs bid/ask, neither
+            # of which the streamed SNAPSHOT feed carries (see
+            # WebullBrokerClient._snapshot_from_streamed_result's
+            # docstring) -- REST remains the only source for those.
+            snapshot = self._get_streaming_snapshot(candidate.symbol, now)
+
+        if snapshot is None:
+            try:
+                snapshot = prefetched_snapshot if prefetched_snapshot is not None else self.broker.get_snapshot(candidate.symbol)
+            except Exception:
+                logger.warning("get_snapshot failed for %s this cycle; skipping.", candidate.symbol, exc_info=True)
+                return
 
         if self.momentum_event_tracker is not None:
             try:
@@ -906,6 +1055,7 @@ class TradingLoop:
         )
         self._positions[candidate.symbol] = position
         self._attach_broker_bracket(candidate, position, now)
+        self._ensure_streaming_subscribed([candidate.symbol])
         transition(candidate, CandidateState.ENTERED, now=now, reason="entry order filled")
         transition(candidate, CandidateState.MANAGING, now=now, reason="managing open position")
 
@@ -1518,6 +1668,7 @@ class TradingLoop:
             # (adoption never sets one -- see above), so this always places
             # a lone resting stop, never a bracket.
             self._attach_broker_bracket(candidate, position, now)
+            self._ensure_streaming_subscribed([symbol])
 
             logger.warning(
                 "Adopted untracked broker position at startup: %s qty=%s side=%s synthetic "
@@ -1622,7 +1773,20 @@ class TradingLoop:
         get_snapshots = getattr(self.broker, "get_snapshots", None)
         if get_snapshots is not None:
             symbols_needing_snapshot = [
-                c.symbol for c in candidates if c.state not in (CandidateState.REJECTED, CandidateState.COOLDOWN)
+                c.symbol for c in candidates
+                if c.state not in (CandidateState.REJECTED, CandidateState.COOLDOWN)
+                # A MANAGING/ENTERED candidate with a fresh live-streamed
+                # price (see _get_streaming_snapshot) doesn't need this
+                # REST call at all -- _process_candidate_inner will use
+                # the streamed value directly. Excluding it here (not just
+                # having _process_candidate_inner prefer it once fetched)
+                # is what actually realizes streaming's rate-limit
+                # savings; leaving it in this batch would fetch it over
+                # REST anyway and simply discard that fetch unused.
+                and not (
+                    c.state in (CandidateState.ENTERED, CandidateState.MANAGING)
+                    and self._get_streaming_snapshot(c.symbol, now) is not None
+                )
             ]
             if symbols_needing_snapshot:
                 try:

@@ -136,6 +136,7 @@ Safety (unchanged from the skeleton this replaces):
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from datetime import datetime, time, timezone
 from typing import Callable, Optional
@@ -145,6 +146,7 @@ from webull.core.client import ApiClient
 from webull.data.common.category import Category
 from webull.data.common.timespan import Timespan
 from webull.data.data_client import DataClient
+from webull.data.data_streaming_client import DataStreamingClient
 from webull.trade.trade_client import TradeClient
 
 from ...config import Settings, TradingMode
@@ -169,6 +171,16 @@ _INTERVAL_TO_TIMESPAN = {
 # get_snapshot's own docstring: "For each request, up to 100 symbols can be
 # subscribed" -- used by get_snapshots to chunk a larger symbol list.
 _SNAPSHOT_BATCH_SIZE = 100
+
+# Confirmed live 2026-08-11 (scripts/verify_streaming.py) -- the SDK's own
+# bundled endpoints.json only knows the PRODUCTION quotes-api host
+# (data-api.webull.com) for any region; there is no sandbox entry in it at
+# all. This is the sandbox equivalent, found by testing the same
+# api.webull.com -> api.sandbox.webull.com naming pattern the REST API
+# already uses -- NOT documented anywhere the docstring above's citations
+# were pulled from, purely a live-tested guess that happened to be right.
+# See subscribe_quotes' docstring for how this is selected.
+_SANDBOX_MQTT_STREAMING_HOST = "data-api.sandbox.webull.com"
 
 _SIDE_TO_WEBULL = {
     OrderSide.BUY: "BUY",
@@ -246,6 +258,21 @@ class WebullBrokerClient(BrokerClient):
         self._api_client: Optional[ApiClient] = None
         self._trade_client: Optional[TradeClient] = None
         self._data_client: Optional[DataClient] = None
+        # Lazily created on the first subscribe_quotes() call -- see that
+        # method's docstring. One persistent MQTT connection is reused
+        # across every subsequent subscribe_quotes() call (adding more
+        # symbols to the same connection) rather than opening a new one
+        # per call.
+        self._streaming_client: Optional[DataStreamingClient] = None
+        self._streaming_subscribed_symbols: set[str] = set()
+        # Guards self._streaming_subscribed_symbols only -- it's written
+        # from whatever thread calls subscribe_quotes (TradingLoop's main
+        # thread in practice) and read from the MQTT client's own
+        # background network-loop thread inside _on_connect_success, which
+        # is exactly the kind of cross-thread structural access this
+        # project already uses a dedicated lock for elsewhere (see
+        # runtime/trading_loop.py's _candidates_lock and its docstring).
+        self._streaming_lock = threading.Lock()
 
     def connect(self) -> None:
         self._api_client = ApiClient(
@@ -260,6 +287,15 @@ class WebullBrokerClient(BrokerClient):
         self._data_client = DataClient(self._api_client)
 
     def disconnect(self) -> None:
+        if self._streaming_client is not None:
+            try:
+                self._streaming_client.loop_stop()
+                self._streaming_client.disconnect()
+            except Exception:
+                logger.warning("Failed to cleanly disconnect the streaming client.", exc_info=True)
+            self._streaming_client = None
+            with self._streaming_lock:
+                self._streaming_subscribed_symbols = set()
         self._api_client = None
         self._trade_client = None
         self._data_client = None
@@ -695,15 +731,169 @@ class WebullBrokerClient(BrokerClient):
         get_bars()/_snapshots_from_bars()."""
         return [float(row["volume"]) for row in self.get_raw_bars(symbol, "1d", lookback_days, priority=priority)]
 
-    def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
-        raise NotImplementedError(
-            "Streaming is CONFIRMED LIVE AND WORKING as of 2026-08-11 (real quote "
-            "ticks received against the sandbox account via scripts/verify_streaming.py "
-            "--mqtt-host data-api.sandbox.webull.com -- see this module's docstring), "
-            "but this method itself is still not implemented -- the confirmed host was "
-            "the missing piece, not the reason to keep polling. Poll get_snapshot()/ "
-            "get_bars() until this is actually built."
+    def _snapshot_from_streamed_result(self, result) -> MarketSnapshot:
+        """Maps a live-streamed SnapshotResult
+        (webull.data.quotes.subscribe.snapshot_result.SnapshotResult) to
+        this project's MarketSnapshot. Confirmed live 2026-08-11
+        (scripts/verify_streaming.py --sub-type SNAPSHOT) against the real
+        sandbox account -- exact attribute names read directly from the
+        SDK's own snapshot_result.py source, not guessed:
+        `.basic.symbol`/`.timestamp`/`.trading_session`, `.price`/`.open`/
+        `.high`/`.low`/`.pre_close`/`.volume`, plus `ext_price`/`ext_high`/
+        `ext_low`/`ext_volume` for extended hours -- the same `ext_*`
+        naming convention already used by the REST get_snapshot mapping in
+        `_snapshot_from_dict`, handled the same way here: prefer `ext_*`
+        only when the timestamp falls outside the regular session (via the
+        same `_is_outside_regular_session` gate, for the same reason --
+        unconfirmed whether Webull zeroes these fields out at the open or
+        echoes a stale pre-market value all day).
+
+        No bid/ask -- this streaming message type doesn't carry top-of-
+        book data at all (that's the separate `QUOTE` type, also confirmed
+        live but deliberately not subscribed here -- see subscribe_quotes'
+        docstring for why: this feed is only used for already-open
+        positions' exit checks, which never read bid/ask; RiskEngine's
+        spread gate at entry time only ever sees a REST-fetched snapshot).
+
+        `vwap` is not available from this feed either, matching the REST
+        endpoint's own gap (see `_snapshot_from_dict`'s docstring) --
+        falls back to `last_price`, the identical convention."""
+        basic = result.basic
+        quote_timestamp = _epoch_ms_to_dt(basic.timestamp)
+        last_price = float(result.price) if result.price is not None else 0.0
+        cumulative_volume = float(result.volume) if result.volume is not None else 0.0
+        high = float(result.high) if result.high is not None else last_price
+        low = float(result.low) if result.low is not None else last_price
+        open_price = float(result.open) if result.open is not None else last_price
+
+        if _is_outside_regular_session(quote_timestamp):
+            if result.ext_price is not None:
+                last_price = float(result.ext_price)
+            if result.ext_volume is not None:
+                cumulative_volume = float(result.ext_volume)
+            if result.ext_high is not None:
+                high = float(result.ext_high)
+            if result.ext_low is not None:
+                low = float(result.ext_low)
+
+        return MarketSnapshot(
+            symbol=basic.symbol,
+            timestamp=quote_timestamp,
+            last_price=last_price,
+            bid=0.0,
+            ask=0.0,
+            bid_size=0.0,
+            ask_size=0.0,
+            cumulative_volume=cumulative_volume,
+            vwap=last_price,
+            high_of_day=high,
+            low_of_day=low,
+            open_price=open_price,
+            prev_close=float(result.pre_close) if result.pre_close is not None else None,
         )
+
+    def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
+        """Confirmed live and working (2026-08-11, see this module's
+        docstring's "Streaming market data" note and
+        scripts/verify_streaming.py) -- subscribes to the `SNAPSHOT`
+        streaming message type (price/open/high/low/volume, confirmed live
+        with `--sub-type SNAPSHOT`; richer than the bare bid/ask `QUOTE`
+        type also confirmed live but not used here) for `symbols`, and
+        calls `on_update(snapshot)` every time a real update decodes for
+        one of them.
+
+        One persistent `DataStreamingClient`/MQTT connection is created
+        lazily on the first call and reused for every subsequent call --
+        a later call with new symbols adds them to the same connection's
+        subscription (or, if the connection hasn't finished connecting
+        yet, they're picked up by the connect callback once it does)
+        rather than opening a second connection. Already-subscribed
+        symbols in `symbols` are silently ignored (no duplicate
+        subscribe call).
+
+        `on_update` is called from the MQTT client's own background
+        thread (paho-mqtt's network loop), NOT the caller's thread --
+        callers that touch shared state from it must handle their own
+        thread-safety (see `TradingLoop._on_streaming_snapshot`'s
+        docstring for how this project does it). A mapping failure for
+        one message, or `on_update` itself raising, is logged and
+        swallowed so one bad message can't kill the whole stream.
+
+        `mqtt_host`: sandbox mode explicitly uses the confirmed
+        `_SANDBOX_MQTT_STREAMING_HOST` (`data-api.sandbox.webull.com` --
+        the SDK's own bundled endpoint config has no sandbox entry for
+        this at all, only production); live mode passes `None` to let the
+        SDK auto-resolve, which is correct there since the one host that
+        config *does* know about (`data-api.webull.com`) is the real
+        production host.
+
+        Known open issue (2026-08-11, not yet understood): an MQTT CONNACK
+        return code 1 ("Protocol not supported") has appeared on the SDK's
+        own automatic reconnect attempt a few seconds after every
+        verify_streaming.py test run's shutdown sequence began, regardless
+        of host/sub_type/outcome -- possibly a reconnect-during-shutdown
+        artifact specific to that short-lived script rather than a sign of
+        real instability, but not confirmed either way for a long-running
+        connection. TradingLoop's own staleness check (falling back to
+        REST polling for a symbol once its streamed data goes quiet -- see
+        `_get_streaming_snapshot`) is the safety net if this does recur in
+        production."""
+        with self._streaming_lock:
+            new_symbols = [s for s in symbols if s not in self._streaming_subscribed_symbols]
+            if not new_symbols:
+                return
+            self._streaming_subscribed_symbols.update(new_symbols)
+
+        if self._streaming_client is not None:
+            if self._streaming_client.get_connect_success():
+                try:
+                    self._streaming_client.subscribe(new_symbols, Category.US_STOCK.name, ["SNAPSHOT"])
+                except Exception:
+                    logger.exception("Streaming subscribe failed for additional symbols %s", new_symbols)
+            # else: still connecting -- _on_connect_success will subscribe
+            # the full updated set (read fresh from
+            # self._streaming_subscribed_symbols) once it fires.
+            return
+
+        session_id = str(uuid.uuid4())
+        mqtt_host = (
+            _SANDBOX_MQTT_STREAMING_HOST if self.settings.trading_mode == TradingMode.SANDBOX else None
+        )
+
+        def _on_connect_success(client_, api_client_, session_id_):
+            with self._streaming_lock:
+                current_symbols = sorted(self._streaming_subscribed_symbols)
+            logger.info(
+                "Streaming MQTT connected (session_id=%s); subscribing to %d symbol(s).",
+                session_id_, len(current_symbols),
+            )
+            try:
+                client_.subscribe(current_symbols, Category.US_STOCK.name, ["SNAPSHOT"])
+            except Exception:
+                logger.exception("Streaming subscribe failed on connect for %s", current_symbols)
+
+        def _on_quotes_message(client_, topic, payload):
+            if topic != "snapshot":
+                return
+            try:
+                snapshot = self._snapshot_from_streamed_result(payload)
+            except Exception:
+                logger.exception("Failed to map a streamed snapshot payload: %r", payload)
+                return
+            try:
+                on_update(snapshot)
+            except Exception:
+                logger.exception("subscribe_quotes on_update callback raised for %s", snapshot.symbol)
+
+        client = DataStreamingClient(
+            self.settings.webull.app_key, self.settings.webull.app_secret, _REGION, session_id,
+            http_host=self.settings.webull.base_url,
+            mqtt_host=mqtt_host,
+        )
+        client.on_connect_success = _on_connect_success
+        client.on_quotes_message = _on_quotes_message
+        client.connect_and_loop_start()
+        self._streaming_client = client
 
     # -- orders --------------------------------------------------------------
 

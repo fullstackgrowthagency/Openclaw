@@ -206,23 +206,24 @@ What's implemented and tested:
   per-tick `get_positions()` cache (several candidates needing it in the
   same pass now share one real call). See `docs/ARCHITECTURE.md`'s
   "Performance/rate-limit rehaul" section for the full breakdown.
-- **Streaming market data -- CONFIRMED LIVE (2026-08-11), not yet wired
-  into production.** `subscribe_quotes` is still a stub, but the blocker
-  ("no sandbox mqtt_host was ever confirmed") is resolved: the SDK's
-  auto-resolved `mqtt_host` (`data-api.webull.com`, its only bundled
-  quotes-api entry) connected over MQTT fine but got `417 INVALID_SESSION`
-  on every subscribe attempt -- ruled out as a timing race (identical
-  result with a 2s delay added) and traced instead to a cross-environment
-  mismatch: that host is production, while the subscribe REST call
-  correctly targets sandbox. The real sandbox host, confirmed live by
-  testing it explicitly, is **`data-api.sandbox.webull.com`** -- real
-  quote ticks (bid/ask price+size) arrived within seconds of subscribing.
-  `WebullBrokerClient.subscribe_quotes` itself still isn't implemented --
-  wiring streaming into `TradingLoop`'s actual polling loop is a separate
-  follow-up. See `docs/ARCHITECTURE.md`'s "Streaming market data" section
-  for the full writeup, including one still-open loose end (a "Protocol
-  not supported" MQTT error observed during the verify script's own
-  shutdown sequence on every run, not yet understood).
+- **Streaming market data -- confirmed live and wired into production
+  (2026-08-11).** `WebullBrokerClient.subscribe_quotes` is a real
+  implementation now, not a stub: it connects to the confirmed sandbox
+  MQTT host **`data-api.sandbox.webull.com`** (found by ruling out a
+  timing-race theory and a cross-environment host mismatch -- see
+  `docs/ARCHITECTURE.md`'s "Streaming market data" section for the full
+  writeup) and subscribes to the richer `SNAPSHOT` sub_type (price,
+  OHLC, volume, extended-hours variants). `TradingLoop` uses it for
+  exit-management price checks on positions already `ENTERED`/`MANAGING`
+  only -- a symbol is subscribed the moment its broker-side bracket is
+  attached (fresh fill or reconciled-on-restart adoption), falls back to
+  REST polling automatically if nothing has streamed in the last 10s, and
+  is excluded from that tick's batched REST `get_snapshots` call once
+  it's actively streaming. Pre-entry scoring and entry-time spread gating
+  are untouched -- they still poll REST, since the `SNAPSHOT` feed has no
+  bid/ask. One still-open loose end from the original verification: a
+  "Protocol not supported" MQTT error observed during the verify script's
+  own shutdown sequence on every test run, not yet understood.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry
