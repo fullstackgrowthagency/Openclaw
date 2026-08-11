@@ -1312,6 +1312,40 @@ def test_kill_switch_flatten_does_not_double_submit_while_a_close_is_still_pendi
     assert len(broker._orders) == orders_placed_after_tick_1
 
 
+def test_kill_switch_flatten_still_cancels_a_resting_bracket_not_just_pending_exits():
+    # Directly answers a real question about the pending-exit guard above:
+    # a position with only a resting broker-side stop/target order (the
+    # normal, healthy state -- position.broker_stop_order_id set, NOT in
+    # self._pending_exit_orders) is a completely different thing from a
+    # position whose close is already in flight. The guard must never
+    # confuse the two -- the resting bracket still gets cancelled and the
+    # market close still gets submitted, exactly as before that guard
+    # existed.
+    broker = _RestingBroker(fills_after_polls=1)
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+    assert stop_id is not None
+    assert "TEST" not in loop._pending_exit_orders  # only a resting bracket, no close in flight
+
+    loop.engage_kill_switch_and_flatten("test halt")
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert stop_id in broker._cancelled  # resting bracket cancelled, not skipped
+    assert "TEST" not in loop._positions  # and the position actually closed
+
+
 # -- end-of-core-hours auto-flatten (distinct from the kill switch: no
 # risk_engine.kill_switch_active flip, just closes anything still open once
 # the regular 9:30am-4:00pm ET session ends) -------------------------------
