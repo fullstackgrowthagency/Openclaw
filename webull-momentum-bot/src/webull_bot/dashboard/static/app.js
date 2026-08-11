@@ -543,10 +543,11 @@ async function refreshPositions() {
           <td class="${pnlClass(p.unrealized_pnl)}">${fmtMoney(p.unrealized_pnl)}</td>
           <td>${fmtNum(p.stop_price)}</td>
           <td>${fmtNum(p.target_price)}</td>
+          <td>${p.broker_managed ? "Broker" : "Software"}</td>
         </tr>`).join("")
-      : emptyRow(8, "No open positions");
+      : emptyRow(9, "No open positions");
   } catch (e) {
-    body.innerHTML = emptyRow(8, `Failed to load: ${e.message}`);
+    body.innerHTML = emptyRow(9, `Failed to load: ${e.message}`);
   }
 }
 

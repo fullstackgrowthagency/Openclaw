@@ -167,3 +167,47 @@ def test_excursions_update_even_without_an_exit():
     signal = manager.check_exit(position, _snapshot(10.5))
     assert signal is None
     assert position.max_favorable_excursion == 5.0
+
+
+# -- broker-managed positions: stop/target price-crosses are the broker's job --
+
+def test_broker_managed_position_does_not_emit_its_own_stop_signal():
+    manager = PositionManager(PositionManagementConfig(trailing_stop_pct=None, exit_on_vwap_failure=False, time_limit_minutes=None, breakeven_trigger_pct=None))
+    position = _position(stop_price=9.7, target_price=11.0, broker_stop_order_id="resting-stop-1")
+    signal = manager.check_exit(position, _snapshot(9.6))  # would hit the stop in the pure-software path
+    assert signal is None
+
+
+def test_broker_managed_position_does_not_emit_its_own_target_signal():
+    manager = PositionManager(PositionManagementConfig(trailing_stop_pct=None, exit_on_vwap_failure=False, time_limit_minutes=None, breakeven_trigger_pct=None))
+    position = _position(quantity=10, stop_price=9.7, target_price=11.0, broker_stop_order_id="resting-stop-1", broker_target_order_id="resting-target-1")
+    signal = manager.check_exit(position, _snapshot(11.1))  # would hit the target in the pure-software path
+    assert signal is None
+
+
+def test_broker_managed_position_still_emits_vwap_failure():
+    manager = PositionManager(PositionManagementConfig(trailing_stop_pct=None, exit_on_vwap_failure=True, vwap_failure_buffer_pct=0.5, time_limit_minutes=None, breakeven_trigger_pct=None))
+    position = _position(stop_price=8.0, target_price=None, broker_stop_order_id="resting-stop-1")
+    signal = manager.check_exit(position, _snapshot(9.9, vwap=10.0))
+    assert signal is not None
+    assert signal.metadata["exit_reason"] == ExitReason.VWAP_FAILURE.value
+
+
+def test_broker_managed_position_still_emits_time_limit():
+    manager = PositionManager(PositionManagementConfig(trailing_stop_pct=None, exit_on_vwap_failure=False, time_limit_minutes=30, breakeven_trigger_pct=None))
+    position = _position(stop_price=8.0, target_price=None, opened_at=datetime.utcnow() - timedelta(minutes=31), broker_stop_order_id="resting-stop-1")
+    signal = manager.check_exit(position, _snapshot(10.0))
+    assert signal is not None
+    assert signal.metadata["exit_reason"] == ExitReason.TIME_LIMIT.value
+
+
+def test_broker_managed_position_still_updates_breakeven_stop_price():
+    # check_exit's breakeven/trailing math is unaffected by broker_managed --
+    # TradingLoop reads the mutated stop_price to decide whether the resting
+    # broker order itself needs a cancel+replace (see
+    # _sync_broker_protective_orders); PositionManager has no way to reach
+    # the broker directly and isn't responsible for that push.
+    manager = PositionManager(PositionManagementConfig(breakeven_trigger_pct=5.0, trailing_stop_pct=None, exit_on_vwap_failure=False, time_limit_minutes=None))
+    position = _position(stop_price=9.5, target_price=None, broker_stop_order_id="resting-stop-1")
+    manager.check_exit(position, _snapshot(10.5))
+    assert position.stop_price == 10.0

@@ -40,7 +40,19 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     get_order_detail(account_id, client_order_id) -> confirmed to accept
     the client-generated client_order_id as the lookup key (no separate
     server-assigned order id needed), which is why `Order.broker_order_id`
-    is set to the same value as `client_order_id` here.
+    is set to the same value as `client_order_id` here. cancel_order
+    specifically needs each COMBO LEG's own client_order_id -- confirmed
+    live that a combo-level client_combo_order_id returns ORDER_NOT_FOUND.
+  - order_v3.place_order(account_id, [stop_dict, target_dict]) with both
+    dicts sharing one client_combo_order_id and combo_type="OCO" ->
+    confirmed live (2026-08-11, scripts/verify_bracket_orders.py) that a
+    2-leg OCO stop+target bracket can be attached to an ALREADY-OPEN
+    position with no MASTER (entry) leg -- see place_oco_bracket. Also
+    confirmed live the same session: modify_order/replace_order's effect
+    on a resting order's price is inconclusive (call returned "accepted"
+    but the immediate readback showed the field unset) -- breakeven/
+    trailing-stop updates use cancel_order + place_oco_bracket/place_order
+    again instead of relying on modify_order/replace_order.
   - market_data.get_snapshot([symbol], "US_STOCK") and
     get_history_bar(symbol, "US_STOCK", "M1", count=...) -> confirmed field
     names used in _snapshot_from_dict / _snapshots_from_bars. Note: neither
@@ -683,6 +695,64 @@ class WebullBrokerClient(BrokerClient):
         # get_order_status()/poll_fills() for the authoritative state.
         order.status = OrderStatus.SUBMITTED
         return order
+
+    def place_oco_bracket(self, stop_order: Order, target_order: Order) -> tuple[Order, Order]:
+        """Places a 2-leg OCO combo -- a resting protective STOP_LOSS leg
+        and a resting LIMIT take-profit leg sharing one
+        client_combo_order_id, so a fill on either leg cancels its sibling
+        at the broker automatically. Confirmed live 2026-08-11 (see
+        scripts/verify_bracket_orders.py) that Webull accepts attaching
+        this combo_type=OCO pair to an ALREADY-OPEN position with no
+        MASTER (entry) leg -- the only shape Webull's own docs show an
+        example of is a MASTER-anchored combo submitted atomically with
+        the entry, which this deliberately avoids (see
+        TradingLoop._attach_broker_bracket's docstring for why: touching
+        the entry-fill pipeline itself carries far more risk than a second
+        call right after fill confirmation).
+
+        order_v3.place_order accepts a *list* of order dicts sharing one
+        client_combo_order_id as a combo -- a lone dict with
+        combo_type=NORMAL (what place_order above sends) is a different,
+        non-combo request shape, so this bypasses place_order's single-
+        order path entirely while still reusing _order_payload per leg so
+        side/type/time-in-force/support_trading_session stay identical to
+        every other order this client places.
+
+        Not part of the BrokerClient interface (see interfaces/broker.py)
+        -- resting broker-side orders only mean something against a real
+        broker; PaperBrokerClient/backtests fill every order synchronously
+        at market with nothing to rest against. Callers (OrderManager, on
+        TradingLoop's behalf -- see order_manager.py's
+        _broker_supports_resting_orders) check for this with getattr, same
+        pattern as get_snapshots/get_raw_bars."""
+        if self.is_live and not self.settings.is_live_trading_authorized():
+            raise RuntimeError("Live trading authorization lost; refusing to place order.")
+
+        combo_id = str(uuid.uuid4())
+        stop_payload = self._order_payload(stop_order)
+        stop_payload["combo_type"] = "OCO"
+        stop_payload["client_combo_order_id"] = combo_id
+        target_payload = self._order_payload(target_order)
+        target_payload["combo_type"] = "OCO"
+        target_payload["client_combo_order_id"] = combo_id
+
+        response = self._require_trade_client().order_v3.place_order(
+            self.account_id, [stop_payload, target_payload]
+        )
+        response.raise_for_status()
+
+        now = datetime.utcnow()
+        for order, payload in ((stop_order, stop_payload), (target_order, target_payload)):
+            # Same convention as place_order above: Webull's cancel/detail
+            # calls key off the client-generated client_order_id, so
+            # broker_order_id is set to that same value rather than
+            # parsing anything out of the response body (whose success
+            # shape for a combo is, like place_order's, unconfirmed).
+            order.client_order_id = payload["client_order_id"]
+            order.broker_order_id = payload["client_order_id"]
+            order.status = OrderStatus.SUBMITTED
+            order.updated_at = now
+        return stop_order, target_order
 
     def cancel_order(self, broker_order_id: str) -> None:
         response = self._require_trade_client().order_v3.cancel_order(self.account_id, broker_order_id)

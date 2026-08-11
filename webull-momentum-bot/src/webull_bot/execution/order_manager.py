@@ -138,3 +138,74 @@ class OrderManager:
 
     def get_status(self, broker_order_id: str) -> Order:
         return self.broker.get_order_status(broker_order_id)
+
+    # -- broker-side (resting) protective orders --------------------------
+    # These three back TradingLoop's broker-side stop/target bracket
+    # feature (see position_manager.py's module docstring and
+    # WebullBrokerClient.place_oco_bracket). They deliberately don't go
+    # through submit_signal: there is no Signal here (this manages an
+    # already-approved, already-filled position, not a new entry/exit
+    # decision that needs risk-engine sizing/exposure evaluation), and
+    # submit_signal only knows how to build MARKET orders anyway. Kept on
+    # OrderManager rather than called directly from TradingLoop because
+    # this class is still "the ONLY component allowed to call a
+    # BrokerClient's order-placement methods" (see this module's
+    # docstring) -- that rule doesn't stop applying just because the order
+    # being placed isn't Signal-driven.
+
+    def _broker_supports_resting_orders(self) -> bool:
+        # place_oco_bracket is not part of the BrokerClient interface (see
+        # interfaces/broker.py) -- only WebullBrokerClient implements it.
+        # PaperBrokerClient/backtests fill every order synchronously at
+        # market regardless of order_type, so a "resting" stop placed
+        # through their plain place_order would close the position
+        # immediately instead of waiting for price to cross it; gating all
+        # three methods below on this same capability check keeps that
+        # broker on its existing pure-software PositionManager path
+        # unchanged, exactly as it behaved before this feature existed.
+        return getattr(self.broker, "place_oco_bracket", None) is not None
+
+    def place_resting_stop(
+        self, symbol: str, exit_side, quantity: float, stop_price: float,
+        *, strategy_name: Optional[str] = None, now: Optional[datetime] = None,
+    ) -> Optional[Order]:
+        """Places a lone resting protective STOP order. Returns None
+        (without calling the broker at all) if the connected broker
+        doesn't support resting orders -- see _broker_supports_resting_orders."""
+        if not self._broker_supports_resting_orders():
+            return None
+        ts = now or datetime.utcnow()
+        order = Order(
+            symbol=symbol, side=exit_side, order_type=OrderType.STOP, quantity=quantity,
+            stop_price=stop_price, status=OrderStatus.PENDING, client_order_id=str(uuid.uuid4()),
+            created_at=ts, updated_at=ts, strategy_name=strategy_name,
+        )
+        return self.broker.place_order(order)
+
+    def place_resting_bracket(
+        self, symbol: str, exit_side, stop_quantity: float, stop_price: float,
+        target_quantity: float, target_price: float,
+        *, strategy_name: Optional[str] = None, now: Optional[datetime] = None,
+    ) -> Optional[tuple[Order, Order]]:
+        """Places a resting OCO stop+target bracket via the broker's
+        place_oco_bracket (see that method's docstring -- confirmed live
+        that Webull accepts attaching this to an already-open position).
+        Returns None (without calling the broker at all) under the same
+        condition and for the same reason as place_resting_stop."""
+        if not self._broker_supports_resting_orders():
+            return None
+        ts = now or datetime.utcnow()
+        stop_order = Order(
+            symbol=symbol, side=exit_side, order_type=OrderType.STOP, quantity=stop_quantity,
+            stop_price=stop_price, status=OrderStatus.PENDING, created_at=ts, updated_at=ts,
+            strategy_name=strategy_name,
+        )
+        target_order = Order(
+            symbol=symbol, side=exit_side, order_type=OrderType.LIMIT, quantity=target_quantity,
+            limit_price=target_price, status=OrderStatus.PENDING, created_at=ts, updated_at=ts,
+            strategy_name=strategy_name,
+        )
+        return self.broker.place_oco_bracket(stop_order, target_order)
+
+    def cancel_resting_order(self, broker_order_id: str) -> None:
+        self.broker.cancel_order(broker_order_id)

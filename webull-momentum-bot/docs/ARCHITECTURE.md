@@ -1311,6 +1311,124 @@ from the dashboard's Settings panel via `GET`/`POST /api/position-settings`
 hence the separate endpoint pair; see "Dashboard" below), taking effect on
 the very next `check_exit()` call for every open position.
 
+## Broker-side (resting) stop/target management (2026-08-11)
+
+Everything above describes checks ①/② running purely in software:
+`TradingLoop` polls a snapshot, `PositionManager.check_exit` compares it
+against `stop_price`/`target_price`, and only THEN submits a MARKET order.
+That has a real gap a synthetic (software-only) stop can't close: if this
+process is slow, crashed, mid-restart, or hits an unexpected exception
+right when price crosses the line, nothing enforces the stop until the
+next successful tick notices -- confirmed as a real incident (RDGT,
+2026-08-11): a position sat well past its stop with a five-figure
+unrealized loss because the software-side exit submission silently failed
+with no retry. A resting order placed *at the broker* doesn't have this
+problem: Webull enforces it directly, independent of whether this process
+is alive, awake, or error-free at that exact moment.
+
+**What changed.** Confirmed live the same day (`scripts/verify_bracket_orders.py`)
+that Webull's OpenAPI supports attaching a real 2-leg `OCO` (One-Cancels-
+Other) combo -- a resting `STOP_LOSS` order and a resting `LIMIT`
+take-profit order sharing one `client_combo_order_id` -- to a position
+that's **already open**, with no `MASTER` (entry) leg required. That's
+deliberately not the only combo shape Webull's own docs show an example
+of (a `MASTER`-anchored combo submitted atomically with the entry) --
+attaching the bracket as a *second* call right after the entry fill is
+confirmed avoids touching `TradingLoop`'s entry-fill pipeline at all
+(`_submit_entry` → `_poll_pending_entry` → `_confirm_entry_filled`), which
+had already had several real production bugs found and fixed in it this
+same week. Also confirmed live: `cancel_order` needs each leg's own
+`client_order_id`, not the combo-level id (`ORDER_NOT_FOUND` otherwise);
+and `modify_order`/`replace_order`'s effect on a resting order's price was
+**inconclusive** (the call reported "accepted" but the immediate readback
+showed the field unset) -- so this feature never uses it, using
+cancel-then-place-again instead everywhere a resting order's price needs
+to change.
+
+**Capability-gated, not a new interface method.** `WebullBrokerClient.place_oco_bracket`
+is *not* part of the `BrokerClient` ABC (`interfaces/broker.py`) -- resting
+orders only mean something against a real broker; `PaperBrokerClient` and
+the backtest engine fill every order synchronously at market with nothing
+to rest against, so requiring them to implement it would be meaningless.
+`OrderManager._broker_supports_resting_orders()` checks for it with
+`getattr`, the same pattern already used for `get_snapshots`/`get_raw_bars`.
+Every position falls back automatically and silently to the pure-software
+behavior described above whenever the connected broker lacks this
+capability (tests, `PaperBrokerClient`, backtests) **or** a broker call in
+this chain fails for any reason (rejected order, network error) -- broker-
+side management is an enhancement layered on top of the existing fallback,
+never a precondition for a position being tracked at all.
+
+**The lifecycle, symbol by symbol:**
+
+1. **Attach** (`TradingLoop._attach_broker_bracket`, called from
+   `_confirm_entry_filled` right after a fresh entry fill, and again after
+   startup/periodic adoption in `reconcile_positions_from_broker`). Builds
+   a resting `STOP` leg at the full quantity and (if a target is set and
+   the position is big enough to split into two whole-share halves -- the
+   same floor-to-half-share rule `OrderManager.submit_signal`'s `SCALE_OUT`
+   path already uses) a resting `LIMIT` leg at half the quantity, and
+   places them as one `OCO` pair via `OrderManager.place_resting_bracket`
+   (or a lone `STOP` via `place_resting_stop` when there's no target --
+   adoption never has one). Stores both legs' broker order ids and the
+   synced stop price on `Position` (`broker_stop_order_id`,
+   `broker_target_order_id`, `broker_stop_price_synced`).
+2. **`PositionManager.check_exit` steps aside** for checks ①/② the instant
+   `position.broker_stop_order_id` is set (`broker_managed` in that
+   method) -- the broker is already watching for that exact price cross,
+   so this loop firing its own market order on the same cross would race
+   the broker's own fill and risk over-selling. Checks ③ (VWAP failure)
+   and ④ (time limit) are unaffected either way: neither has a broker-side
+   resting-order equivalent, so `PositionManager` always decides and emits
+   those itself. The breakeven/trailing math (the two stop-ratcheting
+   updates described above) also keeps running unconditionally -- it only
+   mutates `position.stop_price` in place, which has no way to reach the
+   broker on its own by design (`OrderManager`'s docstring: it's the only
+   component allowed to call broker order-placement methods).
+3. **Poll for a broker-side fill** (`TradingLoop._poll_broker_bracket`,
+   called from `_manage_position` before `check_exit` even runs, for any
+   position carrying a resting order). If the stop leg filled, finalizes a
+   full `EXIT` (`STOP_LOSS`) exactly the way a software-submitted exit
+   would (`_dispatch_exit_finalization`) but without this loop ever having
+   submitted the fill-causing order itself. If the target leg filled,
+   finalizes a `SCALE_OUT` (`PARTIAL_PROFIT_TARGET`) the same way, **then
+   immediately re-attaches a fresh lone resting stop for the remainder**
+   (`_attach_broker_bracket` again, now with no target -- `partial_exit_taken`
+   is `True`): Webull's `OCO` logic auto-cancels the sibling leg the
+   instant one fills, so the original stop (which was sized for the FULL
+   original quantity) is gone the moment the target fills, and the
+   remaining shares would otherwise be naked until the next breakeven/
+   trailing sync happened to run.
+4. **Sync on a stop-price change** (`TradingLoop._sync_broker_protective_orders`,
+   called from `_manage_position` whenever `check_exit` runs and finds no
+   exit condition). Compares `position.stop_price` (which `check_exit`'s
+   breakeven/trailing math may have just moved) against
+   `broker_stop_price_synced`; if they differ, cancels **every** resting
+   leg for this position (not just the stop) and calls
+   `_attach_broker_bracket` again for a completely fresh resting order (or
+   pair, if a target is still active). Cancelling both legs together,
+   rather than trying to update just the stop leg's price in place, is
+   deliberate: it sidesteps both `modify_order`'s inconclusive live result
+   *and* the unconfirmed question of whether cancelling a single leg of an
+   already-placed `OCO` combo cancels or orphans its sibling.
+5. **Cancel before any software-submitted exit** -- a full `EXIT` for a
+   broker-managed position can still happen (VWAP failure, time limit,
+   the kill switch's flatten, the end-of-core-hours auto-flatten), and
+   each of those cancels any resting stop/target legs first
+   (`TradingLoop._cancel_broker_protective_orders`) before submitting its
+   own market order, so nothing is left resting against a position that's
+   about to be closed by a different order entirely.
+   `reconcile_positions_from_broker`'s drop path (a position closed
+   *outside* this process -- a manual close in the Webull app, an external
+   script) does the same best-effort cleanup for whatever it still has ids
+   for.
+
+**Dashboard:** `GET /api/positions` includes `broker_managed`
+(`position.broker_stop_order_id is not None`) per open position, shown as
+a "Mgmt" column (`Broker` / `Software`) so it's visible at a glance which
+positions are riding on a resting broker order right now versus the
+pure-software fallback.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right

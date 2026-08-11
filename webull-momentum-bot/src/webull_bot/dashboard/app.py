@@ -256,6 +256,14 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
                 "unrealized_pnl": unrealized_pnl,
                 "stop_price": position.stop_price,
                 "target_price": position.target_price,
+                # True once a resting broker-side stop (and, before target
+                # is hit, target) order is actually protecting this
+                # position -- see TradingLoop._attach_broker_bracket. False
+                # means this position is riding on this loop's own
+                # software-side PositionManager checks alone (broker
+                # doesn't support resting orders, or attaching/syncing one
+                # failed and this position fell back).
+                "broker_managed": position.broker_stop_order_id is not None,
                 "max_favorable_excursion": position.max_favorable_excursion,
                 "max_adverse_excursion": position.max_adverse_excursion,
                 "opened_at": position.opened_at.isoformat(),

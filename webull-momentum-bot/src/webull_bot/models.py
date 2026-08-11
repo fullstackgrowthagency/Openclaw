@@ -325,6 +325,35 @@ class Position:
     # stop/trailing-stop/breakeven/VWAP/time-limit checks from then on.
     partial_exit_taken: bool = False
 
+    # -- broker-side (resting) protective orders --------------------------
+    # Set by TradingLoop._attach_broker_bracket right after this position's
+    # entry fill is confirmed (and again after a partial exit, and again
+    # any time PositionManager's breakeven/trailing math moves stop_price --
+    # see _sync_broker_protective_orders), IF the connected broker actually
+    # supports resting orders (WebullBrokerClient.place_oco_bracket --
+    # PaperBrokerClient/backtests don't, since they fill everything
+    # synchronously at market with nothing to rest against, so these stay
+    # None there and this position is managed purely in software exactly as
+    # before this field existed). broker_stop_order_id is not None is what
+    # PositionManager.check_exit reads to decide whether ITS OWN stop/target
+    # price-cross checks should fire (skipped when the broker already holds
+    # a resting order enforcing them) or whether it must still do that work
+    # itself (broker unsupported, or attaching/syncing the resting order
+    # failed and this position fell back to software-only management).
+    broker_stop_order_id: Optional[str] = None
+    # Only ever set alongside broker_stop_order_id, and only when a target
+    # hasn't been hit yet (never re-armed after partial_exit_taken -- see
+    # _attach_broker_bracket) -- the resting take-profit leg of the same
+    # OCO combo as the stop above.
+    broker_target_order_id: Optional[str] = None
+    # The stop_price value that was actually pushed to the broker as of
+    # broker_stop_order_id's last (re)placement -- compared against the
+    # live position.stop_price (which PositionManager mutates every tick
+    # via breakeven/trailing, with no way to reach the broker itself) so
+    # _sync_broker_protective_orders only cancels+replaces the resting
+    # order when the two have actually diverged, not on every tick.
+    broker_stop_price_synced: Optional[float] = None
+
 
 @dataclass
 class Trade:

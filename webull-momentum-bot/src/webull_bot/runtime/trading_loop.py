@@ -24,6 +24,26 @@ running state. Instead, a local Position is seeded once (from the broker,
 for an accurate avg_entry_price) right when an entry fill is confirmed, and
 this loop's own dict is the source of truth for it until the position closes.
 
+Broker-side stop/target management (2026-08-11): against a broker that
+supports resting orders (see `WebullBrokerClient.place_oco_bracket`'s
+docstring -- PaperBrokerClient/backtests don't), `_attach_broker_bracket`
+places a real OCO stop+target bracket right after an entry fill is
+confirmed, `_poll_broker_bracket` notices when either leg fills (finalizing
+the trade the same way a software-submitted exit would, without this loop
+ever having submitted the fill-causing order itself), and
+`_sync_broker_protective_orders` cancels+replaces the resting stop whenever
+`PositionManager`'s own breakeven/trailing math moves `position.stop_price`.
+`PositionManager.check_exit` steps aside from its own stop/target checks
+for a broker-managed position (see its docstring) but still owns
+VWAP-failure/time-limit, which have no broker-side equivalent -- a
+software-submitted exit for either of those, and the kill-switch/end-of-
+core-hours flatten, all cancel any resting orders first (see
+`_cancel_broker_protective_orders`) before submitting their own market
+order. A position falls back to pure software-side management (this
+loop's pre-2026-08-11 behavior, unchanged) whenever the broker doesn't
+support resting orders or a broker call in this chain fails -- see each
+method's docstring for the exact fallback condition.
+
 Concurrency model (run_forever only -- run_once() stays single-threaded,
 see below): universe rescanning is slow (see TradingLoopConfig's docstring
 for measured per-symbol timing) and used to run inline in the main loop,
@@ -268,6 +288,14 @@ class TradingLoop:
             except Exception:
                 logger.warning("get_snapshot failed for %s while force-closing (%s).", symbol, exit_reason.value, exc_info=True)
                 continue
+
+            if position.broker_stop_order_id is not None or position.broker_target_order_id is not None:
+                # Same reasoning as _manage_position's own VWAP/time-limit
+                # exit path: don't leave a resting stop/target order behind
+                # for a position this call is about to force-close at
+                # market regardless of what the broker's own bracket would
+                # otherwise have done.
+                self._cancel_broker_protective_orders(symbol, position)
 
             exit_signal = Signal(
                 symbol=symbol,
@@ -689,7 +717,7 @@ class TradingLoop:
                 candidate.symbol, avg_entry_price, quantity,
             )
 
-        self._positions[candidate.symbol] = Position(
+        position = Position(
             symbol=candidate.symbol,
             side=order.side,
             quantity=quantity,
@@ -700,8 +728,232 @@ class TradingLoop:
             opened_at=now,
             strategy_name=signal.strategy_name,
         )
+        self._positions[candidate.symbol] = position
+        self._attach_broker_bracket(candidate, position, now)
         transition(candidate, CandidateState.ENTERED, now=now, reason="entry order filled")
         transition(candidate, CandidateState.MANAGING, now=now, reason="managing open position")
+
+    # -- broker-side (resting) stop/target bracket ---------------------------
+
+    def _attach_broker_bracket(self, candidate: Candidate, position: Position, now: datetime) -> None:
+        """Best-effort: attaches a resting broker-side OCO stop+target
+        bracket to `position` so its stop-loss and (initial) profit target
+        are enforced by the broker itself, instead of relying solely on
+        this loop's own polling cadence to notice a price cross and fire a
+        market order after the fact. Motivated by a real incident (RDGT,
+        2026-08-11): a stop sat unenforced past its level for a real loss
+        because the software-side exit submission silently failed -- a
+        resting broker order doesn't depend on this process being alive,
+        awake, and error-free at the exact moment price crosses it.
+
+        Called right after an entry fill is confirmed (_confirm_entry_filled),
+        again after a partial exit fires at the broker (_poll_broker_bracket,
+        to re-protect the remainder now that the original OCO's stop leg
+        was auto-cancelled along with the target fill), and again via
+        _sync_broker_protective_orders whenever PositionManager's own
+        breakeven/trailing math moves stop_price (cancel the stale resting
+        order, then call back in here to place a fresh one).
+
+        No-op (leaves position.broker_stop_order_id unset) if
+        position.stop_price is None (nothing to protect -- shouldn't
+        normally happen, RiskEngine requires a stop for every entry, but
+        this is defensive regardless) or if the connected broker doesn't
+        support resting orders at all (see OrderManager.place_resting_stop/
+        place_resting_bracket -- PaperBrokerClient/backtests, which is the
+        normal case in tests): PositionManager.check_exit falls back to
+        its pre-existing pure-software stop/target handling whenever
+        broker_stop_order_id is unset, so nothing about non-Webull brokers
+        changes. A broker call that raises (rejected order, network error)
+        is logged and swallowed the same way -- attaching broker-side
+        management is an enhancement layered on top of the existing
+        software fallback, never a precondition for the position itself
+        being tracked."""
+        if position.stop_price is None:
+            return
+
+        exit_side = OrderSide.SELL if position.side == OrderSide.BUY else OrderSide.BUY_TO_COVER
+        # Never re-arm a target leg once this position has already had its
+        # one partial exit (see PositionManager.check_exit's
+        # `not position.partial_exit_taken` gate on the equivalent
+        # software-side check) -- the remainder rides on the stop alone
+        # from here on, same contract as the pure-software path.
+        target_price = None if position.partial_exit_taken else position.target_price
+        target_quantity = None
+        if target_price is not None:
+            # Mirrors OrderManager.submit_signal's own SCALE_OUT floor-to-
+            # half-share rule. A target too small to split into two whole
+            # shares isn't bracketed with a separate leg at all -- the
+            # resting stop alone still protects the full position.
+            half = int(position.quantity // 2)
+            if half >= 1:
+                target_quantity = half
+            else:
+                target_price = None
+
+        try:
+            if target_price is not None:
+                result = self.order_manager.place_resting_bracket(
+                    candidate.symbol, exit_side, position.quantity, position.stop_price,
+                    target_quantity, target_price, strategy_name=position.strategy_name, now=now,
+                )
+                if result is None:
+                    return  # broker doesn't support resting orders -- software-only management for this position
+                stop_order, target_order = result
+                self._notify_order_update(stop_order)
+                self._notify_order_update(target_order)
+                position.broker_target_order_id = target_order.broker_order_id
+            else:
+                stop_order = self.order_manager.place_resting_stop(
+                    candidate.symbol, exit_side, position.quantity, position.stop_price,
+                    strategy_name=position.strategy_name, now=now,
+                )
+                if stop_order is None:
+                    return
+                self._notify_order_update(stop_order)
+                position.broker_target_order_id = None
+        except Exception:
+            logger.exception(
+                "Failed to attach broker-side protective order(s) for %s -- falling back to "
+                "software-only position management for this position.", candidate.symbol,
+            )
+            position.broker_stop_order_id = None
+            position.broker_target_order_id = None
+            position.broker_stop_price_synced = None
+            return
+
+        position.broker_stop_order_id = stop_order.broker_order_id
+        position.broker_stop_price_synced = position.stop_price
+
+    def _cancel_broker_protective_orders(self, symbol: str, position: Position) -> None:
+        """Cancels any resting broker-side stop/target orders still
+        attached to `position` -- called before this loop submits its own
+        market order against the same shares (a full EXIT via VWAP-
+        failure/time-limit/kill-switch/end-of-core-hours; SCALE_OUT never
+        reaches here, see PositionManager.check_exit's broker_managed gate:
+        target hits are the broker's own job to fill once bracketed, not
+        this loop's), and before replacing a resting stop at a new price
+        (_sync_broker_protective_orders). Leaving a resting order in place
+        after the position it protects is gone/about to change risks it
+        either sitting forever as broker-side clutter or firing later
+        against whatever this process opens next for the same symbol.
+
+        Best-effort: a cancel failure (e.g. the order already filled or
+        was cancelled moments earlier by the broker's own OCO logic) is
+        logged and swallowed rather than blocking whatever exit/replace
+        this is guarding -- and either way, the ids are cleared afterward
+        so PositionManager reverts to software-only management for this
+        position rather than assuming a resting order still exists that
+        this call couldn't confirm was actually removed."""
+        for order_id in (position.broker_stop_order_id, position.broker_target_order_id):
+            if order_id is None:
+                continue
+            try:
+                self.order_manager.cancel_resting_order(order_id)
+            except Exception:
+                logger.warning(
+                    "Failed to cancel resting broker order %s for %s (may already be inactive).",
+                    order_id, symbol, exc_info=True,
+                )
+        position.broker_stop_order_id = None
+        position.broker_target_order_id = None
+        position.broker_stop_price_synced = None
+
+    def _sync_broker_protective_orders(self, candidate: Candidate, position: Position, now: datetime) -> None:
+        """Keeps the broker-side resting stop in step with PositionManager's
+        own breakeven/trailing-stop math, which mutates position.stop_price
+        in place every tick (see PositionManager.check_exit) but has no way
+        to talk to the broker itself -- only TradingLoop calls
+        order_manager/broker methods (see order_manager.py's docstring).
+
+        No-op if this position was never bracketed at the broker in the
+        first place (broker_stop_order_id is None -- broker unsupported, or
+        _attach_broker_bracket already fell back to software-only
+        management) or if the stop hasn't actually moved since the last
+        sync. When it has, cancels BOTH resting legs (not just the stop)
+        and re-attaches a fresh bracket via _attach_broker_bracket, rather
+        than trying to update just the stop leg's price in place: Webull's
+        modify_order/replace_order was live-tested and its effect on a
+        resting order's price was inconclusive (see
+        WebullBrokerClient.place_oco_bracket's docstring), and whether
+        cancelling a single leg of an already-placed OCO combo cancels or
+        orphans its sibling is unconfirmed either way -- cancelling both
+        and placing a known-working fresh OCO (or lone stop, if no target
+        is still active -- _attach_broker_bracket handles that branch on
+        its own) sidesteps both open questions entirely."""
+        if position.broker_stop_order_id is None:
+            return
+        if position.stop_price is None or position.stop_price == position.broker_stop_price_synced:
+            return
+
+        self._cancel_broker_protective_orders(candidate.symbol, position)
+        self._attach_broker_bracket(candidate, position, now)
+
+    def _poll_broker_bracket(self, candidate: Candidate, position: Position, now: datetime) -> bool:
+        """Checks whether this position's resting broker-side stop or
+        target leg has filled since the last tick, finalizing the trade
+        the same way a software-submitted exit would
+        (_dispatch_exit_finalization) -- but without this loop ever having
+        submitted the order itself; Webull filled it directly against the
+        resting order placed by _attach_broker_bracket/
+        _sync_broker_protective_orders. Returns True if a fill was found
+        and handled this tick (caller should stop processing this
+        candidate further this tick, mirroring _poll_pending_exit's early
+        return), False otherwise (nothing filled yet, or a status check
+        itself failed -- left for the next tick, same as any other broker
+        poll failure in this loop).
+
+        The target leg (when present) is always sized at half the position
+        (see _attach_broker_bracket) and never re-armed after one partial,
+        so a target-leg fill is unconditionally a SCALE_OUT, never a full
+        EXIT -- unlike the pure-software path, there's no "too small to
+        split, downgrade to a full exit" branch to replicate here since
+        _attach_broker_bracket already made that same call before ever
+        placing the leg."""
+        for order_id, is_target in ((position.broker_stop_order_id, False), (position.broker_target_order_id, True)):
+            if order_id is None:
+                continue
+            try:
+                status_order = self.order_manager.get_status(order_id)
+            except Exception:
+                logger.warning(
+                    "get_order_status failed for resting %s order %s on %s this cycle.",
+                    "target" if is_target else "stop", order_id, candidate.symbol, exc_info=True,
+                )
+                continue
+            self._notify_order_update(status_order)
+
+            if status_order.status != OrderStatus.FILLED:
+                continue
+
+            exit_reason = ExitReason.PARTIAL_PROFIT_TARGET if is_target else ExitReason.STOP_LOSS
+            exit_signal = Signal(
+                symbol=candidate.symbol,
+                action=SignalAction.SCALE_OUT if is_target else SignalAction.EXIT,
+                generated_at=now,
+                strategy_name=position.strategy_name,
+                strategy_version="broker_bracket",
+                reference_price=status_order.limit_price or status_order.stop_price or position.avg_entry_price,
+                metadata={"exit_reason": exit_reason.value},
+            )
+            # The sibling leg (if any) was auto-cancelled by Webull's OCO
+            # the instant this one filled (see
+            # WebullBrokerClient.place_oco_bracket's docstring) -- clear
+            # both ids up front so neither PositionManager's software
+            # checks nor a concurrent _sync_broker_protective_orders call
+            # try to act on now-stale ids.
+            position.broker_stop_order_id = None
+            position.broker_target_order_id = None
+            position.broker_stop_price_synced = None
+            self._dispatch_exit_finalization(candidate, position, status_order, exit_signal, now)
+
+            if exit_signal.action == SignalAction.SCALE_OUT:
+                # The stop leg protecting the FULL original quantity was
+                # just auto-cancelled along with this target fill -- the
+                # remainder is naked until a fresh resting stop is placed
+                # for it.
+                self._attach_broker_bracket(candidate, position, now)
+            return True
+        return False
 
     def _manage_position(self, candidate: Candidate, snapshot: MarketSnapshot, now: datetime) -> None:
         pending = self._pending_exit_orders.get(candidate.symbol)
@@ -716,9 +968,24 @@ class TradingLoop:
             transition(candidate, CandidateState.COOLDOWN, now=now, reason="post-trade cooldown")
             return
 
+        if position.broker_stop_order_id is not None or position.broker_target_order_id is not None:
+            if self._poll_broker_bracket(candidate, position, now):
+                return  # a resting leg filled and finalized this tick -- nothing else to do
+
         exit_signal = self.position_manager.check_exit(position, snapshot, now=now)
         if exit_signal is None:
+            self._sync_broker_protective_orders(candidate, position, now)
             return
+
+        if position.broker_stop_order_id is not None or position.broker_target_order_id is not None:
+            # A software-side exit for a broker-managed position only ever
+            # happens for VWAP failure / time limit (see
+            # PositionManager.check_exit's broker_managed gate -- stop/
+            # target price-crosses are the broker's own job once
+            # bracketed). Cancel the resting order(s) first so nothing is
+            # left resting against a position that's about to be fully
+            # closed by the market order below.
+            self._cancel_broker_protective_orders(candidate.symbol, position)
 
         try:
             order = self.order_manager.submit_signal(exit_signal, snapshot=snapshot, position=position)
@@ -924,6 +1191,14 @@ class TradingLoop:
                 # that machinery just because the broker-side quantity has
                 # already dropped to zero ahead of this process noticing.
                 continue
+            stale_position = self._positions[symbol]
+            if stale_position.broker_stop_order_id is not None or stale_position.broker_target_order_id is not None:
+                # Whatever closed this position out-of-band (a manual close
+                # in the Webull app, an external script) may not have gone
+                # through the resting stop/target legs this process placed
+                # -- best-effort cleanup so they don't sit orphaned at the
+                # broker indefinitely.
+                self._cancel_broker_protective_orders(symbol, stale_position)
             logger.warning(
                 "%s no longer exists at the broker (closed outside this process -- a manual "
                 "close, scripts/list_and_close_positions.py, etc.) -- removing from local "
@@ -996,6 +1271,17 @@ class TradingLoop:
                 # entries _flush_state_transitions would otherwise think
                 # are already covered) is the correct restart point.
                 self._persisted_transition_counts.pop(symbol, None)
+
+            # Adopted the same way a fresh entry fill would be: attach a
+            # resting broker-side stop as soon as this position is locally
+            # tracked, rather than leaving it to ride purely on the
+            # software-side check_exit until the next price-cross tick --
+            # this position may have opened in a previous process's
+            # lifetime (a deploy, a crash, a VPS reboot), so there is no
+            # earlier moment this process could have done it. No target
+            # (adoption never sets one -- see above), so this always places
+            # a lone resting stop, never a bracket.
+            self._attach_broker_bracket(candidate, position, now)
 
             logger.warning(
                 "Adopted untracked broker position at startup: %s qty=%s side=%s synthetic "

@@ -28,7 +28,7 @@ from webull_bot.execution.order_manager import OrderManager
 from webull_bot.interfaces.broker import BrokerClient
 from webull_bot.interfaces.float_provider import FloatDataProvider
 from webull_bot.models import Fill, FloatData, MarketSnapshot, Order, Position
-from webull_bot.position.position_manager import PositionManager
+from webull_bot.position.position_manager import PositionManagementConfig, PositionManager
 from webull_bot.risk.risk_engine import RiskConfig, RiskEngine
 from webull_bot.runtime.trading_loop import TradingLoop, TradingLoopConfig
 from webull_bot.scanner.broad_scanner import BroadScanner
@@ -223,6 +223,54 @@ class _FakeBroker(BrokerClient):
 
     @property
     def is_live(self): return False
+
+
+@dataclass
+class _RestingBroker(_FakeBroker):
+    """Adds place_oco_bracket -- the capability OrderManager/TradingLoop
+    detect via getattr (see order_manager.py's _broker_supports_resting_orders)
+    -- so this stands in for WebullBrokerClient's broker-side bracket
+    feature without any real network/SDK access. Resting orders (both a
+    lone stop from place_resting_stop and either leg of an OCO bracket from
+    place_resting_bracket) are tracked separately in _resting_orders rather
+    than through _FakeBroker's own _orders/_poll_counts auto-fill-after-N-
+    polls machinery, so a test can flip exactly one leg to FILLED at an
+    exact moment instead of every order auto-filling after a fixed number
+    of polls."""
+    _resting_orders: dict = field(default_factory=dict)
+    _brackets: list = field(default_factory=list)
+    _lone_stops: list = field(default_factory=list)
+    _cancelled: list = field(default_factory=list)
+
+    def place_oco_bracket(self, stop_order, target_order):
+        stop_order.broker_order_id = f"stop-{len(self._brackets)}"
+        stop_order.status = OrderStatus.SUBMITTED
+        target_order.broker_order_id = f"target-{len(self._brackets)}"
+        target_order.status = OrderStatus.SUBMITTED
+        self._resting_orders[stop_order.broker_order_id] = stop_order
+        self._resting_orders[target_order.broker_order_id] = target_order
+        self._brackets.append((stop_order, target_order))
+        return stop_order, target_order
+
+    def place_order(self, order):
+        if order.order_type == OrderType.STOP:
+            order.broker_order_id = order.client_order_id or f"lone-stop-{len(self._lone_stops)}"
+            order.status = OrderStatus.SUBMITTED
+            self._resting_orders[order.broker_order_id] = order
+            self._lone_stops.append(order)
+            return order
+        return super().place_order(order)
+
+    def get_order_status(self, broker_order_id):
+        if broker_order_id in self._resting_orders:
+            return self._resting_orders[broker_order_id]
+        return super().get_order_status(broker_order_id)
+
+    def cancel_order(self, broker_order_id):
+        self._cancelled.append(broker_order_id)
+        order = self._resting_orders.get(broker_order_id)
+        if order is not None:
+            order.status = OrderStatus.CANCELED
 
 
 def _armed_candidate_setup(broker):
@@ -1637,3 +1685,392 @@ def test_process_all_candidates_skips_rejected_and_cooldown_symbols_in_batch():
     loop._process_all_candidates(_IN_HOURS_NOW)
 
     assert broker.batch_calls == [["ONE", "TWO"]]  # THREE (COOLDOWN) excluded
+
+
+# -- broker-side (resting) stop/target bracket -------------------------------
+
+def test_attach_broker_bracket_places_stop_and_target_when_supported():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert position.broker_stop_order_id is not None
+    assert position.broker_target_order_id is not None
+    assert position.broker_stop_price_synced == 4.50
+    assert len(broker._brackets) == 1
+    stop_order, target_order = broker._brackets[0]
+    assert stop_order.side == OrderSide.SELL
+    assert stop_order.quantity == 10
+    assert stop_order.stop_price == 4.50
+    assert target_order.quantity == 5  # floored half
+    assert target_order.limit_price == 5.50
+
+
+def test_attach_broker_bracket_places_lone_stop_when_no_target():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert position.broker_stop_order_id is not None
+    assert position.broker_target_order_id is None
+    assert broker._brackets == []
+    assert len(broker._lone_stops) == 1
+
+
+def test_attach_broker_bracket_is_a_noop_without_broker_support():
+    # PaperBrokerClient/backtests fill everything synchronously at market --
+    # no place_oco_bracket at all -- see order_manager.py's
+    # _broker_supports_resting_orders. _FakeBroker (used throughout this
+    # file's other tests) mirrors that: no place_oco_bracket either.
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert position.broker_stop_order_id is None
+    assert position.broker_target_order_id is None
+
+
+def test_attach_broker_bracket_never_rearms_target_after_partial_exit_taken():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=5, avg_entry_price=5.00,
+        stop_price=4.80, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test", partial_exit_taken=True,
+    )
+
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert position.broker_target_order_id is None
+    assert broker._brackets == []
+    assert len(broker._lone_stops) == 1
+
+
+def test_confirm_entry_filled_attaches_broker_bracket_when_supported():
+    from webull_bot.enums import SignalAction
+    from webull_bot.models import Signal
+    from webull_bot.state_machine import transition
+
+    broker = _RestingBroker(fills_after_polls=1)
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    transition(candidate, CandidateState.TRIGGERED)
+    signal = Signal(
+        symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
+        strategy_name="test", strategy_version="v1", reference_price=5.20,
+        suggested_stop=5.00, suggested_target=5.60,
+    )
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+    loop._poll_pending_entry(candidate, snapshot.timestamp)  # fills_after_polls=1
+
+    assert "TEST" in loop._positions
+    position = loop._positions["TEST"]
+    assert position.broker_stop_order_id is not None
+    assert position.broker_target_order_id is not None
+
+
+def test_poll_broker_bracket_finalizes_full_exit_on_stop_fill():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+    assert stop_id is not None
+
+    # Simulate the resting stop filling at the broker.
+    broker._resting_orders[stop_id].status = OrderStatus.FILLED
+    broker._resting_orders[stop_id].quantity = 10
+
+    trades = []
+    loop.on_trade_closed = trades.append
+    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert handled is True
+    assert "TEST" not in loop._positions
+    assert candidate.state.value == "cooldown"
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.STOP_LOSS
+
+
+def test_poll_broker_bracket_finalizes_partial_exit_on_target_fill_and_reprotects_remainder():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    target_id = position.broker_target_order_id
+    assert target_id is not None
+    assert len(broker._brackets) == 1
+
+    broker._resting_orders[target_id].status = OrderStatus.FILLED
+    broker._resting_orders[target_id].quantity = 5
+
+    trades = []
+    loop.on_trade_closed = trades.append
+    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+
+    assert handled is True
+    assert "TEST" in loop._positions  # remainder stays open
+    assert position.quantity == 5
+    assert position.partial_exit_taken is True
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.PARTIAL_PROFIT_TARGET
+    # The remainder was immediately re-protected with a fresh resting stop
+    # and no target (never re-armed after one partial -- see
+    # _attach_broker_bracket).
+    assert position.broker_stop_order_id is not None
+    assert position.broker_target_order_id is None
+    assert len(broker._brackets) == 1  # no second bracket -- just a lone stop
+    assert len(broker._lone_stops) == 1
+
+
+def test_sync_broker_protective_orders_replaces_stop_when_price_moved():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    old_stop_id = position.broker_stop_order_id
+
+    position.stop_price = 5.00  # simulate PositionManager's breakeven bump
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+
+    assert old_stop_id in broker._cancelled
+    assert position.broker_stop_order_id is not None
+    assert position.broker_stop_order_id != old_stop_id
+    assert position.broker_stop_price_synced == 5.00
+    assert broker._resting_orders[position.broker_stop_order_id].stop_price == 5.00
+
+
+def test_sync_broker_protective_orders_replaces_both_legs_when_target_still_active():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    old_stop_id = position.broker_stop_order_id
+    old_target_id = position.broker_target_order_id
+
+    position.stop_price = 5.00
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+
+    assert old_stop_id in broker._cancelled
+    assert old_target_id in broker._cancelled
+    assert position.broker_target_order_id is not None
+    assert position.broker_target_order_id != old_target_id
+    assert len(broker._brackets) == 2  # original + the replacement
+
+
+def test_sync_broker_protective_orders_is_a_noop_when_stop_unchanged():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+
+    assert broker._cancelled == []
+    assert position.broker_stop_order_id == stop_id
+
+
+def test_sync_broker_protective_orders_is_a_noop_when_not_broker_managed():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    # Never attached -- broker_stop_order_id stays None (broker unsupported
+    # or _attach_broker_bracket already fell back to software-only).
+    position.stop_price = 5.00
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    assert broker._cancelled == []
+    assert position.broker_stop_order_id is None
+
+
+def test_manage_position_finalizes_via_broker_bracket_without_submitting_its_own_exit():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+    broker._resting_orders[stop_id].status = OrderStatus.FILLED
+    broker._resting_orders[stop_id].quantity = 10
+
+    snapshot = _snapshot(datetime.utcnow(), 4.40, 4.40, 600_000, 4.39, 4.41, 4.50)
+    trades = []
+    loop.on_trade_closed = trades.append
+    loop._manage_position(candidate, snapshot, snapshot.timestamp)
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.STOP_LOSS
+    # No separate software-submitted SELL MARKET order for this exit --
+    # _FakeBroker.place_order (via order_manager.submit_signal) was never
+    # reached, only the resting stop this test flipped to FILLED directly.
+    assert broker._orders == {}
+
+
+def test_manage_position_cancels_resting_orders_before_a_vwap_failure_exit():
+    broker = _RestingBroker(fills_after_polls=1)
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.position_manager = PositionManager(PositionManagementConfig(
+        trailing_stop_pct=None, exit_on_vwap_failure=True, vwap_failure_buffer_pct=0.5,
+        time_limit_minutes=None, breakeven_trigger_pct=None,
+    ))
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=3.00, target_price=None, trailing_stop_pct=None,  # stop far away, won't fire first
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+    assert stop_id is not None
+
+    snapshot = _snapshot(datetime.utcnow(), 4.90, 5.00, 600_000, 4.89, 4.91, 5.00)  # ~2% below vwap
+    loop._manage_position(candidate, snapshot, snapshot.timestamp)
+
+    assert stop_id in broker._cancelled
+    assert position.broker_stop_order_id is None
+    assert position.broker_target_order_id is None
+
+
+def test_close_all_positions_now_cancels_resting_orders_before_flattening():
+    broker = _RestingBroker(fills_after_polls=1)
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+    assert stop_id is not None
+
+    loop._close_all_positions_now("test", datetime.utcnow())
+
+    assert stop_id in broker._cancelled
+
+
+def test_reconcile_adopts_a_position_and_attaches_broker_bracket_when_supported():
+    broker = _RestingBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, _ = _armed_candidate_setup(broker)
+    loop.candidates.clear()
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert "TEST" in loop._positions
+    position = loop._positions["TEST"]
+    # Adoption never sets a target, so this is always a lone resting stop,
+    # never a bracket -- see _attach_broker_bracket.
+    assert position.broker_stop_order_id is not None
+    assert position.broker_target_order_id is None
+    assert len(broker._lone_stops) == 1
+
+
+def test_reconcile_cancels_resting_orders_when_dropping_an_externally_closed_position():
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    stop_id = position.broker_stop_order_id
+    assert stop_id is not None
+    # Broker itself has no position for TEST at all (e.g. closed manually in
+    # the Webull app) -- broker._positions (the _FakeBroker/get_positions
+    # store) stays empty, unlike the resting-order cleanup this asserts.
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert "TEST" not in loop._positions
+    assert stop_id in broker._cancelled

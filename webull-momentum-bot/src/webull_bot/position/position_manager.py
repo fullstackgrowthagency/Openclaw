@@ -20,6 +20,21 @@ target is reached, the stop is governed solely by the strategy's initial
 stop and the breakeven-at-+N% rule, not the continuous %-of-current-price
 trailing math. See _maybe_update_trailing_stop's docstring for why these
 two don't run together.
+
+Broker-side position management (2026-08-11): when the connected broker
+supports resting orders (WebullBrokerClient -- see its place_oco_bracket
+docstring), TradingLoop attaches a real OCO stop+target bracket to a
+position right after its entry fill is confirmed, and this class's own
+stop/target price-cross checks in check_exit step aside for that position
+(see check_exit's docstring) rather than racing the broker's own fill with
+a redundant market order. This class still computes every stop-price
+adjustment (breakeven, trailing) exactly as before -- it just no longer
+also decides when to act on a stop/target cross once the broker is the one
+holding the actual resting order; TradingLoop reads the mutated
+stop_price and pushes it to the broker via cancel+replace. VWAP failure
+and the time limit are unaffected either way: neither has a broker-side
+resting-order equivalent, so this class always decides and emits those
+itself, broker-managed or not.
 """
 from __future__ import annotations
 
@@ -105,7 +120,24 @@ class PositionManager:
         small to split into two whole-share halves (< 2 shares): a
         zero-share partial order would be meaningless, and a strategy that
         never sets a target at all (e.g. VolumeIgnitionStrategy) never
-        reaches this branch regardless."""
+        reaches this branch regardless.
+
+        Stop/target price-crosses are skipped entirely (falling straight
+        through to the VWAP-failure/time-limit checks) when
+        position.broker_stop_order_id is set -- a real resting order at the
+        broker is already watching for that exact cross and will execute it
+        itself (see TradingLoop._attach_broker_bracket/_poll_broker_bracket),
+        so this method emitting its own market order on the same cross
+        would race the broker's own fill and risk over-selling the
+        position. VWAP failure and a time limit have no broker-side
+        equivalent (there's no resting order type for "price fell below
+        VWAP" or "this many minutes have passed"), so those two still fire
+        from here regardless of whether the position is broker-managed.
+        Breakeven/trailing-stop math above still runs either way: it only
+        mutates position.stop_price, which TradingLoop's own sync step
+        reads to decide whether the resting broker order itself needs
+        replacing at a new price -- this method has no way to reach the
+        broker directly, by design (see order_manager.py's docstring)."""
         now = now or snapshot.timestamp
         self.update_excursions(position, snapshot)
         self._maybe_apply_breakeven(position, snapshot)
@@ -113,15 +145,16 @@ class PositionManager:
 
         reason: Optional[ExitReason] = None
         action = SignalAction.EXIT
+        broker_managed = position.broker_stop_order_id is not None
 
-        if position.stop_price is not None and snapshot.last_price <= position.stop_price:
+        if not broker_managed and position.stop_price is not None and snapshot.last_price <= position.stop_price:
             # TRAILING_STOP only once trailing is actually the thing
             # governing the stop (post-partial-exit, see
             # _maybe_update_trailing_stop) -- before that, whether it's the
             # strategy's original stop or the breakeven-adjusted one, it's
             # simply a stop loss, not a trailing one.
             reason = ExitReason.TRAILING_STOP if (self.config.trailing_stop_pct and position.partial_exit_taken) else ExitReason.STOP_LOSS
-        elif (
+        elif not broker_managed and (
             position.target_price is not None
             and not position.partial_exit_taken
             and snapshot.last_price >= position.target_price

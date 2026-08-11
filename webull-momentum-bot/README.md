@@ -152,6 +152,31 @@ What's implemented and tested:
   other symbol in that pass too -- confirmed live as the reason candidates
   stayed stuck in `TRIGGERED` indefinitely. See `docs/ARCHITECTURE.md`'s
   "Adoption always rebuilds a fresh Candidate" note for the full fix.
+- **Stops/targets are now broker-side (resting orders), not purely
+  software-polled -- added 2026-08-11.** A software-only stop only gets
+  enforced when this process is alive, awake, and error-free at the exact
+  moment price crosses it -- confirmed as a real gap the same day a
+  position (RDGT) sat well past its stop with a five-figure unrealized
+  loss because the software-side exit submission silently failed with no
+  retry. Live-verified that Webull's OpenAPI supports attaching a real
+  `OCO` stop+target bracket to a position that's already open (no need to
+  rearchitect the entry-fill pipeline itself), so `TradingLoop` now does
+  exactly that right after every entry fill: a resting `STOP` order
+  protects the full position and a resting `LIMIT` order (half the
+  quantity, mirroring the existing partial-exit design) banks the first
+  target hit, both enforced by Webull directly rather than by this
+  process noticing a price cross on its own polling cadence. Breakeven/
+  trailing-stop math, VWAP-failure, and the time limit all keep working
+  exactly as before (see the position manager bullet below) -- VWAP/time
+  aren't expressible as resting orders so this loop still submits those
+  itself, and a stop-price change from breakeven/trailing gets pushed to
+  the broker via cancel-then-place-again (`modify_order`'s effect on a
+  resting order's price was live-tested and found inconclusive, so this
+  never relies on it). Falls back automatically to the pre-existing
+  pure-software behavior whenever the broker doesn't support resting
+  orders (`PaperBrokerClient`, backtests) or a broker call in this chain
+  fails for any reason. See `docs/ARCHITECTURE.md`'s "Broker-side
+  (resting) stop/target management" section for the full lifecycle.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry

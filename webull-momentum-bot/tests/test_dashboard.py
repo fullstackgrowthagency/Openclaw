@@ -243,6 +243,10 @@ def test_positions_includes_unrealized_pnl_from_live_snapshot(loop, client):
     assert len(rows) == 1
     assert rows[0]["current_price"] == 12.0
     assert rows[0]["unrealized_pnl"] == pytest.approx((12.0 - 10.0) * 100)
+    # PaperBrokerClient (this fixture's broker) has no place_oco_bracket, so
+    # this position was never (and never could be) broker-bracketed -- see
+    # TradingLoop._attach_broker_bracket.
+    assert rows[0]["broker_managed"] is False
 
 
 def test_risk_events_reflects_live_risk_engine(loop, client):

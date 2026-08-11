@@ -6,6 +6,7 @@ brokers/webull/client.py's module docstring for exactly what was verified
 vs. best-effort/unverified).
 """
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -505,3 +506,71 @@ def test_order_from_detail_stop_price_defaults_to_none():
     client = _client()
     order = client._order_from_detail({"symbol": "AAPL", "side": "SELL", "quantity": "10", "status": "SUBMITTED"})
     assert order.stop_price is None
+
+
+# -- OCO stop+target bracket (place_oco_bracket) -----------------------------
+
+def _sandbox_client() -> WebullBrokerClient:
+    from webull_bot.config import TradingMode
+
+    client = _client()
+    client.settings = SimpleNamespace(trading_mode=TradingMode.SANDBOX)
+    client.account_id = "test-account"
+    return client
+
+
+def test_place_oco_bracket_sends_both_legs_as_one_combo():
+    client = _sandbox_client()
+    captured = {}
+
+    class _FakeOrderV3:
+        def place_order(self, account_id, order_dicts):
+            captured["account_id"] = account_id
+            captured["order_dicts"] = order_dicts
+            return _FakeResponse([{"status": "accepted"}])
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._trade_client = _FakeTradeClient()
+
+    stop_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.STOP, quantity=2, stop_price=304.13)
+    target_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.LIMIT, quantity=2, limit_price=322.56)
+
+    result_stop, result_target = client.place_oco_bracket(stop_order, target_order)
+
+    assert captured["account_id"] == "test-account"
+    stop_payload, target_payload = captured["order_dicts"]
+    assert stop_payload["combo_type"] == "OCO"
+    assert target_payload["combo_type"] == "OCO"
+    # Both legs share exactly one combo id -- confirmed live this is what
+    # ties them together as one OCO pair rather than two independent orders.
+    assert stop_payload["client_combo_order_id"] == target_payload["client_combo_order_id"]
+    assert stop_payload["order_type"] == "STOP_LOSS"
+    assert stop_payload["stop_price"] == "304.13"
+    assert target_payload["order_type"] == "LIMIT"
+    assert target_payload["limit_price"] == "322.56"
+
+    # Each leg gets its OWN client_order_id, distinct from the shared combo
+    # id -- confirmed live that cancel_order needs a leg's own id, not the
+    # combo-level id (see cancel_order's docstring/module docstring).
+    assert stop_payload["client_order_id"] != target_payload["client_order_id"]
+    assert result_stop.broker_order_id == stop_payload["client_order_id"]
+    assert result_target.broker_order_id == target_payload["client_order_id"]
+    assert result_stop.status == OrderStatus.SUBMITTED
+    assert result_target.status == OrderStatus.SUBMITTED
+
+
+def test_place_oco_bracket_refuses_when_live_trading_not_authorized():
+    from webull_bot.config import TradingMode
+
+    client = _client()
+    client.settings = SimpleNamespace(
+        trading_mode=TradingMode.LIVE, is_live_trading_authorized=lambda: False,
+    )
+    client.account_id = "test-account"
+    stop_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.STOP, quantity=1, stop_price=1.0)
+    target_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.LIMIT, quantity=1, limit_price=2.0)
+
+    with pytest.raises(RuntimeError):
+        client.place_oco_bracket(stop_order, target_order)
