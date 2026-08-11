@@ -5,8 +5,9 @@ captured live against the Webull sandbox on 2026-08-08 (see
 brokers/webull/client.py's module docstring for exactly what was verified
 vs. best-effort/unverified).
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 
@@ -1030,6 +1031,9 @@ class _FakeDataStreamingClient:
         self.on_quotes_message = None
         self.connect_calls = 0
         self.subscribe_calls = []
+        self.loop_stop_calls = 0
+        self.disconnect_calls = 0
+        self.raise_on_subscribe: Optional[Exception] = None
         # Mirrors the REAL SDK's own (misleadingly-named) behavior,
         # confirmed live 2026-08-11: get_connect_success() flips True the
         # instant on_connect_success is *assigned* -- no network activity
@@ -1057,6 +1061,14 @@ class _FakeDataStreamingClient:
 
     def subscribe(self, symbols, category, sub_types):
         self.subscribe_calls.append((list(symbols), category, list(sub_types)))
+        if self.raise_on_subscribe is not None:
+            raise self.raise_on_subscribe
+
+    def loop_stop(self):
+        self.loop_stop_calls += 1
+
+    def disconnect(self):
+        self.disconnect_calls += 1
 
 
 def _streaming_client(trading_mode=None):
@@ -1069,6 +1081,7 @@ def _streaming_client(trading_mode=None):
     )
     client._streaming_client = None
     client._streaming_connected = False
+    client._streaming_connect_attempted_at = None
     client._streaming_subscribed_symbols = set()
     client._streaming_snapshot_cache = {}
     client._streaming_quote_cache = {}
@@ -1269,6 +1282,88 @@ def test_subscribe_quotes_defers_new_symbols_until_connected(monkeypatch):
 
     assert client._streaming_connected is True
     assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
+
+
+def test_subscribe_quotes_propagates_a_failed_additional_subscribe(monkeypatch):
+    # A subscribe REST call failing while already connected must not be
+    # swallowed here -- see subscribe_quotes' docstring. Swallowing it
+    # used to mean TradingLoop believed these symbols were subscribed
+    # (nothing told it otherwise) even though they were never actually
+    # registered, so they'd silently never stream for the rest of the
+    # process. Propagating lets _ensure_streaming_subscribed's own
+    # try/except catch it and skip adding these symbols to
+    # self._streaming_requested_symbols, so they're retried next tick.
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+    fake.on_connect_success(fake, None, "session-1")
+    fake.raise_on_subscribe = RuntimeError("simulated REST failure")
+
+    with pytest.raises(RuntimeError):
+        client.subscribe_quotes(["MSFT"], lambda snap: None)
+
+
+def _fake_utcnow_module(monkeypatch, start):
+    from webull_bot.brokers.webull import client as client_module
+
+    box = {"now": start}
+
+    class _FakeDateTime(datetime):
+        @classmethod
+        def utcnow(cls):
+            return box["now"]
+
+    monkeypatch.setattr(client_module, "datetime", _FakeDateTime)
+    return box
+
+
+def test_subscribe_quotes_reconnects_with_a_fresh_client_after_the_delay(monkeypatch):
+    from webull_bot.brokers.webull.client import _STREAMING_RECONNECT_DELAY_SECONDS
+
+    start = datetime(2026, 8, 11, 12, 0, 0)
+    clock = _fake_utcnow_module(monkeypatch, start)
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+
+    client.subscribe_quotes(["AAPL"], lambda snap: None)  # creates the first (never-connecting) client
+    stale_fake = instances[0]
+    assert client._streaming_connected is False
+
+    clock["now"] = start + timedelta(seconds=_STREAMING_RECONNECT_DELAY_SECONDS + 1)
+    client.subscribe_quotes(["MSFT"], lambda snap: None)
+
+    assert stale_fake.loop_stop_calls == 1  # the dead connection was torn down
+    assert stale_fake.disconnect_calls == 1
+    assert len(instances) == 2  # a fresh client was created instead of waiting forever
+    fresh_fake = instances[1]
+    assert fresh_fake.connect_calls == 1
+
+    # Every symbol ever requested (not just the newest one) must be
+    # resubscribed once the fresh connection comes up -- AAPL was never
+    # actually confirmed subscribed against the dead connection.
+    fresh_fake.on_connect_success(fresh_fake, None, "session-2")
+    assert fresh_fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
+
+
+def test_subscribe_quotes_does_not_reconnect_before_the_delay_elapses(monkeypatch):
+    from webull_bot.brokers.webull.client import _STREAMING_RECONNECT_DELAY_SECONDS
+
+    start = datetime(2026, 8, 11, 12, 0, 0)
+    clock = _fake_utcnow_module(monkeypatch, start)
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    stale_fake = instances[0]
+
+    clock["now"] = start + timedelta(seconds=_STREAMING_RECONNECT_DELAY_SECONDS - 1)
+    client.subscribe_quotes(["MSFT"], lambda snap: None)
+
+    assert stale_fake.loop_stop_calls == 0
+    assert stale_fake.disconnect_calls == 0
+    assert len(instances) == 1  # still waiting on the original connection
+    assert stale_fake.subscribe_calls == []
 
 
 def test_disconnect_stops_the_streaming_client():

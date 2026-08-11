@@ -139,7 +139,7 @@ import logging
 import threading
 import uuid
 from dataclasses import replace as _dataclass_replace
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
@@ -182,6 +182,17 @@ _SNAPSHOT_BATCH_SIZE = 100
 # were pulled from, purely a live-tested guess that happened to be right.
 # See subscribe_quotes' docstring for how this is selected.
 _SANDBOX_MQTT_STREAMING_HOST = "data-api.sandbox.webull.com"
+
+# How long to wait for a pending streaming connection attempt to finish
+# connecting (_on_connect_success firing) before giving up on it and
+# retrying with a fresh DataStreamingClient -- see subscribe_quotes'
+# docstring. Not itself live-tuned against a real stuck connection (all
+# real connects observed so far have completed in well under this), just
+# a conservative "clearly longer than a healthy connect should ever take"
+# threshold -- short enough that a genuinely dead connection recovers
+# within a couple of TradingLoop ticks, long enough not to abandon a
+# connection attempt that's merely a bit slow.
+_STREAMING_RECONNECT_DELAY_SECONDS = 15.0
 
 _SIDE_TO_WEBULL = {
     OrderSide.BUY: "BUY",
@@ -283,6 +294,12 @@ class WebullBrokerClient(BrokerClient):
         # This flag is set only inside this module's own _on_connect_success
         # wrapper below, which the SDK genuinely only calls once connected.
         self._streaming_connected: bool = False
+        # Set right before each new connection attempt starts
+        # (connect_and_loop_start()); consulted by subscribe_quotes to
+        # decide when a still-not-connected client has been stuck long
+        # enough to give up on and retry fresh -- see
+        # _STREAMING_RECONNECT_DELAY_SECONDS.
+        self._streaming_connect_attempted_at: Optional[datetime] = None
         self._streaming_subscribed_symbols: set[str] = set()
         # Per-symbol caches used to merge the two streamed message types
         # into one MarketSnapshot -- see subscribe_quotes' docstring for
@@ -330,6 +347,7 @@ class WebullBrokerClient(BrokerClient):
             self._streaming_client = None
             with self._streaming_lock:
                 self._streaming_connected = False
+                self._streaming_connect_attempted_at = None
                 self._streaming_subscribed_symbols = set()
                 self._streaming_snapshot_cache = {}
                 self._streaming_quote_cache = {}
@@ -952,15 +970,49 @@ class WebullBrokerClient(BrokerClient):
         if self._streaming_client is not None:
             with self._streaming_lock:
                 already_connected = self._streaming_connected
+                connect_attempted_at = self._streaming_connect_attempted_at
             if already_connected:
-                try:
-                    self._streaming_client.subscribe(new_symbols, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
-                except Exception:
-                    logger.exception("Streaming subscribe failed for additional symbols %s", new_symbols)
-            # else: still connecting -- _on_connect_success will subscribe
-            # the full updated set (read fresh from
-            # self._streaming_subscribed_symbols) once it fires.
-            return
+                # Let a failure here propagate to the caller
+                # (_ensure_streaming_subscribed) rather than swallowing it
+                # -- see this method's docstring's "retry" note. Swallowing
+                # it here used to mean TradingLoop believed these symbols
+                # were subscribed (nothing told it otherwise) even though
+                # the REST call never actually registered them, so they'd
+                # silently never stream at all for the rest of the process.
+                self._streaming_client.subscribe(new_symbols, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
+                return
+            # Still waiting on the connect callback. A healthy connection
+            # (per every live test so far) finishes in well under
+            # _STREAMING_RECONNECT_DELAY_SECONDS -- if it's been pending
+            # longer than that, treat the attempt as dead rather than
+            # waiting on a callback that may never fire, and retry with a
+            # fresh client below instead of returning early. Every symbol
+            # ever requested (self._streaming_subscribed_symbols, already
+            # updated with new_symbols above) gets resubscribed against
+            # the new connection once it connects, not just new_symbols.
+            stale = (
+                connect_attempted_at is not None
+                and datetime.utcnow() - connect_attempted_at > timedelta(seconds=_STREAMING_RECONNECT_DELAY_SECONDS)
+            )
+            if not stale:
+                # _on_connect_success will subscribe the full updated set
+                # (read fresh from self._streaming_subscribed_symbols) once
+                # it fires.
+                return
+            logger.warning(
+                "Streaming connection has been stuck connecting for over %.0fs; discarding it and "
+                "retrying with a fresh connection.", _STREAMING_RECONNECT_DELAY_SECONDS,
+            )
+            try:
+                self._streaming_client.loop_stop()
+                self._streaming_client.disconnect()
+            except Exception:
+                logger.warning("Failed to cleanly tear down the stale streaming client.", exc_info=True)
+            self._streaming_client = None
+            with self._streaming_lock:
+                self._streaming_connected = False
+                self._streaming_connect_attempted_at = None
+            # Falls through to create a fresh client below.
 
         session_id = str(uuid.uuid4())
         mqtt_host = (
@@ -1016,6 +1068,8 @@ class WebullBrokerClient(BrokerClient):
         )
         client.on_connect_success = _on_connect_success
         client.on_quotes_message = _on_quotes_message
+        with self._streaming_lock:
+            self._streaming_connect_attempted_at = datetime.utcnow()
         client.connect_and_loop_start()
         self._streaming_client = client
 

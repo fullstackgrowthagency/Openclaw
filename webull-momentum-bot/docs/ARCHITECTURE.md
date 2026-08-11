@@ -1758,6 +1758,51 @@ whose fake mirrors the SDK's real (mis-)behavior rather than a
 nicer-behaved approximation of it, specifically so this can't silently
 regress.
 
+### Streaming: retrying a failed connection or subscribe (2026-08-11)
+
+Confirming the fix above worked in production raised the natural
+follow-up: what happens if a connection attempt or a subscribe call
+fails for a real reason (not the bug above) -- a transient network blip,
+a brief Webull-side hiccup? Two distinct failure points, two distinct
+fixes:
+
+1. **The MQTT connection itself never completes** (`_on_connect_success`
+   never fires, so `_streaming_connected` stays `False` forever). A new
+   `_STREAMING_RECONNECT_DELAY_SECONDS` (15s) timeout, tracked via
+   `WebullBrokerClient._streaming_connect_attempted_at`: if a later
+   `subscribe_quotes` call finds the existing client still not connected
+   and more than that long has passed since the connection attempt
+   started, it tears down the stale client (`loop_stop()`/`disconnect()`,
+   best-effort) and opens a fresh one instead of waiting on a callback
+   that may never come. Every symbol ever requested
+   (`self._streaming_subscribed_symbols`, not just whatever triggered
+   this particular call) gets resubscribed once the fresh connection
+   comes up -- correct because nothing was ever confirmed subscribed
+   against the dead connection in the first place. Not itself tuned
+   against a real stuck connection (every live connect observed so far
+   has completed in well under 15s) -- just a conservative "clearly
+   longer than a healthy connect should ever take" threshold.
+2. **A specific subscribe REST call fails while already connected.**
+   `subscribe_quotes`'s "already connected" branch used to catch and log
+   this internally, which meant it returned normally either way --
+   `TradingLoop._ensure_streaming_subscribed` had no way to tell the
+   difference between success and failure, and would mark the symbols as
+   subscribed (`self._streaming_requested_symbols`) regardless, so a
+   failed symbol would just silently never stream for the rest of the
+   process. Now the exception is left to propagate all the way up to
+   `_ensure_streaming_subscribed`'s own try/except, which does NOT mark
+   these symbols as requested on failure -- so they're picked up again
+   the next time `_ensure_streaming_subscribed` runs for them. That
+   "next time" used to only exist for watch-stage candidates (subscribed
+   fresh every tick in `_process_all_candidates`) -- `ENTERED`/`MANAGING`
+   positions only ever got one eager attempt, at
+   `_confirm_entry_filled`/`reconcile_positions_from_broker`'s adoption
+   time, with no way to retry a failure. `_process_all_candidates`'s
+   per-tick subscribe sweep now covers every `_STREAMING_ELIGIBLE_STATES`
+   symbol, not just watch-stage ones, so a failed position-adoption
+   subscribe also self-heals on the very next tick -- a "short wait" in
+   wall-clock terms (`poll_interval_seconds`), not a separate retry timer.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right

@@ -298,10 +298,14 @@ class _StreamingBroker(_FakeBroker):
     MQTT client's own background thread in production."""
     subscribe_calls: list = field(default_factory=list)
     individual_calls: list = field(default_factory=list)
+    fail_subscribe_times: int = 0
     _stream_callback: object = None
 
     def subscribe_quotes(self, symbols, on_update):
         self.subscribe_calls.append(list(symbols))
+        if self.fail_subscribe_times > 0:
+            self.fail_subscribe_times -= 1
+            raise RuntimeError("simulated transient streaming failure")
         self._stream_callback = on_update
 
     def push_stream_snapshot(self, snapshot):
@@ -2795,3 +2799,37 @@ def test_process_candidate_does_not_use_streaming_for_a_triggered_candidate():
     loop._process_candidate(candidate, _IN_HOURS_NOW)
 
     assert broker.individual_calls == ["TEST"]  # REST get_snapshot was still called
+
+
+def test_process_all_candidates_retries_a_previously_failed_subscribe():
+    # If a candidate's eager first subscribe attempt (at entry-confirm/
+    # adoption time) fails transiently, it must not be stuck unstreamed
+    # for the rest of the process -- _process_all_candidates' per-tick
+    # sweep (over every _STREAMING_ELIGIBLE_STATES symbol, not just
+    # watch-stage ones) is what retries it.
+    from webull_bot.state_machine import transition
+
+    broker = _StreamingBroker(fail_subscribe_times=1)
+    loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=_IN_HOURS_NOW, strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    broker._positions.append(position)
+
+    # Simulates the eager attempt at entry-confirm/adoption time failing --
+    # _ensure_streaming_subscribed itself swallows the exception (must
+    # never let a streaming hiccup crash a tick), but must NOT mark the
+    # symbol as subscribed on failure.
+    loop._ensure_streaming_subscribed(["TEST"])
+    assert loop._streaming_requested_symbols == set()  # not marked as subscribed
+
+    loop._process_all_candidates(_IN_HOURS_NOW)  # per-tick sweep retries it
+
+    assert broker.subscribe_calls == [["TEST"], ["TEST"]]  # failed once, then succeeded
+    assert loop._streaming_requested_symbols == {"TEST"}

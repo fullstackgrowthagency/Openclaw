@@ -646,12 +646,14 @@ class TradingLoop:
         """Best-effort: asks the broker to start streaming live prices for
         `symbols` via broker.subscribe_quotes, so _get_streaming_snapshot
         has something fresh to serve on subsequent ticks for any candidate
-        in a _STREAMING_ELIGIBLE_STATES state. Called from two places:
+        in a _STREAMING_ELIGIBLE_STATES state. Called from three places:
         _confirm_entry_filled/reconcile_positions_from_broker's adoption
-        path (right when a position starts being tracked, mirroring
-        _attach_broker_bracket's own call sites) for ENTERED/MANAGING, and
+        path (an eager first attempt right when a position starts being
+        tracked, mirroring _attach_broker_bracket's own call sites), and
         _process_all_candidates once per tick for every currently
-        WATCHING/HEATING_UP/ARMED candidate.
+        streaming-eligible candidate (both an eventual first attempt for a
+        watch-stage candidate and a RETRY of the eager attempt above if it
+        failed -- see the "retried automatically" paragraph below).
 
         subscribe_quotes is a required BrokerClient ABC method (unlike
         get_snapshots/list_open_orders/place_oco_bracket, which are
@@ -664,6 +666,18 @@ class TradingLoop:
         short-circuits immediately instead of retrying a call already
         known to fail for this broker every single tick a new position
         opens.
+
+        Any other exception (a real, potentially transient connection or
+        REST failure -- see WebullBrokerClient.subscribe_quotes' docstring
+        for the internal reconnect-after-timeout behavior this pairs
+        with) is logged and swallowed WITHOUT marking these symbols as
+        requested (self._streaming_requested_symbols is only updated on
+        success, below) -- so they're simply retried the next time this
+        method is called for them, which for every _STREAMING_ELIGIBLE_STATES
+        candidate is every single tick via _process_all_candidates' sweep.
+        In practice that means a failed subscribe recovers within
+        `poll_interval_seconds` (a "short wait" in wall-clock terms, not
+        multiple ticks), with no separate retry timer needed here.
 
         Only ever subscribes symbols not already requested this process's
         lifetime (self._streaming_requested_symbols) -- there is
@@ -1792,20 +1806,23 @@ class TradingLoop:
 
         candidates = self._snapshot_candidates()
 
-        # Keep every pre-entry candidate currently being monitored
-        # subscribed to live prices -- cheap to call every tick:
-        # _ensure_streaming_subscribed already no-ops for a symbol already
-        # requested this process's lifetime, so in steady state this is
-        # just a membership check per candidate, not a real subscribe call.
-        # ENTERED/MANAGING positions are subscribed separately, right when
-        # they start being tracked -- see _confirm_entry_filled and
-        # reconcile_positions_from_broker.
-        watch_stage_symbols = [
-            c.symbol for c in candidates
-            if c.state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED)
-        ]
-        if watch_stage_symbols:
-            self._ensure_streaming_subscribed(watch_stage_symbols)
+        # Keep every candidate in a streaming-eligible state subscribed to
+        # live prices -- cheap to call every tick: _ensure_streaming_subscribed
+        # already no-ops for a symbol already requested this process's
+        # lifetime, so in steady state this is just a membership check per
+        # candidate, not a real subscribe call. ENTERED/MANAGING positions
+        # also get an eager first attempt right when they start being
+        # tracked (see _confirm_entry_filled and
+        # reconcile_positions_from_broker) so they don't wait a full tick
+        # for their first subscription -- this sweep is what RETRIES that
+        # attempt on every subsequent tick if it failed (subscribe_quotes
+        # raising leaves a symbol out of self._streaming_requested_symbols,
+        # so it's picked up again here rather than silently never
+        # streaming for the rest of the process -- see
+        # _ensure_streaming_subscribed's docstring).
+        streaming_eligible_symbols = [c.symbol for c in candidates if c.state in self._STREAMING_ELIGIBLE_STATES]
+        if streaming_eligible_symbols:
+            self._ensure_streaming_subscribed(streaming_eligible_symbols)
 
         # Batch-fetch snapshots for every candidate that will actually need
         # one this cycle (mirrors _process_candidate_inner's own REJECTED/
