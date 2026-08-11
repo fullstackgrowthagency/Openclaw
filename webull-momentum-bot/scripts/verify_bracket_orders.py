@@ -174,6 +174,9 @@ def main() -> None:
         target_payload["client_combo_order_id"] = combo_id
 
         print(f"  submitting OCO pair: stop={stop_price} target={target_price} combo_id={combo_id}")
+        print(f"  leg order IDs (save these for scripts/cancel_order.py if cleanup is needed):")
+        print(f"    stop leg:   client_order_id={stop_payload['client_order_id']}")
+        print(f"    target leg: client_order_id={target_payload['client_order_id']}")
         try:
             response = call_with_retry(
                 lambda: broker._require_trade_client().order_v3.place_order(
