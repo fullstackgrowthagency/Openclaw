@@ -1352,12 +1352,17 @@ the backtest engine fill every order synchronously at market with nothing
 to rest against, so requiring them to implement it would be meaningless.
 `OrderManager._broker_supports_resting_orders()` checks for it with
 `getattr`, the same pattern already used for `get_snapshots`/`get_raw_bars`.
-Every position falls back automatically and silently to the pure-software
-behavior described above whenever the connected broker lacks this
-capability (tests, `PaperBrokerClient`, backtests) **or** a broker call in
-this chain fails for any reason (rejected order, network error) -- broker-
-side management is an enhancement layered on top of the existing fallback,
-never a precondition for a position being tracked at all.
+A position falls back automatically to the pure-software behavior
+described above whenever the connected broker lacks this capability at
+all (tests, `PaperBrokerClient`, backtests) -- broker-side management is
+an enhancement layered on top of the existing fallback, never a
+precondition for a position being tracked at all. But when the broker
+DOES support resting orders and a placement call simply fails (rejected
+order, rate limit, network error), that fallback is only ever TEMPORARY
+(extended 2026-08-11, see "Retrying a failed attach" below) -- riding on
+software-only management for a few ticks while retrying is fine; giving
+up on real broker-side protection permanently after one failed call is
+not.
 
 **The lifecycle, symbol by symbol:**
 
@@ -1428,6 +1433,37 @@ never a precondition for a position being tracked at all.
 a "Mgmt" column (`Broker` / `Software`) so it's visible at a glance which
 positions are riding on a resting broker order right now versus the
 pure-software fallback.
+
+**Retrying a failed attach (2026-08-11).** Step 4 above
+(`_sync_broker_protective_orders`) originally only fired when a resting
+order already existed and its price needed to change -- a position whose
+very first `_attach_broker_bracket` call failed (a rate limit hit during
+a busy startup reconcile, a transient network error) had no way back to
+broker-side management: it rode on pure software-only checks for the
+rest of the trade. Given the whole point of this feature is closing the
+"software-side exit silently failed" gap from the RDGT incident, a
+placement failure quietly becoming permanent defeated its own purpose.
+
+Fixed by widening `_sync_broker_protective_orders`, called every tick
+`_manage_position` finds no exit condition, so it now also covers "no
+resting order yet at all" (`position.broker_stop_order_id is None`): if
+the connected broker supports resting orders at all (a cheap `getattr`
+check -- never a real call attempt for a broker that fundamentally can't
+succeed, like `PaperBrokerClient`), it calls `_attach_broker_bracket`
+again. A transient failure (429, a brief network blip) now self-heals
+within a few ticks (`poll_interval_seconds` apart) without this loop
+ever blocking synchronously to wait for it -- deliberately NOT an
+in-place tight retry loop inside a single tick, which would freeze every
+other position's exit management for as long as it ran. Each individual
+attempt still goes through `call_with_retry`'s own fast, 429-specific
+inner retry (4 attempts with exponential backoff) for the sub-second
+layer; the per-tick sweep is what makes recovery from anything else --
+or a 429 burst that outlasts even that -- eventually succeed rather than
+being given up on after one call. Every placement call in this chain
+already uses `CallPriority.CRITICAL` (`place_order`/`place_oco_bracket`
+in `WebullBrokerClient`) -- the highest rate-limiter tier, so a retry
+here wins contention over discovery/resistance-refresh traffic exactly
+like every other exit-critical call in this codebase.
 
 ## Extra position-based confirmation for a TRIGGERED entry (2026-08-11)
 

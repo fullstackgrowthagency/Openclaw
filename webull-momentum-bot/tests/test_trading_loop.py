@@ -2265,7 +2265,31 @@ def test_stop_sync_min_move_pct_is_configurable():
     assert position.broker_stop_order_id == stop_id
 
 
-def test_sync_broker_protective_orders_is_a_noop_when_not_broker_managed():
+def test_sync_broker_protective_orders_is_a_permanent_noop_when_broker_unsupported():
+    # _FakeBroker has no place_oco_bracket at all -- unlike a previous
+    # failed attempt, this is never going to succeed no matter how many
+    # times it's retried, so _sync_broker_protective_orders must not even
+    # try (a cheap getattr check, not a real call attempt).
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    position.stop_price = 5.00
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    assert position.broker_stop_order_id is None
+
+
+def test_sync_broker_protective_orders_retries_a_previously_failed_attach():
+    # broker_stop_order_id is None here NOT because the broker lacks
+    # support (_RestingBroker has place_oco_bracket) but because an
+    # earlier _attach_broker_bracket attempt failed -- e.g. a rate limit
+    # or network error at entry-confirm time. Real broker-side protection
+    # matters too much to give up on after one failure (see the RDGT
+    # incident note on _attach_broker_bracket) -- this must retry and,
+    # once it succeeds, the position ends up genuinely broker-managed.
     broker = _RestingBroker()
     loop, candidate = _armed_candidate_setup(broker)
     position = Position(
@@ -2273,12 +2297,38 @@ def test_sync_broker_protective_orders_is_a_noop_when_not_broker_managed():
         stop_price=4.50, target_price=None, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test",
     )
-    # Never attached -- broker_stop_order_id stays None (broker unsupported
-    # or _attach_broker_bracket already fell back to software-only).
     position.stop_price = 5.00
     loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
-    assert broker._cancelled == []
+    assert position.broker_stop_order_id is not None
+    assert position.broker_stop_price_synced == 5.00
+
+
+def test_sync_broker_protective_orders_keeps_retrying_across_ticks_until_it_succeeds():
+    @dataclass
+    class _FlakyRestingBroker(_RestingBroker):
+        fail_times: int = 0
+
+        def place_order(self, order):
+            if self.fail_times > 0:
+                self.fail_times -= 1
+                raise RuntimeError("simulated transient placement failure")
+            return super().place_order(order)
+
+    broker = _FlakyRestingBroker(fail_times=2)
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    position.stop_price = 5.00
+
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())  # tick 1: fails
     assert position.broker_stop_order_id is None
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())  # tick 2: fails
+    assert position.broker_stop_order_id is None
+    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())  # tick 3: succeeds
+    assert position.broker_stop_order_id is not None
 
 
 def test_manage_position_finalizes_via_broker_bracket_without_submitting_its_own_exit():

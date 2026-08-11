@@ -75,10 +75,16 @@ VWAP-failure/time-limit, which have no broker-side equivalent -- a
 software-submitted exit for either of those, and the kill-switch/end-of-
 core-hours flatten, all cancel any resting orders first (see
 `_cancel_broker_protective_orders`) before submitting their own market
-order. A position falls back to pure software-side management (this
-loop's pre-2026-08-11 behavior, unchanged) whenever the broker doesn't
-support resting orders or a broker call in this chain fails -- see each
-method's docstring for the exact fallback condition.
+order. A position rides on pure software-side management (this loop's
+pre-2026-08-11 behavior, unchanged) only TEMPORARILY whenever a broker
+call in this chain fails -- `_sync_broker_protective_orders` retries
+`_attach_broker_bracket` every tick (extended 2026-08-11) until a real
+broker-side bracket actually gets placed, since giving up permanently
+after one failed attempt was the root cause of a real incident (RDGT,
+2026-08-11 -- see `_attach_broker_bracket`'s docstring). The only
+PERMANENT fallback to pure software-side management is a broker that
+doesn't support resting orders at all (PaperBrokerClient/backtests) --
+see each method's docstring for the exact condition.
 
 Concurrency model (run_forever only -- run_once() stays single-threaded,
 see below): universe rescanning is slow (see TradingLoopConfig's docstring
@@ -1127,9 +1133,14 @@ class TradingLoop:
         again after a partial exit fires at the broker (_poll_broker_bracket,
         to re-protect the remainder now that the original OCO's stop leg
         was auto-cancelled along with the target fill), and again via
-        _sync_broker_protective_orders whenever PositionManager's own
-        breakeven/trailing math moves stop_price (cancel the stale resting
-        order, then call back in here to place a fresh one).
+        _sync_broker_protective_orders -- both whenever PositionManager's
+        own breakeven/trailing math moves stop_price (cancel the stale
+        resting order, then call back in here to place a fresh one) AND,
+        every tick a position has no resting order yet at all, as a RETRY
+        of a previous failed attempt (see that method's docstring's "no
+        resting order yet" branch) -- so a single failed call here is
+        never the end of the story for a broker that does support resting
+        orders.
 
         No-op (leaves position.broker_stop_order_id unset) if
         position.stop_price is None (nothing to protect -- shouldn't
@@ -1140,11 +1151,24 @@ class TradingLoop:
         normal case in tests): PositionManager.check_exit falls back to
         its pre-existing pure-software stop/target handling whenever
         broker_stop_order_id is unset, so nothing about non-Webull brokers
-        changes. A broker call that raises (rejected order, network error)
-        is logged and swallowed the same way -- attaching broker-side
-        management is an enhancement layered on top of the existing
-        software fallback, never a precondition for the position itself
-        being tracked."""
+        changes.
+
+        A broker call that raises (rejected order, rate limit, network
+        error -- anything) is logged and swallowed here, leaving
+        broker_stop_order_id unset so the position is protected by
+        PositionManager's own software-side stop/target checks in the
+        meantime -- but this is NOT a permanent fallback: real broker-side
+        protection matters enough (see the RDGT incident above) that
+        giving up after one failed attempt isn't acceptable.
+        _sync_broker_protective_orders retries this every tick
+        (~poll_interval_seconds apart) for as long as the position stays
+        MANAGING and unbracketed, at CRITICAL rate-limiter priority (same
+        as every order call here -- see place_order/place_oco_bracket in
+        WebullBrokerClient), so a transient failure (429, a brief network
+        blip) self-heals within a few ticks without this loop ever
+        blocking to wait for it -- see call_with_retry's own fast,
+        429-specific inner retry for the sub-second layer underneath
+        this."""
         if position.stop_price is None:
             return
 
@@ -1190,8 +1214,9 @@ class TradingLoop:
                 position.broker_target_order_id = None
         except Exception:
             logger.exception(
-                "Failed to attach broker-side protective order(s) for %s -- falling back to "
-                "software-only position management for this position.", candidate.symbol,
+                "Failed to attach broker-side protective order(s) for %s -- riding on software-only "
+                "position management for now, will keep retrying to attach a real broker-side "
+                "bracket every tick until it succeeds.", candidate.symbol,
             )
             position.broker_stop_order_id = None
             position.broker_target_order_id = None
@@ -1242,11 +1267,23 @@ class TradingLoop:
         to talk to the broker itself -- only TradingLoop calls
         order_manager/broker methods (see order_manager.py's docstring).
 
-        No-op if this position was never bracketed at the broker in the
-        first place (broker_stop_order_id is None -- broker unsupported, or
-        _attach_broker_bracket already fell back to software-only
-        management), if the stop hasn't actually moved since the last sync,
-        or if it moved by less than
+        If this position was never bracketed at the broker in the first
+        place (broker_stop_order_id is None), that's either a broker that
+        fundamentally doesn't support resting orders (a cheap no-op check
+        every tick -- see OrderManager._broker_supports_resting_orders,
+        consulted here via the same getattr pattern to avoid calling into
+        _attach_broker_bracket at all for a broker that can never succeed)
+        or a genuine RETRY: an earlier _attach_broker_bracket call failed
+        (rate limit, network error, anything -- see that method's
+        docstring) and this position is still riding on software-only
+        management in the meantime. Real broker-side protection is
+        important enough (see the RDGT incident note on
+        _attach_broker_bracket) that this keeps calling
+        _attach_broker_bracket every tick until it actually succeeds,
+        rather than accepting the first failure as final.
+
+        Once actually bracketed, this is a no-op if the stop hasn't
+        moved since the last sync, or if it moved by less than
         TradingLoopConfig.stop_sync_min_move_pct (0.25% default) --
         hysteresis against the trailing-stop math recomputing to a
         different float almost every tick once active (`current_price *
@@ -1266,6 +1303,8 @@ class TradingLoop:
         is still active -- _attach_broker_bracket handles that branch on
         its own) sidesteps both open questions entirely."""
         if position.broker_stop_order_id is None:
+            if getattr(self.broker, "place_oco_bracket", None) is not None:
+                self._attach_broker_bracket(candidate, position, now)
             return
         if position.stop_price is None or position.stop_price == position.broker_stop_price_synced:
             return

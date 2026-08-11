@@ -172,11 +172,19 @@ What's implemented and tested:
   itself, and a stop-price change from breakeven/trailing gets pushed to
   the broker via cancel-then-place-again (`modify_order`'s effect on a
   resting order's price was live-tested and found inconclusive, so this
-  never relies on it). Falls back automatically to the pre-existing
-  pure-software behavior whenever the broker doesn't support resting
-  orders (`PaperBrokerClient`, backtests) or a broker call in this chain
-  fails for any reason. See `docs/ARCHITECTURE.md`'s "Broker-side
-  (resting) stop/target management" section for the full lifecycle.
+  never relies on it). Falls back automatically and PERMANENTLY to the
+  pre-existing pure-software behavior only when the broker doesn't
+  support resting orders at all (`PaperBrokerClient`, backtests). A
+  placement call simply failing (rate limit, network error, anything) is
+  only ever a TEMPORARY fallback (extended 2026-08-11): the position
+  rides on software-only checks for a few ticks while
+  `_sync_broker_protective_orders` retries attaching a real broker-side
+  bracket every tick (~`poll_interval_seconds` apart, at `CRITICAL`
+  rate-limiter priority, same as every other order call) until it
+  actually succeeds -- giving up permanently after one failed call was
+  exactly the gap the RDGT incident exposed in the first place. See
+  `docs/ARCHITECTURE.md`'s "Broker-side (resting) stop/target management"
+  section (especially "Retrying a failed attach") for the full lifecycle.
 - **A `TRIGGERED` entry gets a second, independent fill check -- added
   2026-08-11.** Order-status polling (`get_order_status`) was the only way
   this loop noticed an entry had filled, and this project has already
