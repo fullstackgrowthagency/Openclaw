@@ -441,6 +441,27 @@ What's implemented and tested:
   must be set to `"ALL"` for extended-hours orders to go out at all.
   **Important caveat:** only verified in `TRADING_MODE=sandbox` -- re-verify
   before assuming a live account has the same entitlement.
+- **`support_trading_session="ALL"` is only accepted OUTSIDE core hours --
+  a `WEBULL_SUPPORT_TRADING_SESSION=ALL` order now automatically downgrades
+  to `"CORE"` for any order submitted during core hours.** Confirmed live
+  2026-08-12 (~9:49am ET, right after a sandbox account reset, genuinely
+  inside core hours): with `WEBULL_SUPPORT_TRADING_SESSION=ALL` deployed,
+  every entry order failed with the exact same `OAUTH_OPENAPI_PARAM_ERR`
+  (HTTP 417, "invalid support_trading_session, value: ALL") as the original
+  2026-08-10 finding above -- but the same value was independently
+  confirmed working for a pre-market order that same day. So `"ALL"`
+  isn't a blanket account entitlement toggle after all -- it's a
+  session-scoped value that Webull only accepts outside core hours, and a
+  deployment left at `"ALL"` all day would fail every single core-hours
+  entry/exit. `WebullBrokerClient._order_payload` now computes the actual
+  `support_trading_session` sent per order from `order.created_at` via
+  `is_within_core_trading_hours`, forcing `"CORE"` whenever the order is
+  submitted during core hours regardless of the configured value, and only
+  using the configured value (typically `"ALL"`) outside core hours where
+  it's actually accepted -- so a deployment can leave
+  `WEBULL_SUPPORT_TRADING_SESSION=ALL` set permanently and get correct
+  behavior in both windows, rather than needing a manual `.env` flip and
+  restart at each session boundary.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

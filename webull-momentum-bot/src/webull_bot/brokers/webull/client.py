@@ -153,6 +153,7 @@ from webull.trade.trade_client import TradeClient
 from ...config import Settings, TradingMode
 from ...enums import OrderSide, OrderStatus, OrderType, TimeInForce
 from ...interfaces.broker import BrokerClient
+from ...market_hours import is_within_core_trading_hours
 from ...models import Fill, MarketSnapshot, Order, Position
 from .retry import CallPriority, call_with_retry
 
@@ -1194,7 +1195,27 @@ class WebullBrokerClient(BrokerClient):
             # dashboard -- the code default here stays "CORE" rather than
             # flipping automatically, so existing deployments don't change
             # behavior without an explicit opt-in.
-            "support_trading_session": self.settings.webull_support_trading_session,
+            #
+            # NOT a static passthrough of that setting, though -- confirmed
+            # live 2026-08-12 (post sandbox-reset, ~9:49am ET, genuinely
+            # inside core hours) that "ALL" is REJECTED outright during
+            # core hours specifically (OAUTH_OPENAPI_PARAM_ERR, HTTP 417,
+            # "Parameter error, invalid support_trading_session, value:
+            # ALL"), while working fine outside core hours (the 2026-08-12
+            # pre-market confirmation above). So "ALL" isn't a blanket
+            # account entitlement after all -- it's only valid outside core
+            # hours, and a WEBULL_SUPPORT_TRADING_SESSION=ALL deployment
+            # that submits an order during core hours needs "CORE" for that
+            # one order instead, or every core-hours entry/exit fails with
+            # this param error. Force "CORE" whenever `order.created_at`
+            # (order submission time) falls inside core hours, regardless
+            # of the configured value; only use the configured value
+            # (typically "ALL") outside core hours, where it's actually
+            # accepted.
+            "support_trading_session": (
+                "CORE" if is_within_core_trading_hours(order.created_at)
+                else self.settings.webull_support_trading_session
+            ),
             "entrust_type": "QTY",
             "client_order_id": client_order_id,
         }

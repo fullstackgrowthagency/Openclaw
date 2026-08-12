@@ -2512,6 +2512,42 @@ Four non-obvious things worth knowing if you're debugging this client:
    `_sync_broker_protective_orders` retry attaches a normal broker-side
    bracket as usual.
 
+   **Second reversal (2026-08-12, ~9:49am ET, post sandbox-account-reset):
+   `"ALL"` is REJECTED during core hours specifically, resolving the
+   apparent contradiction above.** Right after the sandbox account was
+   reset (new `account_id`/`account_number`, same app key/secret) and
+   `WEBULL_SUPPORT_TRADING_SESSION` was still `ALL` from the earlier
+   opt-in, every entry order during core hours failed with the exact same
+   `OAUTH_OPENAPI_PARAM_ERR` (HTTP 417, "invalid support_trading_session,
+   value: ALL") as the original 2026-08-10 finding -- while a pre-market
+   order the same morning, on the same (new) account, was independently
+   confirmed to still accept `"ALL"` cleanly. That rules out "account
+   entitlement flipped again" as the explanation (a single account can't
+   have and not have the entitlement in the same few minutes) and points
+   instead at the simplest reading of all three data points together:
+   `"ALL"` was never an unconditional account-level toggle -- Webull
+   accepts it only for orders actually submitted outside core hours, and
+   rejects it as an invalid parameter for one submitted during core hours,
+   regardless of what the configured default is. The 2026-08-12 pre-market
+   "CORE" order also being accepted (noted above) is consistent with
+   this too: `"CORE"` just isn't session-restricted the other way.
+
+   **Fix:** `WebullBrokerClient._order_payload` no longer passes
+   `Settings.webull_support_trading_session` straight through as a static
+   value. It now calls `is_within_core_trading_hours(order.created_at)`
+   (`market_hours.py`) per order and forces `"CORE"` whenever that's true,
+   falling back to the configured value (typically `"ALL"`) only when it's
+   false. This means a deployment can leave
+   `WEBULL_SUPPORT_TRADING_SESSION=ALL` set permanently in `.env` and get
+   correct behavior across both core and extended hours automatically,
+   rather than needing a manual `.env` edit + service restart at each
+   session boundary (which is what this incident's short-term workaround
+   was, before the dynamic fix landed). See
+   `tests/test_webull_broker_client.py`'s
+   `test_order_payload_forces_core_session_during_core_hours_regardless_of_setting`
+   and `test_order_payload_uses_configured_session_outside_core_hours` for
+   the pinned-clock coverage of both branches.
+
 Streaming (`subscribe_quotes`) is confirmed live and working (2026-08-11) --
 see the "Streaming market data" section above and `scripts/verify_streaming.py`.
 The sandbox host for `DataStreamingClient`'s `mqtt_host`

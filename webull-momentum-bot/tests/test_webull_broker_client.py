@@ -81,10 +81,45 @@ def test_order_payload_reads_support_trading_session_from_settings():
     # WEBULL_SUPPORT_TRADING_SESSION), so a candidate value can be tested
     # live without a code change. Default is still "CORE" (see the test
     # above); this confirms the plumbing itself, independent of whichever
-    # value ends up being the default.
+    # value ends up being the default. created_at is pinned outside core
+    # hours (7am ET) since the configured value is now only honored there
+    # -- see the two tests below for the core-hours override itself.
     client = _client()
     client.settings = SimpleNamespace(webull_support_trading_session="ALL")
-    order = Order(symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=10)
+    order = Order(
+        symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=10,
+        created_at=datetime(2026, 1, 14, 12, 0, 0),  # 7:00am ET Wednesday -- pre-market
+    )
+    payload = client._order_payload(order)
+    assert payload["support_trading_session"] == "ALL"
+
+
+def test_order_payload_forces_core_session_during_core_hours_regardless_of_setting():
+    # Confirmed live 2026-08-12 (post sandbox-reset, ~9:49am ET, genuinely
+    # inside core hours): "ALL" is REJECTED during core hours specifically
+    # (417 OAUTH_OPENAPI_PARAM_ERR), even though the same value is accepted
+    # outside core hours (see the pre-market confirmation this same day,
+    # documented in _order_payload's comment). A
+    # WEBULL_SUPPORT_TRADING_SESSION=ALL deployment must still submit
+    # "CORE" for any order placed during core hours or every core-hours
+    # entry/exit fails with this param error.
+    client = _client()
+    client.settings = SimpleNamespace(webull_support_trading_session="ALL")
+    order = Order(
+        symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=10,
+        created_at=datetime(2026, 1, 14, 15, 0, 0),  # 10:00am ET Wednesday -- core hours
+    )
+    payload = client._order_payload(order)
+    assert payload["support_trading_session"] == "CORE"
+
+
+def test_order_payload_uses_configured_session_outside_core_hours():
+    client = _client()
+    client.settings = SimpleNamespace(webull_support_trading_session="ALL")
+    order = Order(
+        symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=10,
+        created_at=datetime(2026, 1, 14, 21, 0, 0),  # 4:00pm ET Wednesday -- just after close
+    )
     payload = client._order_payload(order)
     assert payload["support_trading_session"] == "ALL"
 
