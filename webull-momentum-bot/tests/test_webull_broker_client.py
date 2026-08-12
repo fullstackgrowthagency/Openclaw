@@ -789,6 +789,56 @@ def test_place_order_uses_critical_priority(monkeypatch):
     assert calls == [retry_module.CallPriority.CRITICAL]
 
 
+def test_place_order_never_overlaps_across_different_symbols():
+    # Real request (2026-08-13): orders for two or more different symbols
+    # must never be placed at the broker at the same time. Already
+    # guaranteed by webull_limiter.exclusive() being a single process-wide
+    # lock -- not scoped per symbol, per client instance, or per thread --
+    # so any two place_order calls anywhere in the process serialize
+    # regardless of which symbol they're for. Proven here directly at the
+    # WebullBrokerClient level (not just the abstract RateLimiter level --
+    # see test_retry.py's test_exclusive_serializes_concurrent_holders).
+    import threading
+    import time
+
+    active: list[str] = []
+    max_concurrent = 0
+    lock = threading.Lock()
+
+    class _SlowOrderV3:
+        def place_order(self, account_id, order_dicts):
+            nonlocal max_concurrent
+            symbol = order_dicts[0]["symbol"]
+            with lock:
+                active.append(symbol)
+                max_concurrent = max(max_concurrent, len(active))
+            time.sleep(0.05)
+            with lock:
+                active.remove(symbol)
+            return _FakeResponse({"status": "accepted"})
+
+    class _FakeTradeClient:
+        order_v3 = _SlowOrderV3()
+
+    def _place(symbol: str) -> None:
+        client = _client()
+        client.settings = SimpleNamespace(
+            trading_mode=None, is_live_trading_authorized=lambda: True, webull_support_trading_session="CORE",
+        )
+        client.account_id = "test-account"
+        client._require_trade_client = lambda: _FakeTradeClient()
+        order = Order(symbol=symbol, side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=1)
+        client.place_order(order)
+
+    threads = [threading.Thread(target=_place, args=(symbol,)) for symbol in ("AAPL", "TSLA", "GME")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=2.0)
+
+    assert max_concurrent == 1
+
+
 def test_cancel_order_uses_critical_priority(monkeypatch):
     calls = _spy_call_with_retry(monkeypatch)
     client = _client()

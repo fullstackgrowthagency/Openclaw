@@ -602,7 +602,13 @@ What's implemented and tested:
   `call_with_retry` call in `webull_limiter.exclusive()`. Reentrant-safe
   for the holder's own thread (its own paced retries proceed normally);
   every other thread queues until it's released, even if it exits via an
-  exception.
+  exception. **This also means orders for two or more different symbols
+  can never be placed at the same time**, confirmed directly (not just
+  at the abstract `RateLimiter` level) by
+  `tests/test_webull_broker_client.py::test_place_order_never_overlaps_across_different_symbols`
+  -- `webull_limiter` is one process-wide singleton, not scoped per
+  symbol/client instance/thread, so any two `place_order` calls anywhere
+  in the process serialize regardless of which stock they're for.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and
