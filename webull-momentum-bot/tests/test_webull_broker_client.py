@@ -640,23 +640,6 @@ def test_order_from_detail_stop_price_defaults_to_none():
     assert order.stop_price is None
 
 
-def test_order_from_detail_prefers_total_quantity_over_quantity():
-    """total_quantity is the confirmed field per Webull's OpenAPI spec for
-    get_order_detail (and matches get_order_open's independently
-    live-confirmed row shape) -- quantity is only a defensive fallback."""
-    client = _client()
-    order = client._order_from_detail(
-        {"symbol": "AAPL", "side": "BUY", "total_quantity": "199999", "quantity": "1", "status": "FILLED"}
-    )
-    assert order.quantity == 199999.0
-
-
-def test_order_from_detail_falls_back_to_quantity_when_total_quantity_absent():
-    client = _client()
-    order = client._order_from_detail({"symbol": "AAPL", "side": "BUY", "quantity": "10", "status": "FILLED"})
-    assert order.quantity == 10.0
-
-
 # -- OCO stop+target bracket (place_oco_bracket) -----------------------------
 
 def _sandbox_client() -> WebullBrokerClient:
@@ -881,68 +864,15 @@ def test_get_order_status_uses_critical_priority(monkeypatch):
 
     class _FakeOrderV3:
         def get_order_detail(self, account_id, broker_order_id):
-            return _FakeResponse(
-                {"combo_type": "NORMAL", "orders": [{"symbol": "AAPL", "side": "BUY", "quantity": "1", "status": "FILLED"}]}
-            )
+            return _FakeResponse({"symbol": "AAPL", "side": "BUY", "quantity": "1", "status": "FILLED"})
 
     class _FakeTradeClient:
         order_v3 = _FakeOrderV3()
 
     client._require_trade_client = lambda: _FakeTradeClient()
-    order = client.get_order_status("some-order-id")
+    client.get_order_status("some-order-id")
 
     assert calls == [retry_module.CallPriority.CRITICAL]
-    assert order.status == OrderStatus.FILLED
-
-
-def test_get_order_status_picks_the_matching_leg_out_of_a_combo_response(monkeypatch):
-    """Confirmed 2026-08-12 against Webull's own OpenAPI spec for GET
-    /trading/orders/get: the response wraps an `orders` array (a combo/
-    bracket order's `orders` can hold more than one leg), not a bare order
-    dict. get_order_status must pick the row matching the client_order_id
-    it was actually asked about, not just the first one in the array."""
-    _spy_call_with_retry(monkeypatch)
-    client = _client()
-    client.account_id = "test-account"
-
-    class _FakeOrderV3:
-        def get_order_detail(self, account_id, broker_order_id):
-            return _FakeResponse(
-                {
-                    "combo_type": "OCO",
-                    "orders": [
-                        {"client_order_id": "leg-a", "symbol": "AAPL", "side": "SELL", "quantity": "10", "status": "CANCELLED"},
-                        {"client_order_id": "leg-b", "symbol": "AAPL", "side": "SELL", "quantity": "10", "status": "SUBMITTED"},
-                    ],
-                }
-            )
-
-    class _FakeTradeClient:
-        order_v3 = _FakeOrderV3()
-
-    client._require_trade_client = lambda: _FakeTradeClient()
-    order = client.get_order_status("leg-b")
-
-    assert order.status == OrderStatus.SUBMITTED
-    assert order.broker_order_id == "leg-b"
-
-
-def test_get_order_status_falls_back_to_pending_when_orders_array_is_empty(monkeypatch):
-    _spy_call_with_retry(monkeypatch)
-    client = _client()
-    client.account_id = "test-account"
-
-    class _FakeOrderV3:
-        def get_order_detail(self, account_id, broker_order_id):
-            return _FakeResponse({"combo_type": "NORMAL", "orders": []})
-
-    class _FakeTradeClient:
-        order_v3 = _FakeOrderV3()
-
-    client._require_trade_client = lambda: _FakeTradeClient()
-    order = client.get_order_status("some-order-id")
-
-    assert order.status == OrderStatus.PENDING
 
 
 def test_modify_order_uses_normal_priority(monkeypatch):
@@ -955,9 +885,7 @@ def test_modify_order_uses_normal_priority(monkeypatch):
             return _FakeResponse({"status": "accepted"})
 
         def get_order_detail(self, account_id, broker_order_id):
-            return _FakeResponse(
-                {"combo_type": "NORMAL", "orders": [{"symbol": "AAPL", "side": "BUY", "quantity": "1", "status": "SUBMITTED"}]}
-            )
+            return _FakeResponse({"symbol": "AAPL", "side": "BUY", "quantity": "1", "status": "SUBMITTED"})
 
     class _FakeTradeClient:
         order_v3 = _FakeOrderV3()

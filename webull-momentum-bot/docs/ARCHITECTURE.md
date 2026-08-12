@@ -1411,51 +1411,6 @@ Webull retains any record of an already-filled order on this account at
 all before concluding `get_order_history` itself is broken/unsupported
 here.
 
-**Update, same day: `get_order_detail`'s response shape and field names
-are now DOCUMENTED, not guessed -- and that documentation caught two real
-bugs.** The user supplied Webull's own OpenAPI spec for `GET
-/trading/orders/get` (`order_v3.get_order_detail` under the hood). Two
-things this codebase had been assuming without ever seeing a real
-populated response turned out to be wrong:
-
-1. **Response shape.** `get_order_status` assumed the response body was
-   either a bare list of order dicts or a single order dict itself
-   (`body[0] if isinstance(body, list) else body`). The documented shape
-   is neither -- it's always an object with a required `orders` array
-   (`{"combo_type": ..., "orders": [...]}`), since even a single "simple"
-   order is modeled as a one-item combo. Worse, a combo/bracket's `orders`
-   array can hold MULTIPLE legs (e.g. an OCO's two legs), and the old code
-   would have silently parsed whichever leg happened to be `body[0]`
-   rather than the one actually asked about. Fixed: `get_order_status` now
-   unwraps `orders` and picks the row whose own `client_order_id` matches
-   the `broker_order_id` it was called with, falling back to the first row
-   only if none match (and to an empty dict -- `_order_from_detail`'s
-   `PENDING` default -- if the array itself is empty).
-2. **Quantity field.** `_order_from_detail` read a plain `quantity` key
-   that had never been confirmed against a live response. The documented
-   field is `total_quantity` -- and matches `get_order_open`'s
-   independently live-confirmed row shape exactly (see
-   `_order_from_open_order_dict`'s note about this same key), which is
-   strong corroboration this is the real field. `quantity` is now only a
-   defensive fallback for a response variant that might use it instead.
-
-This also confirms a real field name for the order-history investigation
-above: the documented response for `get_order_detail`'s order items
-includes a `filled_price` field, matching one of `get_order_history`'s
-guessed key names (`_latest_filled_price_from_history` now tries it
-first). Since both endpoints are documented to share the same per-order
-item schema, this is a meaningful (though not yet live-confirmed for
-`get_order_history` specifically) upgrade from a blind guess to a
-documented contract. **Still not fully resolved:** the actual "next probe"
-above (calling `get_order_detail` live against a known-`FILLED`
-`client_order_id`) hasn't been run yet -- this update is about the
-documented contract catching real bugs in code that was written against
-guesses, not about a new live response. See
-`tests/test_webull_broker_client.py::test_get_order_status_picks_the_matching_leg_out_of_a_combo_response`,
-`::test_get_order_status_falls_back_to_pending_when_orders_array_is_empty`,
-`::test_order_from_detail_prefers_total_quantity_over_quantity`, and
-`::test_order_from_detail_falls_back_to_quantity_when_total_quantity_absent`.
-
 **A real, serious incident (2026-08-12) surfaced while investigating
 trade history: BIVI, believed closed based on an earlier (mistaken) user
 report, was still genuinely open at the broker** -- confirmed via a
