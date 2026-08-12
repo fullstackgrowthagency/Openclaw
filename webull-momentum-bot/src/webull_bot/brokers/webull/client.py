@@ -155,7 +155,7 @@ from ...enums import OrderSide, OrderStatus, OrderType, TimeInForce
 from ...interfaces.broker import BrokerClient
 from ...market_hours import is_within_core_trading_hours
 from ...models import Fill, MarketSnapshot, Order, Position
-from .retry import CallPriority, call_with_retry
+from .retry import CallPriority, call_with_retry, webull_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -1277,11 +1277,25 @@ class WebullBrokerClient(BrokerClient):
         # burst of get_snapshot polling could 429 an entry/exit order with
         # nothing to catch it (see this module's docstring's "Priority
         # tiers" note and retry.py's for the fuller history).
+        #
+        # webull_limiter.exclusive(): real incident (CYCU/SCKT/BIVI,
+        # 2026-08-12) showed CRITICAL priority alone isn't enough once
+        # SEVERAL genuinely CRITICAL calls are in flight simultaneously
+        # (a stuck exit retry, a bracket-attach retry, reconcile's
+        # get_positions, ...) -- they still compete with each other for
+        # the same ~1 req/s account-wide ceiling. Placing an order is the
+        # single highest-stakes moment this client has; giving it
+        # exclusive access to the rate-limit budget for the duration of
+        # this call (including its own internal call_with_retry attempts)
+        # means it's never competing with concurrent discovery/reconcile/
+        # other-order traffic for the same slots. See RateLimiter.
+        # exclusive's docstring.
         payload = self._order_payload(order)
-        response = call_with_retry(
-            lambda: self._require_trade_client().order_v3.place_order(self.account_id, [payload]),
-            priority=CallPriority.CRITICAL,
-        )
+        with webull_limiter.exclusive():
+            response = call_with_retry(
+                lambda: self._require_trade_client().order_v3.place_order(self.account_id, [payload]),
+                priority=CallPriority.CRITICAL,
+            )
         response.raise_for_status()
 
         # Webull's own cancel/detail calls key off the client-generated
@@ -1339,13 +1353,15 @@ class WebullBrokerClient(BrokerClient):
 
         # CRITICAL priority: attaching/replacing a protective stop+target
         # bracket is a real trading action protecting an open position --
-        # same tier as place_order above.
-        response = call_with_retry(
-            lambda: self._require_trade_client().order_v3.place_order(
-                self.account_id, [stop_payload, target_payload]
-            ),
-            priority=CallPriority.CRITICAL,
-        )
+        # same tier as place_order above. Same webull_limiter.exclusive()
+        # rationale as place_order too -- see that method's comment.
+        with webull_limiter.exclusive():
+            response = call_with_retry(
+                lambda: self._require_trade_client().order_v3.place_order(
+                    self.account_id, [stop_payload, target_payload]
+                ),
+                priority=CallPriority.CRITICAL,
+            )
         response.raise_for_status()
 
         now = datetime.utcnow()

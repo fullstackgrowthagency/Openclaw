@@ -1528,6 +1528,50 @@ truth). This backoff fix stops the immediate bleeding; the streaming
 migration remains the intended actual fix and is the next real piece of
 work, not yet started.
 
+**A second, narrower fix landed the same day, ahead of the streaming
+migration: `RateLimiter.exclusive()` (`retry.py`).** The user's
+follow-up question, once the CYCU/SCKT retry storm calmed down: could
+ALL other Webull API traffic simply be paused for the duration of any
+order placement, so it never has to compete for the rate-limit budget
+at all? `CallPriority.CRITICAL` already wins contention against
+`BACKGROUND` traffic, but does nothing when SEVERAL genuinely
+`CRITICAL` calls are simultaneously in flight (this exact incident: a
+stuck exit retry, a bracket-attach retry, and `reconcile`'s
+`get_positions()` all competing for the same ~1 req/s ceiling at once)
+-- priority alone can't help there, since they're all the same
+priority. `exclusive()` is a stronger mechanism built specifically for
+this: a context manager that, while held by one thread, makes every
+OTHER thread's `RateLimiter.wait()` call block outright -- regardless
+of its own priority -- until the holder releases it. Implementation:
+a new `_exclusive_holder` field (an OS thread id, guarded by the same
+condition variable `wait()` already uses) that `wait()`'s loop checks
+first, before its normal ticket/pacing logic -- any thread that isn't
+the current holder just waits on the condition variable again;
+`threading.get_ident()` is what makes the holder's OWN thread exempt
+(so its own paced `call_with_retry` attempts inside the block proceed
+completely normally), while every other thread, at any priority, is
+blocked. `WebullBrokerClient.place_order` and `place_oco_bracket` --
+every code path that submits a genuinely new order (entries, exits,
+and broker-side stop/target brackets alike) -- now wrap their
+`call_with_retry` call in `with webull_limiter.exclusive():`, so the
+single highest-stakes moment this client has gets the account-wide
+budget entirely to itself for that stretch. `cancel_order`/
+`modify_order` were deliberately left unwrapped -- lower-stakes cleanup
+actions, and holding exclusive access longer than necessary just delays
+everything else without a comparable safety benefit. See
+`tests/test_retry.py`'s `test_exclusive_blocks_other_threads_
+regardless_of_priority`, `test_exclusive_does_not_block_the_holders_
+own_thread`, `test_exclusive_releases_on_exception`, and
+`test_exclusive_serializes_concurrent_holders`.
+
+This narrows, but does not eliminate, the motivation for the streaming
+migration above -- `exclusive()` protects the moment an order is
+actually placed, but candidate discovery, reconcile, and every other
+poll-based REST call this bot makes are still real requests competing
+for the same shared account-wide ceiling the rest of the time. The
+streaming migration remains the intended actual fix for that broader
+problem and is still the next real piece of work, not yet started.
+
 Called from `_process_all_candidates`, throttled by
 `TradingLoopConfig.position_reconcile_interval_seconds` (default 30s) --
 but firing immediately on that method's very first-ever call regardless,

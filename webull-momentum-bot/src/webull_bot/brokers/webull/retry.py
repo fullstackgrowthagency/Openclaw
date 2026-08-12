@@ -74,6 +74,7 @@ call sites use which tier and why.
 """
 from __future__ import annotations
 
+import contextlib
 import heapq
 import itertools
 import logging
@@ -81,7 +82,7 @@ import random
 import threading
 import time
 from enum import IntEnum
-from typing import Callable, Optional, TypeVar
+from typing import Callable, Iterator, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,22 @@ class RateLimiter:
         self._last_call_at: float = 0.0
         self._waiting: list[tuple[int, int]] = []
         self._counter = itertools.count()
+        # Real incident (CYCU/SCKT/BIVI, 2026-08-12): CallPriority already
+        # lets a CRITICAL call win contention against BACKGROUND traffic,
+        # but does nothing when SEVERAL genuinely CRITICAL calls (a stuck
+        # exit retry, a bracket-attach retry, reconcile's get_positions,
+        # ...) are simultaneously in flight -- they just compete with each
+        # other for the same ~1 req/s ceiling like any other same-priority
+        # tickets, and the account-wide limit gets exceeded regardless of
+        # internal ordering. `exclusive()` below is a stronger mechanism
+        # for the highest-stakes moment of all -- actually placing an
+        # order -- than priority alone can provide: while held, every
+        # OTHER thread's wait() call blocks outright, at any priority,
+        # until the holder is done, so an order submission (including its
+        # own internal call_with_retry attempts) gets the shared budget
+        # entirely to itself instead of competing with concurrent
+        # discovery/reconcile/other-order traffic for the same slots.
+        self._exclusive_holder: Optional[int] = None
 
     def wait(self, priority: int = CallPriority.NORMAL) -> None:
         with self._condition:
@@ -147,6 +164,16 @@ class RateLimiter:
             heapq.heappush(self._waiting, ticket)
             try:
                 while True:
+                    # Exclusive mode: every thread except the holder waits
+                    # here regardless of its own priority or position in
+                    # the heap -- see exclusive()'s docstring. The holder's
+                    # own thread (e.g. paced retries of the same order
+                    # call) is exempt and proceeds through the normal
+                    # ticket/pacing logic below exactly as if no exclusive
+                    # holder existed.
+                    if self._exclusive_holder is not None and self._exclusive_holder != threading.get_ident():
+                        self._condition.wait(timeout=self.min_interval_seconds)
+                        continue
                     now = time.monotonic()
                     elapsed = now - self._last_call_at
                     if self._waiting[0] == ticket and elapsed >= self.min_interval_seconds:
@@ -169,6 +196,44 @@ class RateLimiter:
                 except ValueError:
                     pass
                 raise
+
+    @contextlib.contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Acquires exclusive access to this limiter for the calling
+        thread: every OTHER thread's wait() call blocks -- regardless of
+        its own priority -- until this context exits, so a critical
+        sequence of calls (placing an order, including all of its own
+        internal call_with_retry attempts) gets the account-wide
+        rate-limit budget entirely to itself for that stretch instead of
+        competing with concurrent discovery/reconcile/other-order traffic
+        for the same slots. See the real incident this fixes in
+        __init__'s docstring.
+
+        Reentrant-safe for the SAME thread (wait() only blocks OTHER
+        threads, via threading.get_ident() -- a thread already holding
+        exclusive access that calls exclusive() again, or calls wait()
+        directly, is never blocked by its own hold), but not designed to
+        be literally nested (the inner exit would release the outer
+        hold too, since there's only one holder slot) -- callers should
+        wrap the whole order-placement sequence in one exclusive() block,
+        not multiple nested ones.
+
+        Blocks waiting for a PRIOR holder (a concurrent order submission
+        already in flight on another thread) to finish before acquiring
+        -- unbounded by design, same as every other wait in this class;
+        an order submission is expected to complete (successfully or by
+        exhausting its own retries) in a bounded, short time, not hang
+        forever."""
+        with self._condition:
+            while self._exclusive_holder is not None:
+                self._condition.wait()
+            self._exclusive_holder = threading.get_ident()
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._exclusive_holder = None
+                self._condition.notify_all()
 
 
 # 1.0s -- matches the ~1 req/s sustained rate measured in the sequential

@@ -214,6 +214,106 @@ def test_rate_limiter_still_enforces_interval_regardless_of_priority():
     assert time.monotonic() - start >= 0.14
 
 
+# -- exclusive() -- real incident (CYCU/SCKT/BIVI, 2026-08-12): CallPriority
+# alone doesn't help once several genuinely CRITICAL calls are simultaneously
+# in flight -- they still compete with each other for the same slots.
+# exclusive() gives one thread's order-placement call exclusive access to the
+# whole limiter, regardless of any other thread's priority.
+
+def test_exclusive_blocks_other_threads_regardless_of_priority():
+    limiter = RateLimiter(min_interval_seconds=0.0)
+    order: list[str] = []
+    lock = threading.Lock()
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def holder():
+        with limiter.exclusive():
+            holder_ready.set()
+            release_holder.wait(timeout=2.0)
+        with lock:
+            order.append("holder-released")
+
+    def critical_waiter():
+        holder_ready.wait(timeout=2.0)
+        limiter.wait(CallPriority.CRITICAL)
+        with lock:
+            order.append("critical")
+
+    holder_thread = threading.Thread(target=holder)
+    waiter_thread = threading.Thread(target=critical_waiter)
+    holder_thread.start()
+    holder_ready.wait(timeout=2.0)
+    waiter_thread.start()
+    time.sleep(0.1)  # give the waiter a real chance to (wrongly) slip through
+    with lock:
+        assert order == []  # still blocked despite being CRITICAL priority
+    release_holder.set()
+    holder_thread.join(timeout=2.0)
+    waiter_thread.join(timeout=2.0)
+
+    assert order == ["holder-released", "critical"]
+
+
+def test_exclusive_does_not_block_the_holders_own_thread():
+    limiter = RateLimiter(min_interval_seconds=0.0)
+    calls = []
+    with limiter.exclusive():
+        # Simulates call_with_retry's own paced attempts happening inside
+        # an exclusive() block -- the holder's own thread must never be
+        # blocked by its own hold.
+        limiter.wait(CallPriority.CRITICAL)
+        calls.append(1)
+        limiter.wait(CallPriority.CRITICAL)
+        calls.append(2)
+    assert calls == [1, 2]
+
+
+def test_exclusive_releases_on_exception():
+    limiter = RateLimiter(min_interval_seconds=0.0)
+    with pytest.raises(RuntimeError):
+        with limiter.exclusive():
+            raise RuntimeError("simulated failure mid-order")
+
+    # Must not be left permanently held -- a fresh acquire must succeed
+    # immediately, not hang.
+    acquired = threading.Event()
+
+    def acquirer():
+        with limiter.exclusive():
+            acquired.set()
+
+    t = threading.Thread(target=acquirer)
+    t.start()
+    t.join(timeout=2.0)
+    assert acquired.is_set()
+
+
+def test_exclusive_serializes_concurrent_holders():
+    limiter = RateLimiter(min_interval_seconds=0.0)
+    active_count = 0
+    max_concurrent = 0
+    lock = threading.Lock()
+
+    def worker():
+        nonlocal active_count, max_concurrent
+        with limiter.exclusive():
+            with lock:
+                active_count += 1
+                max_concurrent = max(max_concurrent, active_count)
+            time.sleep(0.05)
+            with lock:
+                active_count -= 1
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=2.0)
+
+    assert max_concurrent == 1
+
+
 def test_call_with_retry_passes_priority_through_to_the_limiter():
     seen_priorities = []
 

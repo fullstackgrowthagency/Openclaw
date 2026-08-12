@@ -582,6 +582,27 @@ What's implemented and tested:
   up entirely (an exit can't be allowed to just stop retrying), it only
   ever slows the retry cadence down. Resets to zero on the next
   successful submission.
+- **Placing an order now gets exclusive access to the rate-limit budget,
+  not just priority.** The CYCU/SCKT/BIVI incidents above all shared one
+  root cause the user identified directly: `CallPriority.CRITICAL`
+  already wins contention against `BACKGROUND` traffic, but does nothing
+  when SEVERAL genuinely `CRITICAL` calls are simultaneously in flight (a
+  stuck exit retry, a bracket-attach retry, `reconcile`'s
+  `get_positions()`, ...) -- they still compete with each other for the
+  same ~1 req/s account-wide ceiling. `RateLimiter.exclusive()`
+  (`retry.py`) is a new, stronger mechanism for the single highest-stakes
+  moment of all: while held by one thread, EVERY other thread's
+  `wait()` call blocks outright, at any priority, until the holder is
+  done -- so an order submission (including all of its own internal
+  `call_with_retry` attempts) gets the account-wide budget entirely to
+  itself instead of splitting it with concurrent discovery/reconcile/
+  other-order traffic. `WebullBrokerClient.place_order` and
+  `place_oco_bracket` (every code path that submits a new order --
+  entries, exits, and broker-side brackets alike) now wrap their
+  `call_with_retry` call in `webull_limiter.exclusive()`. Reentrant-safe
+  for the holder's own thread (its own paced retries proceed normally);
+  every other thread queues until it's released, even if it exits via an
+  exception.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and
