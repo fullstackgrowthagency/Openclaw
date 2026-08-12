@@ -22,10 +22,32 @@ body {
 
 header {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 24px 16px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+/* Logo (left) and the settings gear (right) share the very top row, above
+   everything else in the header -- the gear is deliberately NOT grouped
+   with .status-bar below anymore (it used to sit inline with it). */
+.header-top {
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 24px;
-  border-bottom: 1px solid var(--panel-border);
+  gap: 12px;
+}
+
+.header-logo {
+  height: 40px;
+  width: auto;
+  display: block;
+}
+
+.header-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
 }
@@ -41,13 +63,6 @@ header h1 {
   gap: 20px;
   flex-wrap: wrap;
   align-items: center;
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
 }
 
 .settings-btn {
@@ -494,6 +509,10 @@ footer {
 
   header h1 {
     font-size: 16px;
+  }
+
+  .header-logo {
+    height: 28px;
   }
 
   .status-bar {
