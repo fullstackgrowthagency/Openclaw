@@ -104,6 +104,19 @@ header h1 {
   border-color: var(--accent);
 }
 
+.settings-field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-field-checkbox input {
+  width: auto;
+  flex: none;
+  padding: 0;
+}
+
 .settings-actions {
   display: flex;
   justify-content: flex-end;

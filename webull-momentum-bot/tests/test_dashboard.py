@@ -348,6 +348,22 @@ def test_risk_settings_returns_current_config(loop, client):
     assert body["max_total_risk_pct"] == loop.risk_engine.config.max_total_risk_pct
     assert body["max_daily_loss_pct"] == loop.risk_engine.config.max_daily_loss_pct
     assert body["max_simultaneous_positions"] == loop.risk_engine.config.max_simultaneous_positions
+    assert body["allow_extended_hours_trading"] == loop.risk_engine.config.allow_extended_hours_trading
+
+
+def test_risk_settings_update_toggles_allow_extended_hours_trading(loop, client):
+    assert loop.risk_engine.config.allow_extended_hours_trading is False
+    resp = client.post("/api/risk-settings", json={"allow_extended_hours_trading": True})
+    assert resp.status_code == 200
+    assert resp.json()["allow_extended_hours_trading"] is True
+    assert loop.risk_engine.config.allow_extended_hours_trading is True
+    # And back off -- False is a legitimate, meaningful value here too, not
+    # something the exclude_none=True update logic should ever treat as
+    # "omitted."
+    resp = client.post("/api/risk-settings", json={"allow_extended_hours_trading": False})
+    assert resp.status_code == 200
+    assert resp.json()["allow_extended_hours_trading"] is False
+    assert loop.risk_engine.config.allow_extended_hours_trading is False
 
 
 def test_risk_settings_update_mutates_live_engine(loop, client):

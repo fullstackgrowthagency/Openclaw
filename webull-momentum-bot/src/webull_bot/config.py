@@ -150,6 +150,20 @@ class Settings:
         default_factory=lambda: _env_bool("ENABLE_YFINANCE_FALLBACK", True)
     )
 
+    # Webull order `support_trading_session` value (see
+    # brokers/webull/client.py's _order_payload docstring for the full
+    # history). Confirmed live on 2026-08-10 that this account/endpoint
+    # rejects "ALL" outright with a 417, despite it being a documented
+    # value on developer.webull.com -- kept as an env-var override rather
+    # than hardcoded so a candidate value (e.g. "ALL" again, after
+    # checking whether the account has an extended-hours trading
+    # entitlement enabled) can be tested live with a config change and a
+    # restart, no code deploy required. Defaults to the only value
+    # confirmed to work.
+    webull_support_trading_session: str = field(
+        default_factory=lambda: os.environ.get("WEBULL_SUPPORT_TRADING_SESSION", "CORE")
+    )
+
     def is_live_trading_authorized(self) -> bool:
         """
         The single gate every code path must consult before an order can

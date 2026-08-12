@@ -174,11 +174,14 @@ function initInfoModal() {
 // (risk_engine.config vs. position_manager.config), each with its own
 // GET/POST pair -- see dashboard/app.py. Keys must match each Update
 // model's fields and the input ids ("setting-<key>") in index.html's
-// settings modal.
+// settings modal. BOOLEAN_SETTINGS_FIELDS lists the ones rendered as a
+// checkbox (checked/unchecked) rather than a numeric <input> -- currently
+// just allow_extended_hours_trading (added 2026-08-12).
 const SETTINGS_GROUPS = [
-  { endpoint: "/api/risk-settings", fields: ["stop_loss_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct", "max_daily_loss_pct", "max_simultaneous_positions"] },
+  { endpoint: "/api/risk-settings", fields: ["stop_loss_pct", "min_risk_reward_ratio", "max_position_size_pct", "max_total_risk_pct", "max_daily_loss_pct", "max_simultaneous_positions", "allow_extended_hours_trading"] },
   { endpoint: "/api/position-settings", fields: ["breakeven_trigger_pct", "trailing_stop_pct"] },
 ];
+const BOOLEAN_SETTINGS_FIELDS = new Set(["allow_extended_hours_trading"]);
 
 function openSettingsModal() {
   const overlay = document.getElementById("settings-modal-overlay");
@@ -191,7 +194,9 @@ function openSettingsModal() {
       SETTINGS_GROUPS.forEach((g, i) => {
         g.fields.forEach((f) => {
           const input = document.getElementById(`setting-${f}`);
-          if (input) input.value = results[i][f];
+          if (!input) return;
+          if (BOOLEAN_SETTINGS_FIELDS.has(f)) input.checked = !!results[i][f];
+          else input.value = results[i][f];
         });
       });
     })
@@ -229,7 +234,8 @@ function initSettingsModal() {
         const payload = {};
         for (const f of g.fields) {
           const input = document.getElementById(`setting-${f}`);
-          if (input.value !== "") payload[f] = Number(input.value);
+          if (BOOLEAN_SETTINGS_FIELDS.has(f)) payload[f] = input.checked;
+          else if (input.value !== "") payload[f] = Number(input.value);
         }
         const res = await fetch(g.endpoint, {
           method: "POST",

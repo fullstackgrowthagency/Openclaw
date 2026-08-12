@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from ..enums import RiskEventType
-from ..market_hours import is_within_core_trading_hours
+from ..market_hours import is_within_core_trading_hours, is_within_extended_trading_hours
 from ..models import MarketSnapshot, Position, RiskDecision, RiskEvent, Signal
 
 
@@ -76,6 +76,18 @@ class RiskConfig:
     max_slippage_pct: float = 1.0            # reject/adjust if simulated fill would exceed this vs reference price
     stop_loss_required: bool = True
     cooldown_minutes_after_loss: int = 15
+    # Dashboard-adjustable (2026-08-12). Off by default -- widens the entry
+    # gate below from CORE-only (9:30am-4:00pm ET) to CORE+pre-market+
+    # after-hours (4:00am-8:00pm ET, see market_hours.is_within_extended_
+    # trading_hours). Deliberately does NOT, by itself, guarantee an
+    # extended-hours signal actually reaches the market: WebullBrokerClient
+    # still submits every order with a `support_trading_session` value
+    # confirmed live (2026-08-10) to reject "ALL" outright for this
+    # account -- see that module's _order_payload docstring. Flip this on
+    # to let entries THROUGH this gate for live testing; whether the
+    # broker then accepts or rejects the resulting order is a separate,
+    # still-open question.
+    allow_extended_hours_trading: bool = False
 
 
 @dataclass
@@ -196,7 +208,13 @@ class RiskEngine:
         # engine's own clock parameter, defaulted to datetime.utcnow() above)
         # rather than the snapshot's timestamp, so a stale/replayed snapshot
         # can't be used to slip a signal through outside real market hours.
-        if not is_within_core_trading_hours(now):
+        if self.config.allow_extended_hours_trading:
+            if not is_within_extended_trading_hours(now):
+                return reject(
+                    RiskEventType.OUTSIDE_CORE_TRADING_HOURS,
+                    "Outside extended trading hours (4:00am-8:00pm ET, Mon-Fri); new entries are not permitted.",
+                )
+        elif not is_within_core_trading_hours(now):
             return reject(
                 RiskEventType.OUTSIDE_CORE_TRADING_HOURS,
                 "Outside core trading hours (9:30am-4:00pm ET, Mon-Fri); new entries are not permitted.",

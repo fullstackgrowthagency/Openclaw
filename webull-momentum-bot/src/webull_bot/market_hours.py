@@ -18,6 +18,11 @@ from zoneinfo import ZoneInfo
 EASTERN = ZoneInfo("America/New_York")
 REGULAR_SESSION_OPEN = time(9, 30)
 REGULAR_SESSION_CLOSE = time(16, 0)
+# Webull's standard pre-market/after-hours bounds (4:00am-9:30am and
+# 4:00pm-8:00pm ET) -- see is_within_extended_trading_hours. Distinct from
+# REGULAR_SESSION_OPEN/CLOSE above, which bound the CORE session only.
+EXTENDED_SESSION_OPEN = time(4, 0)
+EXTENDED_SESSION_CLOSE = time(20, 0)
 
 
 def is_within_core_trading_hours(now_utc: datetime) -> bool:
@@ -28,6 +33,26 @@ def is_within_core_trading_hours(now_utc: datetime) -> bool:
     if eastern.weekday() >= 5:  # Saturday/Sunday
         return False
     return REGULAR_SESSION_OPEN <= eastern.time() < REGULAR_SESSION_CLOSE
+
+
+def is_within_extended_trading_hours(now_utc: datetime) -> bool:
+    """True Monday-Friday, 4:00am <= now < 8:00pm US/Eastern -- CORE hours
+    plus Webull's standard pre-market and after-hours windows. Does NOT
+    cover Webull's separate overnight session (which runs on a different
+    calendar-day boundary and isn't wired into this bot at all yet).
+
+    Added 2026-08-12 alongside RiskConfig.allow_extended_hours_trading:
+    before this, `RiskEngine.evaluate` only ever consulted
+    `is_within_core_trading_hours`, an unconditional gate with no config
+    escape hatch. Whether an order actually reaches the market once this
+    gate is opened is a SEPARATE, still-unresolved question -- see
+    `WebullBrokerClient._order_payload`'s `support_trading_session` note
+    for the broker-side half of extended-hours support, which as of this
+    writing is still hardcoded to "CORE" pending live verification."""
+    eastern = now_utc.replace(tzinfo=timezone.utc).astimezone(EASTERN)
+    if eastern.weekday() >= 5:
+        return False
+    return EXTENDED_SESSION_OPEN <= eastern.time() < EXTENDED_SESSION_CLOSE
 
 
 def is_after_core_trading_hours(now_utc: datetime) -> bool:

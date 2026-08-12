@@ -4,6 +4,7 @@ from webull_bot.market_hours import (
     is_after_core_trading_hours,
     is_within_closing_buffer,
     is_within_core_trading_hours,
+    is_within_extended_trading_hours,
 )
 
 
@@ -77,3 +78,31 @@ def test_within_closing_buffer_stays_true_after_the_actual_close():
 def test_within_closing_buffer_is_true_all_weekend():
     saturday = datetime(2026, 8, 15, 15, 0, 0)
     assert is_within_closing_buffer(saturday, buffer_minutes=2.0) is True
+
+
+def test_extended_hours_true_during_premarket():
+    # 8:00 UTC = 4:00am ET exactly -- extended session open boundary, inclusive.
+    assert is_within_extended_trading_hours(datetime(2026, 8, 10, 8, 0, 0)) is True
+
+
+def test_extended_hours_false_one_minute_before_premarket_open():
+    assert is_within_extended_trading_hours(datetime(2026, 8, 10, 7, 59, 0)) is False
+
+
+def test_extended_hours_true_during_core_hours():
+    assert is_within_extended_trading_hours(datetime(2026, 8, 10, 13, 30, 0)) is True
+
+
+def test_extended_hours_true_during_after_hours():
+    # 23:59 UTC = 7:59pm ET -- still inside the after-hours window.
+    assert is_within_extended_trading_hours(datetime(2026, 8, 10, 23, 59, 0)) is True
+
+
+def test_extended_hours_false_at_after_hours_close_boundary():
+    # 0:00 UTC (next day) = 8:00pm ET exactly -- close boundary is exclusive.
+    assert is_within_extended_trading_hours(datetime(2026, 8, 11, 0, 0, 0)) is False
+
+
+def test_extended_hours_false_on_weekend():
+    saturday = datetime(2026, 8, 15, 15, 0, 0)
+    assert is_within_extended_trading_hours(saturday) is False

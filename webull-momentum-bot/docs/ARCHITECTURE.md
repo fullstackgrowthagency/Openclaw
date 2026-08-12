@@ -883,29 +883,46 @@ tuned thresholds.
 ## Risk sizing
 
 Once a `Strategy` emits a `Signal`, `RiskEngine.evaluate()` (`risk/risk_engine.py`)
-decides both *whether* to trade it and, if so, *how many shares*. Six of
+decides both *whether* to trade it and, if so, *how many shares*. Seven of
 its `RiskConfig` fields are adjustable live from the dashboard's Settings
 button (top right -- see "Dashboard" below) via `GET`/`POST
 /api/risk-settings`, which mutate the running `RiskEngine.config` in place;
 changes apply to the very next `Signal` evaluated, no restart needed.
 
-**Core trading hours gate** (checked immediately after the kill switch, before
-any of the sizing math below, and not configurable): `evaluate()` refuses
-every entry signal outside 9:30am-4:00pm ET, Monday-Friday
-(`market_hours.is_within_core_trading_hours`), rejecting with
-`RiskEventType.OUTSIDE_CORE_TRADING_HOURS`. Added after a production report
-of trades filling *during* core hours whose resulting positions then went
-untracked (see "Position tracking can be lost on a broker-side fill
-reconciliation failure" below) -- investigating that report surfaced that
-there was no explicit application-level guarantee at all that entries only
-happen in core hours; this closes that gap outright rather than leaving it
-to whatever Webull itself does with an out-of-hours order (see the
-`support_trading_session` note in "Webull integration"). This only ever
-applies to entries: `OrderManager.submit_signal` never routes
-`EXIT`/`SCALE_OUT` signals through `evaluate()` at all (see its own
-docstring), so a stop-loss or the end-of-core-hours auto-flatten (see
-"Position management" below) is never blocked by this gate -- `evaluate()`
-itself has no action-type carve-out, it's simply never called for exits.
+**Core/extended trading hours gate** (checked immediately after the kill
+switch, before any of the sizing math below): `evaluate()` refuses every
+entry signal outside a trading-hours window, rejecting with
+`RiskEventType.OUTSIDE_CORE_TRADING_HOURS`. Which window depends on
+`RiskConfig.allow_extended_hours_trading` (dashboard-adjustable, **off by
+default**): off, it's `market_hours.is_within_core_trading_hours` (9:30am-
+4:00pm ET, Mon-Fri) as before; on, it widens to
+`market_hours.is_within_extended_trading_hours` (4:00am-8:00pm ET, Mon-Fri
+-- CORE plus Webull's standard pre-market/after-hours windows). Added
+after a production report of trades filling *during* core hours whose
+resulting positions then went untracked (see "Position tracking can be
+lost on a broker-side fill reconciliation failure" below) -- investigating
+that report surfaced that there was no explicit application-level
+guarantee at all that entries only happen in core hours; this closes that
+gap outright rather than leaving it to whatever Webull itself does with an
+out-of-hours order (see the `support_trading_session` note in "Webull
+integration"). This only ever applies to entries: `OrderManager.submit_signal`
+never routes `EXIT`/`SCALE_OUT` signals through `evaluate()` at all (see
+its own docstring), so a stop-loss or the end-of-core-hours auto-flatten
+(see "Position management" below) is never blocked by this gate --
+`evaluate()` itself has no action-type carve-out, it's simply never called
+for exits.
+
+**Important: turning `allow_extended_hours_trading` on only widens WHEN a
+signal is allowed past this gate.** It does not, by itself, make Webull
+accept the resulting order during pre-market/after-hours -- every order
+this bot places still sets `support_trading_session` from
+`Settings.webull_support_trading_session` (default `"CORE"`), and `"CORE"`-
+scoped orders are not expected to fill (or even be accepted) outside core
+hours. See the `support_trading_session` note in "Webull integration" for
+the full history and how to test/change that value live. Until that's
+resolved, turning this toggle on with the default `"CORE"` session value
+will let a signal through the risk gate only to have the broker itself
+reject or silently no-op the resulting order outside core hours.
 
 `now` matters here as much as it does for the daily-rollover/cooldown logic
 already in this method, so it's threaded through properly rather than left
@@ -2323,7 +2340,7 @@ Four non-obvious things worth knowing if you're debugging this client:
    checks `get_raw_bars`' `trading_sessions` parameter specifically, not
    this one, but the same "does the live response actually confirm the
    inferred field/value" question applies here.
-4. **`support_trading_session` is `"CORE"` -- `"ALL"` was tried, and
+4. **`support_trading_session` is `"CORE"` by default -- `"ALL"` was tried, and
    directly confirmed live to be rejected outright by this account/endpoint.**
    `_order_payload()` (used for both entries and exits) briefly changed
    this from `"CORE"` to `"ALL"` mid-session, on the strength of Webull's
@@ -2346,27 +2363,67 @@ Four non-obvious things worth knowing if you're debugging this client:
    would actually work here. Do not re-attempt `"ALL"` again without a
    successful live order proving this specific account/endpoint accepts it
    -- the docs have now disagreed with the live API once and are not
-   sufficient evidence on their own. Practical consequence: `RiskEngine.evaluate`'s
-   core-hours entry gate (see "Risk sizing" above) means `"CORE"` costs
-   entries nothing, since one's never attempted outside that window
-   anyway -- **observed live 2026-08-11 that it may cost the end-of-day
-   auto-flatten's own exit order**, though: a position still open right
-   at the 4:00pm ET close never actually flattened, retried every tick
-   with no visible progress. The leading diagnosis -- a `"CORE"`-scoped
-   order needs a still-live CORE session, already ended by the time the
-   old trigger fired -- was never independently confirmed via a captured
-   rejection message (unlike the `"ALL"` rejection two paragraphs above,
-   which was); it's the best explanation that fits the symptom and the
-   session's own documented scope, not a proven root cause. Fixed by
-   moving *when* the flatten fires, not the session flag itself -- see
-   "Position management"'s "End-of-day auto-flatten" section for
-   `is_within_closing_buffer`. If positions still don't flatten within
-   the new buffer window, this diagnosis needs revisiting.
+   sufficient evidence on their own. Practical consequence: with
+   `RiskConfig.allow_extended_hours_trading` off (the default -- see "Risk
+   sizing" above), `"CORE"` costs entries nothing, since one's never
+   attempted outside that window anyway -- **observed live 2026-08-11 that
+   it may cost the end-of-day auto-flatten's own exit order**, though: a
+   position still open right at the 4:00pm ET close never actually
+   flattened, retried every tick with no visible progress. The leading
+   diagnosis -- a `"CORE"`-scoped order needs a still-live CORE session,
+   already ended by the time the old trigger fired -- was never
+   independently confirmed via a captured rejection message (unlike the
+   `"ALL"` rejection two paragraphs above, which was); it's the best
+   explanation that fits the symptom and the session's own documented
+   scope, not a proven root cause. Fixed by moving *when* the flatten
+   fires, not the session flag itself -- see "Position management"'s
+   "End-of-day auto-flatten" section for `is_within_closing_buffer`. If
+   positions still don't flatten within the new buffer window, this
+   diagnosis needs revisiting.
 
-Streaming (`subscribe_quotes`) intentionally raises `NotImplementedError`:
-`DataStreamingClient` needs an `mqtt_host`, and only the production value
-(`data-api.webull.com`) is documented anywhere found so far. Don't guess a
-sandbox equivalent -- confirm it live (or from support/docs) first.
+   **Extended-hours trading follow-up (2026-08-12).** The user asked to
+   enable pre-market/after-hours trading by "changing CORE to ALL" -- the
+   finding above directly contradicts that being sufficient on its own.
+   Two things changed as a result, both aimed at making this testable
+   without another code deploy: (a) `support_trading_session` is no longer
+   hardcoded -- `_order_payload()` now reads
+   `Settings.webull_support_trading_session` (env var
+   `WEBULL_SUPPORT_TRADING_SESSION`, still defaulting to `"CORE"`), so a
+   candidate value can be tried live with a config change + restart; (b)
+   `RiskConfig.allow_extended_hours_trading` (dashboard-adjustable, off by
+   default) now lets entry signals through outside core hours at all --
+   see "Risk sizing" above -- since previously even a correctly-accepted
+   extended-hours order would never have been attempted in the first
+   place. Fresh evidence gathered while investigating, none of it
+   conclusive on its own: re-checking developer.webull.com on 2026-08-12
+   still shows `"ALL"` as the documented extended-hours value (no newer
+   guidance found); but the SDK's own bundled sample scripts
+   (`samples/trade/trade_client_v2.py`, `trade_client_v3.py`) never once
+   pass `"ALL"` either, across every order type they demonstrate -- only
+   `"CORE"` and an unexplained `"N"` (combo/OCO legs) appear. Leading,
+   **not yet verified** hypothesis: Webull commonly gates extended-hours
+   order entry behind a separate account-level entitlement/agreement (a
+   regulatory risk disclosure most brokers require before allowing
+   pre-market/after-hours orders at all), which this account may not have
+   enabled -- that would explain public docs (globally true) disagreeing
+   with this specific account's live behavior (entitlement-gated). Check
+   the Webull app's account/trading-permissions settings for an
+   extended-hours opt-in before re-testing `"ALL"`.
+   `scripts/verify_extended_hours_order.py` is the live test written to
+   answer this cleanly: run it during a real pre-market or after-hours
+   window, and it tries `"ALL"`/`"NIGHT"`/`"CORE"` (as a control) each as
+   a resting, unfilled limit order (never real market exposure) and
+   reports exactly which the API accepts. Update
+   `WEBULL_SUPPORT_TRADING_SESSION` to whichever value that confirms
+   works, and only then turn on `allow_extended_hours_trading` from the
+   dashboard for real use.
+
+Streaming (`subscribe_quotes`) is confirmed live and working (2026-08-11) --
+see the "Streaming market data" section above and `scripts/verify_streaming.py`.
+The sandbox host for `DataStreamingClient`'s `mqtt_host`
+(`data-api.sandbox.webull.com`) had to be confirmed live rather than
+guessed, since the SDK's own auto-resolution only knows the production
+value (`data-api.webull.com`).
 
 ## Database
 

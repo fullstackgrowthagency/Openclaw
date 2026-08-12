@@ -37,3 +37,17 @@ def test_require_non_live_or_authorized_raises_when_unauthorized():
 def test_webull_credentials_not_configured_by_default():
     assert not WebullCredentials(app_key="", app_secret="", account_id="").is_configured()
     assert WebullCredentials(app_key="k", app_secret="s", account_id="1").is_configured()
+
+
+def test_webull_support_trading_session_defaults_to_core(monkeypatch):
+    # The only value confirmed live to work for this account/endpoint --
+    # see brokers/webull/client.py's _order_payload docstring.
+    monkeypatch.delenv("WEBULL_SUPPORT_TRADING_SESSION", raising=False)
+    assert _settings().webull_support_trading_session == "CORE"
+
+
+def test_webull_support_trading_session_reads_env_override(monkeypatch):
+    # Lets a candidate value be tested live via env var + restart, no code
+    # deploy needed.
+    monkeypatch.setenv("WEBULL_SUPPORT_TRADING_SESSION", "ALL")
+    assert _settings().webull_support_trading_session == "ALL"

@@ -386,7 +386,7 @@ What's implemented and tested:
   `docs/ARCHITECTURE.md`'s "Webull integration" section. It fails soft: if
   a field name guess is wrong, or it's simply absent, pricing/volume just
   fall back to the regular-session fields as before.
-- **`support_trading_session` is `"CORE"` -- `"ALL"` was tried and directly
+- **`support_trading_session` defaults to `"CORE"` -- `"ALL"` was tried and directly
   confirmed live to be rejected outright** (`OAUTH_OPENAPI_PARAM_ERR`,
   HTTP 417, "invalid support_trading_session, value: ALL"), despite being a
   documented value in Webull's own public API docs -- a live rejection
@@ -396,18 +396,37 @@ What's implemented and tested:
   buying-power-reserved-with-no-position report (the actual cause,
   confirmed directly by the user, was the entry firing *during* core hours
   with the fill going untracked -- see the position-tracking bullet above).
-  New entries don't need `"ALL"` regardless -- they're never attempted
-  outside core hours in the first place now (see the entry-gate bullet
-  above). A `"CORE"`-flagged order fired right at the 4:00pm ET close
-  turned out to matter after all, just for the auto-flatten's own exit
-  order rather than entries -- observed live 2026-08-11 that a position
-  still open at the close never actually flattened. Rather than chase
-  down the exact rejection (the leading diagnosis: that order needs a
-  still-live CORE session it no longer has by then, not independently
-  confirmed via a captured error), the auto-flatten now fires 2 minutes
-  *before* the close instead (see the "End-of-day auto-flatten" bullet
-  above) -- see `docs/ARCHITECTURE.md`'s "Webull integration" section for
-  the full history.
+  A `"CORE"`-flagged order fired right at the 4:00pm ET close turned out to
+  matter after all, just for the auto-flatten's own exit order rather than
+  entries -- observed live 2026-08-11 that a position still open at the
+  close never actually flattened. Rather than chase down the exact
+  rejection (the leading diagnosis: that order needs a still-live CORE
+  session it no longer has by then, not independently confirmed via a
+  captured error), the auto-flatten now fires 2 minutes *before* the close
+  instead (see the "End-of-day auto-flatten" bullet above) -- see
+  `docs/ARCHITECTURE.md`'s "Webull integration" section for the full
+  history.
+- **Extended-hours (pre-market/after-hours) trading -- infrastructure in
+  place, still gated on live verification.** Two independent things now
+  have to both be true for a pre-market/after-hours entry to actually
+  happen: `RiskConfig.allow_extended_hours_trading` (dashboard-adjustable,
+  **off by default**) must be on to let a signal through the risk gate
+  outside 9:30am-4:00pm ET at all, and `Settings.webull_support_trading_session`
+  (env var `WEBULL_SUPPORT_TRADING_SESSION`, still defaulting to `"CORE"`)
+  must be set to a value Webull actually accepts for the resulting order to
+  survive contact with the broker -- see the bullet above for why `"ALL"`
+  can't just be assumed to work despite being documented. Re-checking
+  Webull's docs on 2026-08-12 still lists `"ALL"` as the value to use, but
+  the SDK's own bundled sample scripts never demonstrate it either (only
+  `"CORE"` and an unexplained `"N"`) -- worth checking the Webull app's
+  account/trading-permissions settings for an extended-hours opt-in before
+  re-testing, since brokers commonly gate this behind a separate
+  entitlement. Run `scripts/verify_extended_hours_order.py SYMBOL` during
+  a real pre-market/after-hours window to find out which value this
+  account actually accepts (it never risks a real fill -- every test order
+  is a resting limit priced well off market). Turn
+  `allow_extended_hours_trading` on from the dashboard Settings modal only
+  after that's confirmed.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

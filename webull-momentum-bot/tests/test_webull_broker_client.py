@@ -36,8 +36,14 @@ def _no_rate_limit_delay(monkeypatch):
 
 def _client() -> WebullBrokerClient:
     # Bypasses __init__ (which requires configured Settings) since these
-    # tests only exercise pure mapping/payload helpers.
-    return WebullBrokerClient.__new__(WebullBrokerClient)
+    # tests only exercise pure mapping/payload helpers. `settings` is set to
+    # a minimal stub (not the real dataclass) since _order_payload reads
+    # `self.settings.webull_support_trading_session` (2026-08-12) -- tests
+    # further down the file that need other Settings fields already
+    # reassign client.settings themselves, which simply overwrites this.
+    client = WebullBrokerClient.__new__(WebullBrokerClient)
+    client.settings = SimpleNamespace(webull_support_trading_session="CORE")
+    return client
 
 
 # -- order payload building (real request schema, verified live) -----------
@@ -67,6 +73,20 @@ def test_order_payload_maps_market_buy_correctly():
     # own public docs. See _order_payload's comment for the full history;
     # don't change this back to "ALL" without a live order proving it works.
     assert payload["support_trading_session"] == "CORE"
+
+
+def test_order_payload_reads_support_trading_session_from_settings():
+    # 2026-08-12: no longer hardcoded -- reads Settings.
+    # webull_support_trading_session (env var
+    # WEBULL_SUPPORT_TRADING_SESSION), so a candidate value can be tested
+    # live without a code change. Default is still "CORE" (see the test
+    # above); this confirms the plumbing itself, independent of whichever
+    # value ends up being the default.
+    client = _client()
+    client.settings = SimpleNamespace(webull_support_trading_session="ALL")
+    order = Order(symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=10)
+    payload = client._order_payload(order)
+    assert payload["support_trading_session"] == "ALL"
 
 
 def test_order_payload_includes_limit_price_when_set():
@@ -552,7 +572,7 @@ def _sandbox_client() -> WebullBrokerClient:
     from webull_bot.config import TradingMode
 
     client = _client()
-    client.settings = SimpleNamespace(trading_mode=TradingMode.SANDBOX)
+    client.settings = SimpleNamespace(trading_mode=TradingMode.SANDBOX, webull_support_trading_session="CORE")
     client.account_id = "test-account"
     return client
 
@@ -676,7 +696,9 @@ def test_account_balance_uses_normal_priority(monkeypatch):
 def test_place_order_uses_critical_priority(monkeypatch):
     calls = _spy_call_with_retry(monkeypatch)
     client = _client()
-    client.settings = SimpleNamespace(trading_mode=None, is_live_trading_authorized=lambda: True)
+    client.settings = SimpleNamespace(
+        trading_mode=None, is_live_trading_authorized=lambda: True, webull_support_trading_session="CORE",
+    )
     client.account_id = "test-account"
 
     class _FakeOrderV3:

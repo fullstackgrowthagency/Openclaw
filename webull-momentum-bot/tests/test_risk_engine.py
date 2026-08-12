@@ -181,6 +181,47 @@ def test_core_hours_gate_has_no_action_type_carve_out_of_its_own():
     assert "core trading hours" in decision.reason.lower()
 
 
+def test_allow_extended_hours_trading_off_still_rejects_premarket():
+    # Default behavior (allow_extended_hours_trading=False) is unchanged --
+    # confirms this new config field doesn't silently widen the gate.
+    engine = RiskEngine(RiskConfig(allow_extended_hours_trading=False))
+    pre_market = datetime(2026, 8, 10, 9, 0, 0)  # 5:00am ET
+    decision = _evaluate(engine, now=pre_market)
+    assert not decision.approved
+    assert "trading hours" in decision.reason.lower()
+
+
+def test_allow_extended_hours_trading_on_approves_premarket():
+    engine = RiskEngine(RiskConfig(allow_extended_hours_trading=True))
+    pre_market = datetime(2026, 8, 10, 9, 0, 0)  # 5:00am ET -- inside 4:00am-9:30am
+    decision = _evaluate(engine, now=pre_market)
+    assert decision.approved
+
+
+def test_allow_extended_hours_trading_on_approves_after_hours():
+    engine = RiskEngine(RiskConfig(allow_extended_hours_trading=True))
+    after_hours = datetime(2026, 8, 10, 22, 0, 0)  # 6:00pm ET -- inside 4:00pm-8:00pm
+    decision = _evaluate(engine, now=after_hours)
+    assert decision.approved
+
+
+def test_allow_extended_hours_trading_on_still_rejects_outside_the_wider_window():
+    # 2:00am ET -- before even the 4:00am extended-hours open -- must still
+    # reject even with the flag on; this isn't a blanket "any time" bypass.
+    engine = RiskEngine(RiskConfig(allow_extended_hours_trading=True))
+    overnight = datetime(2026, 8, 10, 6, 0, 0)
+    decision = _evaluate(engine, now=overnight)
+    assert not decision.approved
+    assert "extended trading hours" in decision.reason.lower()
+
+
+def test_allow_extended_hours_trading_on_still_rejects_weekend():
+    engine = RiskEngine(RiskConfig(allow_extended_hours_trading=True))
+    saturday_midday = datetime(2026, 8, 15, 15, 0, 0)
+    decision = _evaluate(engine, now=saturday_midday)
+    assert not decision.approved
+
+
 def test_rejects_when_daily_loss_limit_hit():
     engine = RiskEngine(RiskConfig(max_daily_loss_pct=1.0))
     engine.record_trade_closed("XYZ", pnl=-150.0, now=_CORE_HOURS_NOW)  # -1.5% of 10,000

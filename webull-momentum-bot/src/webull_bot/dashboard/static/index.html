@@ -179,6 +179,11 @@
         <span>Max simultaneous positions <span class="muted">(0 = unlimited)</span></span>
         <input type="number" id="setting-max_simultaneous_positions" step="1" min="0" required>
       </label>
+      <label class="settings-field settings-field-checkbox">
+        <span>Allow pre-market / after-hours entries <span class="muted">(4:00am-8:00pm ET, vs. core-only 9:30am-4:00pm -- see the info icon)</span></span>
+        <input type="checkbox" id="setting-allow_extended_hours_trading">
+      </label>
+      <p class="hint">Widens WHEN a signal is allowed to enter. Does not by itself guarantee the broker accepts an extended-hours order -- that half is still being verified (see docs/ARCHITECTURE.md's "Extended-hours trading" section).</p>
       <h4 class="settings-subheading">Position management</h4>
       <p class="hint">Applies to every open position immediately -- not just new entries. See the "Position management" section of docs/ARCHITECTURE.md for the full exit-check order.</p>
       <label class="settings-field">

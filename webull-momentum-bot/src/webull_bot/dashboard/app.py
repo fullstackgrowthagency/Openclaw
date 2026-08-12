@@ -64,15 +64,18 @@ def _last_transition_reason(notes: str) -> str | None:
     return last_line.split(": ", 1)[-1] if ": " in last_line else last_line
 
 
-# The six RiskConfig fields adjustable from the dashboard's Settings modal
+# The seven RiskConfig fields adjustable from the dashboard's Settings modal
 # -- deliberately a small, curated subset of RiskConfig (not every field),
 # matched to what the Settings UI actually exposes. All are percentages
 # except min_risk_reward_ratio (a ratio, e.g. 2.0 = "at least 2x reward for
-# every 1x risked") and max_simultaneous_positions (a whole-number position
-# count, where 0 means unlimited -- see its own validation below).
+# every 1x risked"), max_simultaneous_positions (a whole-number position
+# count, where 0 means unlimited -- see its own validation below), and
+# allow_extended_hours_trading (a bool, added 2026-08-12 -- see its own
+# validation below and RiskConfig's docstring for what it actually gates).
 _ADJUSTABLE_RISK_FIELDS = (
     "stop_loss_pct", "min_risk_reward_ratio", "max_position_size_pct",
     "max_total_risk_pct", "max_daily_loss_pct", "max_simultaneous_positions",
+    "allow_extended_hours_trading",
 )
 
 
@@ -83,6 +86,7 @@ class RiskSettingsUpdate(BaseModel):
     max_total_risk_pct: Optional[float] = None
     max_daily_loss_pct: Optional[float] = None
     max_simultaneous_positions: Optional[int] = None
+    allow_extended_hours_trading: Optional[bool] = None
 
 
 # The two PositionManagementConfig fields adjustable from the same Settings
@@ -184,14 +188,22 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         (non-None) in the request body are changed; omitted fields keep their
         current value. Five of the six fields are percentages/ratios that
         must be positive, and the four percentage fields must not exceed
-        100. max_simultaneous_positions is the exception: it's a
+        100. max_simultaneous_positions is one exception: it's a
         whole-number position count, not a percentage, and 0 is a valid,
         meaningful value there (unlimited -- see RiskConfig's docstring),
-        not an error like it would be for every other field."""
+        not an error like it would be for every other field.
+        allow_extended_hours_trading is the other: a plain bool, no
+        numeric validation applies at all. Turning it on only widens
+        WHEN a signal is allowed to enter (see RiskConfig's docstring) --
+        it does not by itself make the broker accept an extended-hours
+        order; see WebullBrokerClient._order_payload's support_trading_
+        session note for that still-separate, still-unverified half."""
         config = trading_loop.risk_engine.config
         updates = update.model_dump(exclude_none=True)
         errors = []
         for field, value in updates.items():
+            if field == "allow_extended_hours_trading":
+                continue
             if field == "max_simultaneous_positions":
                 if value < 0:
                     errors.append(f"{field} must be 0 (unlimited) or a positive whole number.")
