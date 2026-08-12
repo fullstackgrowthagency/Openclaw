@@ -120,7 +120,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from ..brokers.webull.retry import CallPriority
 from ..collection.event_recorder import MomentumEventTracker
@@ -263,6 +263,20 @@ class TradingLoopConfig:
     # trading time -- not itself live-tuned against how long a flatten
     # order actually takes to fill.
     end_of_day_flatten_buffer_minutes: float = 2.0
+    # How long a manual "Close Position" click (dashboard) pauses new
+    # entries for (see TradingLoop.request_manual_close /
+    # RiskEngine.pause_new_entries). Real incident, 2026-08-12: a
+    # software-managed stop-loss exit for one symbol kept losing the
+    # account-wide rate-limit race, tick after tick, against a flood of
+    # OTHER CRITICAL-priority place_order calls from many simultaneous
+    # entry attempts (max_simultaneous_positions=0/unlimited at the time)
+    # -- CallPriority only helps CRITICAL win against BACKGROUND traffic,
+    # not against other CRITICAL traffic. Briefly blocking new entries
+    # removes that competing CRITICAL-tier load so the requested close
+    # gets a real shot at winning the next few rate-limiter slots, without
+    # engaging the full kill switch (which would also force-close every
+    # OTHER open position, not just the one requested).
+    manual_close_entry_pause_seconds: float = 20.0
 
 
 class TradingLoop:
@@ -415,6 +429,15 @@ class TradingLoop:
         # flatten for that symbol forever, with the kill switch appearing
         # to "do nothing" whenever that happened).
         self._close_all_positions_reason = ""
+        # Symbols requested for a one-off manual close (dashboard's
+        # per-position "Close" button) -- see request_manual_close.
+        # Deliberately a separate mechanism from kill_switch_active: the
+        # kill switch force-closes EVERY open position and requires manual
+        # disengagement, neither of which is right for "close just this
+        # one position." Retried every tick the same way the kill switch
+        # is (see _process_all_candidates), so a rate-limited/failed
+        # attempt self-heals instead of silently doing nothing.
+        self._manual_close_requests: set[str] = set()
 
     # -- kill switch: halt + flatten ------------------------------------------
 
@@ -443,15 +466,58 @@ class TradingLoop:
         self.risk_engine.engage_kill_switch(reason)
         self._close_all_positions_reason = reason
 
+    def request_manual_close(self, symbol: str, now: Optional[datetime] = None) -> bool:
+        """Dashboard's per-position "Close" button: force-closes exactly
+        `symbol`, not every open position (contrast engage_kill_switch_and_
+        flatten above, which is deliberately all-or-nothing and requires a
+        manual disengage). Also briefly pauses new entries (see
+        RiskEngine.pause_new_entries and TradingLoopConfig.
+        manual_close_entry_pause_seconds' docstring for the real incident
+        this addresses) so the requested close isn't left competing for
+        the same account-wide rate-limit budget against a flood of other
+        CRITICAL-priority place_order calls from simultaneous entries --
+        CallPriority only helps CRITICAL win against BACKGROUND traffic,
+        not against other CRITICAL traffic.
+
+        Safe to call from any thread, same contract as
+        engage_kill_switch_and_flatten: this only records the request and
+        flips risk_engine's pause; the actual close happens on the main
+        processing thread's next tick (see _process_all_candidates) and
+        keeps retrying every tick until it succeeds, is no longer an open
+        position, or the request is otherwise cleared -- same self-healing
+        retry-until-success contract as the kill switch and the end-of-day
+        auto-flatten, for the same reason (a single rate-limited attempt
+        must not silently abandon the close).
+
+        Returns False without requesting anything if `symbol` isn't
+        currently an open position (a stale button click, a race with the
+        position already having closed) -- the caller (the dashboard's
+        POST /api/positions/{symbol}/close) turns that into a 404."""
+        symbol = symbol.strip().upper()
+        if symbol not in self._positions:
+            return False
+        self._manual_close_requests.add(symbol)
+        self.risk_engine.pause_new_entries(self.config.manual_close_entry_pause_seconds, now=now)
+        return True
+
     def _close_all_positions_now(
-        self, reason: str, now: datetime, exit_reason: ExitReason = ExitReason.RISK_KILL_SWITCH
+        self,
+        reason: str,
+        now: datetime,
+        exit_reason: ExitReason = ExitReason.RISK_KILL_SWITCH,
+        symbols: Optional[Iterable[str]] = None,
     ) -> None:
         """Force-closes every open position immediately at market,
         regardless of PositionManager's own exit conditions -- the kill
         switch's "flatten everything" action, also reused as-is by the
         end-of-core-hours auto-flatten (see _process_all_candidates), which
         passes exit_reason=ExitReason.END_OF_CORE_HOURS instead of the
-        default. Runs exclusively on the main processing thread (see
+        default, and by request_manual_close's per-tick retry (see
+        _process_all_candidates), which passes exit_reason=ExitReason.MANUAL
+        and a single-symbol `symbols` iterable. `symbols` defaults to None,
+        meaning every currently open position (self._positions) -- the
+        kill switch/end-of-day callers rely on that default; only the
+        manual-close path narrows it. Runs exclusively on the main processing thread (see
         _process_all_candidates), so this shares the exact same submit ->
         fill-or-pending -> finalize path _manage_position uses
         (_dispatch_exit_finalization, _pending_exit_orders) with no extra
@@ -478,7 +544,10 @@ class TradingLoop:
         or the end-of-day buffer window retrying while a broker fill is
         still in flight -- risking a real over-sell against a live
         broker."""
+        wanted = set(symbols) if symbols is not None else None
         for symbol, position in list(self._positions.items()):
+            if wanted is not None and symbol not in wanted:
+                continue
             if symbol in self._pending_exit_orders:
                 continue
             candidate = self.candidates.get(symbol)
@@ -1973,6 +2042,29 @@ class TradingLoop:
                 self._close_all_positions_now(self._close_all_positions_reason or "Kill switch engaged", now)
             except Exception:
                 logger.exception("Unhandled error force-closing all positions for kill switch.")
+
+        # Per-position manual close (dashboard's "Close" button, see
+        # request_manual_close) -- same retry-every-tick contract as the
+        # kill switch above, scoped to just the requested symbol(s). A
+        # symbol drops out of self._positions the moment its close
+        # actually finalizes (_finalize_exit), which is this set's only
+        # "done" signal -- there's no separate completion callback to wire
+        # up, so self-cleaning against the live position dict here is
+        # simpler and can't drift out of sync with it. Pruned both before
+        # AND after the close attempt below (not just before): a close
+        # that finalizes synchronously within this same tick would
+        # otherwise leave its symbol dangling in the set for one extra
+        # tick before the next call's leading prune caught it.
+        self._manual_close_requests &= set(self._positions)
+        if self._manual_close_requests:
+            try:
+                self._close_all_positions_now(
+                    "Manual close requested from dashboard.", now,
+                    exit_reason=ExitReason.MANUAL, symbols=self._manual_close_requests,
+                )
+            except Exception:
+                logger.exception("Unhandled error force-closing manually-requested position(s).")
+            self._manual_close_requests &= set(self._positions)
 
         # End-of-day auto-flatten: unlike the kill switch above, this
         # doesn't set risk_engine.kill_switch_active (that's a manual,

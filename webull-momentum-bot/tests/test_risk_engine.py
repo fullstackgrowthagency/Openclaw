@@ -123,6 +123,34 @@ def test_rejects_when_kill_switch_active():
     assert not decision.approved
 
 
+def test_rejects_new_entries_during_a_pause_window():
+    # Dashboard's per-position "Close" button (TradingLoop.
+    # request_manual_close) -- distinct from the kill switch: a short,
+    # self-expiring block on new entries only, not a full halt.
+    engine = RiskEngine()
+    engine.pause_new_entries(30.0, now=_CORE_HOURS_NOW)
+    decision = _evaluate(engine, now=_CORE_HOURS_NOW + timedelta(seconds=10))
+    assert not decision.approved
+    assert "paused" in decision.reason.lower()
+
+
+def test_allows_new_entries_once_the_pause_window_expires():
+    engine = RiskEngine()
+    engine.pause_new_entries(30.0, now=_CORE_HOURS_NOW)
+    decision = _evaluate(engine, now=_CORE_HOURS_NOW + timedelta(seconds=31))
+    assert decision.approved
+
+
+def test_pause_new_entries_extends_rather_than_stacks():
+    # A second call before the first pause expires just moves the end
+    # time out -- it doesn't queue up a second, additive pause window.
+    engine = RiskEngine()
+    engine.pause_new_entries(10.0, now=_CORE_HOURS_NOW)
+    engine.pause_new_entries(30.0, now=_CORE_HOURS_NOW)
+    decision = _evaluate(engine, now=_CORE_HOURS_NOW + timedelta(seconds=15))
+    assert not decision.approved
+
+
 def test_rejects_new_entries_before_core_hours_open():
     engine = RiskEngine()
     pre_market = datetime(2026, 8, 10, 13, 0, 0)  # 9:00am ET (before 9:30am open)

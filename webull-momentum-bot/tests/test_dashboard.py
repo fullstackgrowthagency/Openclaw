@@ -489,6 +489,39 @@ def test_kill_switch_disengage_stops_the_flatten_retry(loop, client):
     assert loop.risk_engine.kill_switch_active is False
 
 
+def test_close_position_requests_a_close_for_an_open_position(loop, client):
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0, stop_price=9.0,
+        target_price=13.0, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    resp = client.post("/api/positions/TEST/close")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"symbol": "TEST", "close_requested": True}
+    assert "TEST" in loop._manual_close_requests
+    # Also pauses new entries -- see TradingLoop.request_manual_close's
+    # docstring for why (rate-limiter contention against simultaneous
+    # entry attempts).
+    assert loop.risk_engine._entries_paused_until is not None
+
+
+def test_close_position_lowercases_and_strips_the_symbol(loop, client):
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0, stop_price=9.0,
+        target_price=13.0, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    resp = client.post("/api/positions/%20test%20/close")
+    assert resp.status_code == 200
+    assert resp.json()["symbol"] == "TEST"
+
+
+def test_close_position_404s_for_a_symbol_with_no_open_position(loop, client):
+    resp = client.post("/api/positions/NOPE/close")
+    assert resp.status_code == 404
+    assert "NOPE" not in loop._manual_close_requests
+
+
 def test_index_and_static_assets_are_served(client):
     assert client.get("/").status_code == 200
     assert client.get("/style.css").status_code == 200

@@ -104,6 +104,7 @@ class RiskEventType(str, Enum):
     KILL_SWITCH_ENGAGED = "kill_switch_engaged"
     MIN_RISK_REWARD_NOT_MET = "min_risk_reward_not_met"
     OUTSIDE_CORE_TRADING_HOURS = "outside_core_trading_hours"
+    ENTRIES_TEMPORARILY_PAUSED = "entries_temporarily_paused"
 
 
 class MomentumOutcome(str, Enum):

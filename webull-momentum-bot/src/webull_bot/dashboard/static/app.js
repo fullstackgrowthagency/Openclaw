@@ -550,11 +550,41 @@ async function refreshPositions() {
           <td>${fmtNum(p.stop_price)}</td>
           <td>${fmtNum(p.target_price)}</td>
           <td>${p.broker_managed ? "Broker" : "Software"}</td>
+          <td><button class="close-position-btn" data-symbol="${p.symbol}">Close</button></td>
         </tr>`).join("")
-      : emptyRow(9, "No open positions");
+      : emptyRow(10, "No open positions");
   } catch (e) {
-    body.innerHTML = emptyRow(9, `Failed to load: ${e.message}`);
+    body.innerHTML = emptyRow(10, `Failed to load: ${e.message}`);
   }
+}
+
+// Delegated (not per-row) so a re-render from the next refreshPositions()
+// poll never leaves a stale row's button un-wired -- see initKillSwitchModal
+// for the equivalent single-button pattern; a table body re-renders too
+// often to re-attach a listener per row on every refresh.
+function initPositionsTable() {
+  const body = document.getElementById("positions-body");
+  if (!body) return;
+  body.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".close-position-btn");
+    if (!btn) return;
+    const symbol = btn.dataset.symbol;
+    if (!confirm(`Close the ${symbol} position now? This force-closes it at market and briefly pauses new entries so the close isn't crowded out by other order activity.`)) {
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Closing...";
+    try {
+      const res = await fetch(`/api/positions/${encodeURIComponent(symbol)}/close`, { method: "POST" });
+      const responseBody = await res.json();
+      if (!res.ok) throw new Error(responseBody.detail || `Request failed (${res.status})`);
+      await refreshPositions();
+    } catch (err) {
+      alert(`Failed to request close for ${symbol}: ${err.message}`);
+      btn.disabled = false;
+      btn.textContent = "Close";
+    }
+  });
 }
 
 async function refreshRiskEvents() {
@@ -817,6 +847,7 @@ async function refreshAll() {
 initInfoModal();
 initSettingsModal();
 initKillSwitchModal();
+initPositionsTable();
 initScoreHistoryForm();
 initCandidateSelection();
 initChartPanel();

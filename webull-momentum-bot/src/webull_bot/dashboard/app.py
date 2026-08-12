@@ -301,6 +301,26 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
             })
         return rows
 
+    @app.post("/api/positions/{symbol}/close")
+    def close_position(symbol: str):
+        """Per-position "Close" button in the Open Positions table --
+        force-closes exactly this one symbol, unlike the kill switch above
+        (which closes everything and requires a manual disengage
+        afterward). See TradingLoop.request_manual_close's docstring: this
+        also briefly pauses new entries so the close isn't left competing
+        for rate-limiter slots against a flood of simultaneous entry
+        attempts, self-expiring on its own with no dashboard action
+        needed. The actual close happens on the trading loop's own
+        processing thread and keeps retrying every poll cycle until it
+        succeeds, same as the kill switch's flatten -- this endpoint only
+        confirms the request was recorded, not that the position is
+        already closed by the time it returns."""
+        symbol = symbol.strip().upper()
+        accepted = trading_loop.request_manual_close(symbol)
+        if not accepted:
+            raise HTTPException(status_code=404, detail=f"{symbol} is not a currently open position.")
+        return {"symbol": symbol, "close_requested": True}
+
     @app.get("/api/risk-events")
     def get_risk_events(limit: int = 50):
         events = trading_loop.risk_engine.events[-limit:]

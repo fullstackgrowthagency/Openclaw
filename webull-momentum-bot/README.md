@@ -631,6 +631,19 @@ position still open at that point is left exactly as it is. See
 `docs/ARCHITECTURE.md`'s "Safety" section for the full mechanics,
 including the related double-submit guard added at the same time.
 
+**Per-position "Close" button** (added 2026-08-12): each row in the Open
+Positions table has its own "Close" button -- force-closes just that one
+position, unlike the kill switch above (all-or-nothing, and stays engaged
+blocking every new entry until manually disengaged). It also briefly
+pauses new entries (20s default, `TradingLoopConfig.manual_close_entry_pause_seconds`)
+so the close isn't left competing for Webull's account-wide rate limit
+against a flood of *other* order-placement calls -- added after a real
+incident where a stop-loss exit kept losing that rate-limit race for over
+20 seconds per attempt while many simultaneous entries were in flight
+(`max_simultaneous_positions` was unlimited at the time). The pause clears
+itself automatically; no dashboard action needed to release it. See
+`docs/ARCHITECTURE.md`'s "Safety" section for the full mechanics.
+
 `TRADING_MODE=sandbox` now runs end-to-end against a real Webull sandbox
 account (fake money) -- verified live for account balance/positions,
 snapshots, historical bars, and order submission (rejected only for being

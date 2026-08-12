@@ -2639,6 +2639,47 @@ A `get_snapshot` failure for one symbol during a flatten is logged and
 skipped, not fatal to the rest -- one bad quote during an emergency stop
 shouldn't leave every other position uncautiously open.
 
+**Per-position "Close" button, added 2026-08-12** -- a "Close" column in
+the Open Positions table's rightmost column, `POST /api/positions/{symbol}/close`
+-> `TradingLoop.request_manual_close(symbol)`. Deliberately a separate
+mechanism from the kill switch above, not a reuse of it: the kill switch
+is all-or-nothing (closes every open position) and sticky (stays engaged,
+blocking all new entries, until manually disengaged) -- neither is right
+for "close just this one position and keep trading normally otherwise."
+`request_manual_close` adds `symbol` to `self._manual_close_requests` (a
+plain set) and calls `RiskEngine.pause_new_entries` (see below), then
+returns immediately -- same "record the request, defer the actual work to
+the main thread" pattern as `engage_kill_switch_and_flatten`, for the same
+thread-safety reason. `_process_all_candidates` retries it every tick via
+`_close_all_positions_now(..., symbols=self._manual_close_requests)` --
+that method's `symbols` parameter (also added this change) narrows its
+loop to a specific subset instead of every open position, so the kill
+switch and end-of-day auto-flatten (which both omit it, defaulting to
+`None` = every position) are unaffected. `_manual_close_requests` is
+pruned against `self._positions` both before and after each attempt, so a
+symbol that finalizes (successfully closes) drops out on its own -- no
+separate completion callback needed, and nothing is left dangling if the
+close succeeds synchronously within the same tick it was attempted.
+
+**Why this exists: a real incident, same day.** A software-managed
+stop-loss exit for one symbol kept losing the account-wide Webull
+rate-limit race, tick after tick, for over 20 seconds per attempt --
+`max_simultaneous_positions` was set to 0 (unlimited) with
+`max_position_size_pct` at 100%, and with ~137 candidates active the bot
+was very likely attempting many simultaneous entries at once, each a
+CRITICAL-priority `place_order` call directly competing with the stuck
+exit for the same rate-limiter slots. `CallPriority`'s tiers only help
+CRITICAL win against BACKGROUND (discovery) traffic -- they do nothing
+against a flood of *other* CRITICAL traffic. `RiskEngine.pause_new_entries(seconds, now=None)`
+sets `self._entries_paused_until`, checked in `evaluate()` right after the
+kill-switch check (rejecting with the new `RiskEventType.ENTRIES_TEMPORARILY_PAUSED`)
+-- a short, self-expiring block (`TradingLoopConfig.manual_close_entry_pause_seconds`,
+20.0s default) that clears itself with no dashboard action needed, unlike
+`kill_switch_active`. A second call before the first pause expires simply
+extends the end time rather than stacking. This doesn't guarantee the
+requested close wins its very next rate-limiter slot, but it removes the
+single biggest source of competing CRITICAL-tier load while it's active.
+
 **End-of-day auto-flatten** (distinct from the kill switch above, added
 at the same time as the core trading hours entry gate in "Risk sizing"):
 `_process_all_candidates` checks, every tick, whether

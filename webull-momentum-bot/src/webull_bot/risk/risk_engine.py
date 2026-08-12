@@ -116,12 +116,31 @@ class RiskEngine:
         # trade was recent enough to still need it.
         self._last_loss_at: dict[str, datetime] = {}
         self.events: list[RiskEvent] = []
+        # Set by pause_new_entries (dashboard's per-position "Close"
+        # button, see TradingLoop.request_manual_close) -- a short,
+        # self-expiring block on NEW entries only, distinct from
+        # kill_switch_active in every way that matters: it clears itself
+        # (no manual disengage needed), it never touches existing
+        # positions, and its purpose is purely to free up rate-limiter
+        # contention for a specific in-flight exit, not to halt trading.
+        self._entries_paused_until: Optional[datetime] = None
 
     # -- bookkeeping -----------------------------------------------------
 
     def _roll_day_if_needed(self, now: datetime) -> None:
         if now.date() != self._daily.day:
             self._daily = _DailyState(day=now.date())
+
+    def pause_new_entries(self, seconds: float, *, now: Optional[datetime] = None) -> None:
+        """Blocks new entries in evaluate() below until `seconds` from
+        `now` (real wall clock if omitted) -- see TradingLoopConfig.
+        manual_close_entry_pause_seconds' docstring for the incident this
+        exists to address. Idempotent-ish: calling this again before the
+        current pause expires simply extends it to the new end time,
+        rather than stacking -- there's only ever one pause window, not a
+        counter."""
+        now = now or datetime.utcnow()
+        self._entries_paused_until = now + timedelta(seconds=seconds)
 
     def record_trade_closed(self, symbol: str, pnl: float, now: Optional[datetime] = None) -> None:
         now = now or datetime.utcnow()
@@ -199,6 +218,16 @@ class RiskEngine:
 
         if self.kill_switch_active:
             return reject(RiskEventType.KILL_SWITCH_ENGAGED, "Kill switch is active; no new trades.")
+
+        # Short, self-expiring pause (see pause_new_entries) -- distinct
+        # from kill_switch_active above: this clears itself and exists
+        # purely to free up rate-limiter contention for an in-flight
+        # manual position close, not to halt trading generally.
+        if self._entries_paused_until is not None and now < self._entries_paused_until:
+            return reject(
+                RiskEventType.ENTRIES_TEMPORARILY_PAUSED,
+                "New entries temporarily paused while a manual position close is in progress.",
+            )
 
         # New entries only, by design -- OrderManager.submit_signal never
         # routes EXIT/SCALE_OUT signals through evaluate() at all (see its

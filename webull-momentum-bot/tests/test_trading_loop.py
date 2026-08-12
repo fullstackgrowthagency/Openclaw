@@ -1197,6 +1197,64 @@ def test_disengage_kill_switch_does_not_touch_open_positions():
     assert "TEST" in loop._positions  # untouched -- disengaging never flattens
 
 
+def test_request_manual_close_returns_false_for_a_symbol_with_no_open_position():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    assert loop.request_manual_close("NOPE") is False
+    assert loop._manual_close_requests == set()
+
+
+def test_request_manual_close_records_the_request_and_pauses_entries():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+
+    accepted = loop.request_manual_close("TEST", now=_IN_HOURS_NOW)
+
+    assert accepted is True
+    assert "TEST" in loop._manual_close_requests
+    # Confirms the pause is actually live via RiskEngine.evaluate itself,
+    # not just that some internal field got set -- see risk_engine tests
+    # for pause_new_entries' own direct coverage.
+    assert loop.risk_engine._entries_paused_until is not None
+    assert loop.risk_engine._entries_paused_until > _IN_HOURS_NOW
+
+
+def test_manual_close_request_closes_only_the_requested_symbol():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker, symbol="AAA", price=10.0)
+    _managing_candidate_with_position(loop, broker, symbol="BBB", price=20.0)
+
+    assert loop.request_manual_close("AAA", now=_IN_HOURS_NOW) is True
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert "AAA" not in loop._positions
+    assert "BBB" in loop._positions  # untouched -- not the requested symbol
+    assert len(loop._trades) == 1
+    assert loop._trades[0].symbol == "AAA"
+    assert loop._trades[0].exit_reason == ExitReason.MANUAL
+
+
+def test_manual_close_request_self_prunes_once_the_position_is_gone():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+    loop.request_manual_close("TEST", now=_IN_HOURS_NOW)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert "TEST" not in loop._positions
+    # Pruned against the live position dict, not left dangling -- see
+    # _process_all_candidates' "self._manual_close_requests &=
+    # set(self._positions)" step.
+    assert loop._manual_close_requests == set()
+
+
 def test_kill_switch_flatten_leaves_pending_when_broker_does_not_fill_synchronously():
     from webull_bot.state_machine import new_candidate, transition
     from webull_bot.enums import CandidateState
