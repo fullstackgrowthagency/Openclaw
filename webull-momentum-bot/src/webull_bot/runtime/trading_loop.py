@@ -1889,6 +1889,62 @@ class TradingLoop:
             max_adverse_excursion=position.max_adverse_excursion,
         )
 
+    # Mirrors WebullBrokerClient's own _SIDE_TO_WEBULL mapping for the
+    # two sides _build_trade_for_external_close ever passes to
+    # _latest_filled_price_from_history (a plain exit is always SELL or
+    # BUY_TO_COVER) -- kept as a small local mapping rather than
+    # importing client.py's broker-specific internals into this
+    # broker-agnostic module.
+    _EXIT_SIDE_TO_WEBULL_HISTORY_SIDE = {
+        OrderSide.SELL: "SELL",
+        OrderSide.BUY_TO_COVER: "BUY",
+    }
+
+    def _latest_filled_price_from_history(
+        self, rows: list[dict], symbol: str, exit_side: OrderSide,
+    ) -> Optional[float]:
+        """Best-effort scan of WebullBrokerClient.get_order_history()'s
+        raw rows for the most recent FILLED order matching `symbol` and
+        `exit_side` -- see _build_trade_for_external_close's docstring
+        and get_order_history's own docstring for why this is best-effort
+        rather than a trusted source. `filled_price` is now a CONFIRMED
+        field name (2026-08-12, against Webull's own OpenAPI spec for
+        GET /trading/orders/get, order_v3.get_order_detail -- the same
+        order-item schema get_order_history's rows are documented to
+        share), so it's tried first; the other keys are kept only as a
+        defensive fallback in case get_order_history's actual response
+        ever diverges from that documented shape. Never raises on a
+        single bad/unexpected row -- just skips it; returns None if
+        nothing usable is found across the whole list."""
+        wanted_side = self._EXIT_SIDE_TO_WEBULL_HISTORY_SIDE.get(exit_side)
+        best: Optional[tuple[str, float]] = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("symbol") != symbol or row.get("side") != wanted_side:
+                continue
+            if row.get("status") != "FILLED":
+                continue
+            price = None
+            for key in (
+                "filled_price", "avg_filled_price", "avg_fill_price", "fill_price",
+                "executed_price", "avg_price",
+            ):
+                raw_value = row.get(key)
+                if raw_value is None:
+                    continue
+                try:
+                    price = float(raw_value)
+                    break
+                except (TypeError, ValueError):
+                    continue
+            if price is None:
+                continue
+            place_time = row.get("place_time_at", "")
+            if best is None or place_time > best[0]:
+                best = (place_time, price)
+        return best[1] if best is not None else None
+
     def _build_trade_for_external_close(self, symbol: str, position: Position, now: datetime) -> Trade:
         """Counterpart to _build_trade_from_fill for a position
         reconcile_positions_from_broker confirmed closed externally (see
@@ -1906,11 +1962,34 @@ class TradingLoop:
         exit_price here is a genuine best-effort approximation, not a
         confirmed fill price -- tries broker.poll_fills() first (an exit-
         side fill for this symbol at/after the position's opened_at is
-        almost certainly the real closing fill), falling back to the same
-        stop/target/entry-price chain _build_trade_from_fill already uses
-        when poll_fills comes up empty or fails. Callers needing the exact
-        real fill price/time should prefer a Webull order-history backfill
-        (scripts/*) over trusting this approximation once one exists."""
+        almost certainly the real closing fill), then the position's own
+        stop/target price, then a fresh broker.get_snapshot() (real,
+        still-fetchable market data even though the account no longer
+        holds the position), and only falls all the way back to
+        avg_entry_price -- which fabricates an exact $0 P&L regardless of
+        what actually happened -- as an absolute last resort when every
+        other source is unavailable. Confirmed live 2026-08-12: WCT had
+        neither a matched fill nor a stop_price/target_price set, so this
+        chain used to land straight on avg_entry_price and record a
+        misleadingly exact break-even trade no matter what the real
+        outcome was.
+
+        Tries broker.get_order_history() (if the connected broker
+        implements it -- only WebullBrokerClient does, detected via
+        getattr, same pattern as _broker_supports_resting_orders)
+        immediately after poll_fills, at the user's explicit request to
+        prefer Webull's own order history over a live snapshot wherever
+        possible -- a genuine historical fill price is strictly better
+        evidence than a live quote take at detection time, which could
+        be many minutes and a real price move away from the actual
+        closing fill. See WebullBrokerClient.get_order_history's
+        docstring for why this is best-effort rather than a trusted
+        source right now: a live query against this account came back
+        empty twice despite known real historical orders, for reasons
+        not yet understood -- this lookup is expected to frequently
+        contribute nothing until that's resolved, which is exactly why
+        it's layered ahead of, not instead of, the snapshot/entry-price
+        fallbacks below."""
         exit_side = OrderSide.SELL if position.side == OrderSide.BUY else OrderSide.BUY_TO_COVER
         exit_price = None
         try:
@@ -1923,8 +2002,30 @@ class TradingLoop:
         except Exception:
             logger.warning("poll_fills failed while building an external-close Trade for %s.", symbol, exc_info=True)
 
+        get_order_history = getattr(self.broker, "get_order_history", None)
+        if exit_price is None and get_order_history is not None:
+            try:
+                exit_price = self._latest_filled_price_from_history(get_order_history(), symbol, exit_side)
+            except Exception:
+                logger.warning(
+                    "get_order_history lookup failed while building an external-close Trade "
+                    "for %s.", symbol, exc_info=True,
+                )
+
         if exit_price is None:
-            exit_price = position.stop_price or position.target_price or position.avg_entry_price
+            exit_price = position.stop_price or position.target_price
+
+        if exit_price is None:
+            try:
+                exit_price = self.broker.get_snapshot(symbol).last_price
+            except Exception:
+                logger.warning(
+                    "get_snapshot failed while building a fallback exit price for %s's "
+                    "external-close Trade.", symbol, exc_info=True,
+                )
+
+        if exit_price is None:
+            exit_price = position.avg_entry_price
 
         pnl = (exit_price - position.avg_entry_price) * position.quantity
         pnl_pct = (

@@ -1405,23 +1405,98 @@ class WebullBrokerClient(BrokerClient):
         response.raise_for_status()
         return self.get_order_status(broker_order_id)
 
+    def get_order_history(
+        self, *, start_date: Optional[str] = None, end_date: Optional[str] = None,
+    ) -> list[dict]:
+        """Returns raw order-history rows for this account -- best-effort,
+        NOT yet confirmed to return real data for a filled order. A live
+        query against this sandbox account (2026-08-12) came back an
+        empty list TWICE -- once with an explicit start_date/end_date,
+        once with neither (letting it default, per the SDK's own
+        docstring, to "the last 7 days") -- despite the account's local
+        `orders` table showing 70+ real orders, including confirmed
+        fills, for that exact window. `get_order_open` (a sibling
+        endpoint, currently-resting orders rather than history) DOES
+        return real, well-formed data for this same account -- so this
+        isn't a broad "order-query endpoints don't work on this sandbox"
+        problem, just something specific to this one endpoint, not yet
+        understood (see scripts/verify_trade_events_streaming.py's
+        investigation notes and docs/ARCHITECTURE.md's "Webull
+        integration" section). Callers must treat an empty return as
+        "no answer," not "confirmed no matching orders."
+
+        Deliberately returns the RAW per-order dicts (flattened out of
+        Webull's OCO-combo wrapper shape -- `[{"orders": [...]}]` --
+        confirmed live via get_order_open, if get_order_history's
+        response turns out to share that same shape; falls through to
+        treating each top-level item as a single order dict itself if
+        it doesn't) rather than parsing them into this codebase's own
+        Order model. As of 2026-08-12 the per-order field names are
+        DOCUMENTED (not just live-confirmed on a subset): the user
+        supplied Webull's own OpenAPI spec for the sibling GET
+        /trading/orders/get endpoint (order_v3.get_order_detail), whose
+        response items use exactly the same shape get_order_open already
+        confirmed live -- symbol/side/status/order_type/total_quantity/
+        filled_quantity/client_order_id/order_id/place_time_at/
+        limit_price/stop_price -- PLUS a documented `filled_price` field
+        for the fill price this bot previously had to guess at
+        (avg_filled_price? avg_fill_price? something else?). Still no
+        real FILLED row has ever actually come back from
+        get_order_history itself for this account (see the empty-
+        response mystery below), so this is the documented contract, not
+        yet a response this codebase has verified with its own eyes --
+        callers should keep treating it as best-effort until that
+        changes.
+
+        NORMAL priority: a read-only historical lookup (used today only
+        to approximate an externally-closed position's real exit price
+        -- see TradingLoop._build_trade_for_external_close), not
+        protecting money at risk the way place_order/cancel_order are."""
+        params: dict = {}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        try:
+            response = call_with_retry(
+                lambda: self._require_trade_client().order_v3.get_order_history(
+                    account_id=self.account_id, **params
+                ),
+                priority=CallPriority.NORMAL,
+            )
+            response.raise_for_status()
+            body = response.json()
+        except Exception:
+            logger.warning("get_order_history failed.", exc_info=True)
+            return []
+
+        rows: list[dict] = []
+        for item in body or []:
+            if isinstance(item, dict) and "orders" in item:
+                rows.extend(item["orders"])
+            elif isinstance(item, dict):
+                rows.append(item)
+        return rows
+
     def _order_from_detail(self, raw: dict) -> Order:
-        # UNVERIFIED field names for a populated response -- see module
-        # docstring (every live place_order attempt was correctly rejected
-        # for being outside market hours, so no real order detail was ever
-        # fetched). Re-check this mapping against a real filled/open order.
+        # Field names confirmed 2026-08-12 against Webull's own OpenAPI spec
+        # for GET /trading/orders/get (order_v3.get_order_detail) -- the
+        # user pasted the actual spec after this mapping had been carrying
+        # an UNVERIFIED "quantity" guess for months (no live order detail
+        # had ever been fetched to check it against). The documented
+        # response uses `total_quantity`/`filled_quantity`, matching
+        # get_order_open's independently live-confirmed row shape exactly
+        # (see _order_from_open_order_dict) -- strong corroboration this is
+        # the real field, not another guess. `quantity` kept as a fallback
+        # only in case a different response variant ever uses it.
         status = _WEBULL_STATUS_TO_OURS.get(raw.get("status", ""), OrderStatus.PENDING)
+        quantity = raw.get("total_quantity", raw.get("quantity", 0))
         return Order(
             symbol=raw.get("symbol", ""),
             side=OrderSide.BUY if raw.get("side") == "BUY" else OrderSide.SELL,
             order_type=OrderType.MARKET,
-            quantity=float(raw.get("quantity", 0)),
+            quantity=float(quantity),
             limit_price=float(raw["limit_price"]) if raw.get("limit_price") is not None else None,
-            # Added alongside stop_price becoming a real, exercised field
-            # (scripts/verify_bracket_orders.py) -- same UNVERIFIED status
-            # as limit_price above, just never had a reason to be read back
-            # before now since no order carrying a stop_price had ever been
-            # placed live.
             stop_price=float(raw["stop_price"]) if raw.get("stop_price") is not None else None,
             status=status,
             client_order_id=raw.get("client_order_id"),
@@ -1443,7 +1518,20 @@ class WebullBrokerClient(BrokerClient):
         )
         response.raise_for_status()
         body = response.json()
-        row = body[0] if isinstance(body, list) else body
+        # Response shape confirmed 2026-08-12 against Webull's OpenAPI spec:
+        # a dict with a required `orders` array (`combo_type` alongside it),
+        # NOT a bare list or a single order dict at the top level -- this
+        # method previously guessed at both of the latter with no live
+        # response to check against. Picks the row whose own
+        # client_order_id matches what was asked for (a combo/bracket's
+        # `orders` array can hold more than one leg); falls back to the
+        # first row if none match, and to an empty dict (-> PENDING, per
+        # _order_from_detail's default) if the array itself is empty.
+        orders = body.get("orders", []) if isinstance(body, dict) else (body if isinstance(body, list) else [])
+        row = next(
+            (o for o in orders if isinstance(o, dict) and o.get("client_order_id") == broker_order_id),
+            orders[0] if orders else {},
+        )
         return self._order_from_detail(row)
 
     def poll_fills(self, since: Optional[datetime] = None) -> list[Fill]:

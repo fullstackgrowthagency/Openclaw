@@ -1935,6 +1935,166 @@ def test_reconcile_records_a_trade_for_an_externally_closed_position_falling_bac
     assert trades[0].exit_price == pytest.approx(4.50)  # falls back to stop_price
 
 
+def test_reconcile_external_close_prefers_order_history_over_a_snapshot():
+    # User's explicit request (2026-08-13): prefer Webull's own order
+    # history over a live snapshot wherever possible for an externally-
+    # closed position's exit price -- a genuine historical fill is
+    # strictly better evidence than a live quote take at detection time.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState, ExitReason
+
+    class _HistoryBroker(_FakeBroker):
+        def get_order_history(self, **kwargs):
+            return [
+                # An older, unrelated fill for the same symbol -- must
+                # not win over the more recent one below.
+                {
+                    "symbol": "TEST", "side": "SELL", "status": "FILLED",
+                    "avg_filled_price": "4.00", "place_time_at": "2026-08-12T10:00:00.000Z",
+                },
+                # The real closing fill -- most recent, matching side.
+                {
+                    "symbol": "TEST", "side": "SELL", "status": "FILLED",
+                    "avg_filled_price": "5.75", "place_time_at": "2026-08-12T14:00:00.000Z",
+                },
+                # A non-matching row (wrong symbol) -- must be ignored.
+                {
+                    "symbol": "OTHER", "side": "SELL", "status": "FILLED",
+                    "avg_filled_price": "9.99", "place_time_at": "2026-08-12T15:00:00.000Z",
+                },
+            ]
+
+    broker = _HistoryBroker()  # get_snapshot would return 5.20 -- history must win instead
+    loop, candidate = _armed_candidate_setup(broker)
+    trades = []
+    loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.EXTERNAL_CLOSE
+    assert trades[0].exit_price == pytest.approx(5.75)  # from history, not the 5.20 snapshot
+
+
+def test_reconcile_external_close_falls_through_when_history_has_no_match():
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState, ExitReason
+
+    class _EmptyHistoryBroker(_FakeBroker):
+        def get_order_history(self, **kwargs):
+            return []
+
+    broker = _EmptyHistoryBroker()  # get_snapshot returns 5.20
+    loop, candidate = _armed_candidate_setup(broker)
+    trades = []
+    loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.EXTERNAL_CLOSE
+    assert trades[0].exit_price == pytest.approx(5.20)  # falls through to the snapshot
+
+
+def test_latest_filled_price_from_history_picks_the_most_recent_match():
+    loop, _ = _armed_candidate_setup(_FakeBroker())
+    rows = [
+        {"symbol": "TEST", "side": "SELL", "status": "FILLED", "avg_filled_price": "4.00", "place_time_at": "2026-08-12T10:00:00.000Z"},
+        {"symbol": "TEST", "side": "SELL", "status": "SUBMITTED", "avg_filled_price": "999", "place_time_at": "2026-08-12T16:00:00.000Z"},
+        {"symbol": "TEST", "side": "BUY", "status": "FILLED", "avg_filled_price": "888", "place_time_at": "2026-08-12T16:00:00.000Z"},
+        {"symbol": "TEST", "side": "SELL", "status": "FILLED", "fill_price": "5.75", "place_time_at": "2026-08-12T14:00:00.000Z"},
+        "not-a-dict",  # must not raise
+    ]
+    price = loop._latest_filled_price_from_history(rows, "TEST", OrderSide.SELL)
+    assert price == pytest.approx(5.75)
+
+
+def test_latest_filled_price_from_history_returns_none_when_nothing_matches():
+    loop, _ = _armed_candidate_setup(_FakeBroker())
+    assert loop._latest_filled_price_from_history([], "TEST", OrderSide.SELL) is None
+
+
+def test_reconcile_external_close_falls_back_to_a_live_snapshot_not_entry_price():
+    # Real incident (WCT, 2026-08-12): no matched fill AND no stop_price/
+    # target_price set (both None) used to fall straight through to
+    # avg_entry_price, recording an exact $0.00 P&L trade regardless of
+    # what actually happened to the price -- a fabricated break-even, not
+    # a real approximation. A fresh broker.get_snapshot() (real market
+    # data, still fetchable after the account no longer holds the
+    # position) is a far better approximation and can reflect an actual
+    # gain or loss, including a negative one.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState, ExitReason
+
+    broker = _FakeBroker()  # _FakeBroker.get_snapshot always returns last_price=5.20
+    loop, candidate = _armed_candidate_setup(broker)
+    trades = []
+    loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=6.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.EXTERNAL_CLOSE
+    assert trades[0].exit_price == pytest.approx(5.20)  # live snapshot, not avg_entry_price (6.00)
+    assert trades[0].pnl == pytest.approx((5.20 - 6.00) * 10)  # a real, negative P&L
+    assert trades[0].pnl < 0
+
+
+def test_reconcile_external_close_falls_back_to_entry_price_only_as_a_last_resort():
+    # If even get_snapshot fails, still must not raise -- falls all the
+    # way back to avg_entry_price exactly as before this fix.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState, ExitReason
+
+    class _NoSnapshotBroker(_FakeBroker):
+        def get_snapshot(self, symbol):
+            raise RuntimeError("simulated quote failure")
+
+    broker = _NoSnapshotBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    trades = []
+    loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=6.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.EXTERNAL_CLOSE
+    assert trades[0].exit_price == pytest.approx(6.00)
+    assert trades[0].pnl == pytest.approx(0.0)
+
+
 def test_reconcile_does_not_drop_a_position_missing_from_a_single_pass():
     # The bug this guards against (2026-08-12): a live position (BIVI) was
     # dropped from tracking -- and its candidate pushed straight to
