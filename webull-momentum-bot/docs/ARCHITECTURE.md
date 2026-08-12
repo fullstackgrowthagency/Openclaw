@@ -1333,6 +1333,71 @@ poll. See `tests/test_trading_loop.py`'s
 `test_reconcile_does_not_drop_a_position_missing_from_a_single_pass` and
 `test_reconcile_miss_streak_resets_once_the_broker_reports_the_symbol_again`.
 
+**A confirmed external close never produced a `Trade` record at all --
+fixed the same day.** Once BIVI's close was correctly confirmed (across
+two reconcile passes) and removed from `self._positions`/the dashboard,
+it still never appeared in Trade History or Performance. Root cause: the
+drop branch above only ever called `del self._positions[symbol]` plus the
+candidate-state transitions -- unlike `_finalize_exit` (this process's own
+internal exit-fill path), it never called `record_trade()` or
+`self.on_trade_closed`, so a real, completed round-trip trade simply
+vanished from history the moment it was detected as externally closed.
+
+**Fix:** a new `TradingLoop._build_trade_for_external_close(symbol,
+position, now)`, structurally parallel to `_build_trade_from_fill` but
+built for the case where there's no local `Order`/`Signal` to build from
+at all (this process never submitted or saw a fill for the exit). It
+first tries `broker.poll_fills()` for a real exit-side fill for this
+symbol at/after `position.opened_at` -- almost certainly the actual
+closing trade if the broker's fill history is queryable -- taking the
+most recent match's price as `exit_price`. If `poll_fills` comes up empty
+or raises, it falls back to `position.stop_price or position.target_price
+or position.avg_entry_price`, the exact same fallback chain
+`_build_trade_from_fill` already uses for its own worst case. Tagged with
+a new `ExitReason.EXTERNAL_CLOSE` (`enums.py`) so it reads distinctly
+from every other exit reason in history -- a reader looking at Trade
+History can tell at a glance which rows are this process's own confirmed
+exits versus a best-effort reconstruction of something that happened
+outside it. Wired into the drop branch right before `del
+self._positions[symbol]`: builds the trade, calls
+`risk_engine.record_trade_closed` (so the daily-loss-limit accounting
+stays consistent regardless of which path closed a position), and invokes
+`self.on_trade_closed` exactly like `_finalize_exit` does. See
+`tests/test_trading_loop.py`'s
+`test_reconcile_records_a_trade_for_an_externally_closed_position_using_a_real_fill`
+and `test_reconcile_records_a_trade_for_an_externally_closed_position_falling_back_without_a_fill`.
+
+**Still an approximation, not a guarantee of the real fill price/time --
+a Webull order-history backfill would be strictly better, and was
+explored the same day but is not yet working.** `order_v3.get_order_history`
+(`account_id`, `page_size`, `start_date`, `end_date`) is a real, paginated
+endpoint (`/openapi/trade/order/history` under the hood, `version='v2'`
+despite being exposed under the SDK's `order_v3` namespace -- an SDK
+quirk, not this codebase's choice) that in principle could backfill
+`trades` with the ACTUAL fill price/time for every historical order,
+including entries and exits that predate this fix or were never even
+seen by a running process -- strictly more reliable than
+`_build_trade_for_external_close`'s live-detection-time approximation
+above. A live query against this sandbox account (2026-08-12, both with
+an explicit `start_date`/`end_date` and with no date filter at all, which
+the docstring says defaults to the last 7 days) came back an empty list
+both times, despite the account's local `orders` table showing 70+ real
+orders (including confirmed fills) for that exact window. Not yet
+determined whether that's a request-shape issue on this codebase's side
+or a genuine limitation of this endpoint in `TRADING_MODE=sandbox`
+specifically (plausible -- several other sandbox behaviors this session
+have differed from documented/expected live behavior, e.g. the
+`support_trading_session` entitlement flips) -- needs a live, credential-
+authenticated re-check (and ideally a `get_order_open` comparison, since
+BIVI/BQ's resting bracket orders should show up there if the account's
+order-query endpoints are populated at all) before this path is worth
+building real backfill logic against. **Do not write DB-writing code
+against this endpoint's assumed field shape without first confirming a
+real non-empty response** -- this project has been burned by exactly that
+mistake before (`_position_from_dict`'s originally-unconfirmed field-name
+guesses, see the module docstring's "account_v2.get_account_position"
+history).
+
 Called from `_process_all_candidates`, throttled by
 `TradingLoopConfig.position_reconcile_interval_seconds` (default 30s) --
 but firing immediately on that method's very first-ever call regardless,

@@ -1798,6 +1798,75 @@ def test_reconcile_drops_a_position_no_longer_at_the_broker():
     assert candidate.state.value == "cooldown"
 
 
+def test_reconcile_records_a_trade_for_an_externally_closed_position_using_a_real_fill():
+    # Real gap (2026-08-12): a position (BIVI) correctly detected as
+    # closed externally and removed from tracking never showed up in
+    # trade history/performance at all, because record_trade()/
+    # on_trade_closed were only ever called from _finalize_exit's own
+    # internal fill-confirmation path -- the drop path here didn't build
+    # a Trade at all.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState, ExitReason
+
+    broker = _FakeBroker()  # no positions -- simulates the broker-side close
+    loop, candidate = _armed_candidate_setup(broker)
+    trades = []
+    loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=6.00, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    # A real closing fill this process never saw -- e.g. a manual sell in
+    # the Webull app.
+    broker._fills.append(Fill(
+        order_client_id="external-1", symbol="TEST", side=OrderSide.SELL,
+        quantity=10, price=5.75, filled_at=datetime.utcnow(),
+    ))
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)  # confirm across 2 passes
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.symbol == "TEST"
+    assert trade.exit_reason == ExitReason.EXTERNAL_CLOSE
+    assert trade.exit_price == pytest.approx(5.75)  # from the real fill, not a fallback
+    assert trade.entry_price == pytest.approx(5.00)
+    assert trade.quantity == pytest.approx(10)
+    assert trade.pnl == pytest.approx((5.75 - 5.00) * 10)
+
+
+def test_reconcile_records_a_trade_for_an_externally_closed_position_falling_back_without_a_fill():
+    # No matching fill available (poll_fills empty/unreliable, per
+    # _build_trade_for_external_close's docstring) -- exit_price falls
+    # back to the position's own stop/target/entry price, same fallback
+    # chain _build_trade_from_fill already uses.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState, ExitReason
+
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    trades = []
+    loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.EXTERNAL_CLOSE
+    assert trades[0].exit_price == pytest.approx(4.50)  # falls back to stop_price
+
+
 def test_reconcile_does_not_drop_a_position_missing_from_a_single_pass():
     # The bug this guards against (2026-08-12): a live position (BIVI) was
     # dropped from tracking -- and its candidate pushed straight to

@@ -88,6 +88,18 @@ class ExitReason(str, Enum):
     MANUAL = "manual"
     RISK_KILL_SWITCH = "risk_kill_switch"
     END_OF_CORE_HOURS = "end_of_core_hours"
+    # A position vanished from broker.get_positions() -- confirmed missing
+    # across TradingLoopConfig.position_missing_confirmations_required
+    # consecutive reconcile_positions_from_broker passes -- without this
+    # process ever submitting or confirming the exit order itself (a
+    # manual close in the Webull app, scripts/list_and_close_positions.py,
+    # or any other out-of-band close). Distinct from MANUAL, which is
+    # this process's OWN dashboard-driven close (TradingLoop.
+    # request_manual_close) -- that one has a real fill/order to build an
+    # exact Trade record from; this one doesn't, so its exit_price/pnl
+    # are necessarily a best-effort approximation (see
+    # TradingLoop._build_trade_for_external_close's docstring).
+    EXTERNAL_CLOSE = "external_close"
 
 
 class RiskEventType(str, Enum):

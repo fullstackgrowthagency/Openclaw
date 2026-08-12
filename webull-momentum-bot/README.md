@@ -515,6 +515,31 @@ What's implemented and tested:
   detection latency for a genuine external close (up to one extra
   `position_reconcile_interval_seconds`) for never again silently walking
   away from an open, unprotected position on one flaky poll.
+- **An externally-closed position now gets a `Trade` record too, not just
+  removal from the dashboard.** Confirmed live 2026-08-12: BIVI was
+  correctly detected as closed (once confirmed missing across two
+  reconcile passes, per the fix above) and disappeared from the Open
+  Positions table -- but never showed up in Trade History or Performance,
+  because `record_trade()`/`on_trade_closed` were only ever called from
+  `_finalize_exit`'s own internal fill-confirmation path, never from
+  `reconcile_positions_from_broker`'s drop branch. A new
+  `TradingLoop._build_trade_for_external_close` builds a best-effort
+  `Trade` for this case: it first tries `broker.poll_fills()` for a real
+  matching exit-side fill (almost certainly the actual closing trade),
+  falling back to the position's own stop/target/entry price -- same
+  fallback chain `_build_trade_from_fill` already uses -- when no fill is
+  found. Tagged with a new `ExitReason.EXTERNAL_CLOSE` so it's
+  distinguishable in history from a close this process actually executed
+  itself. **This is still an approximation, not a confirmed fill record.**
+  A more accurate fix -- backfilling `trades` directly from Webull's own
+  order-history endpoint (`order_v3.get_order_history`), which would also
+  recover trades that already slipped through before this fix existed --
+  was explored the same day but not yet completed: a live sandbox query
+  came back an empty list despite orders known to exist for the account,
+  which needs to be understood (a request-parameter issue vs. a genuine
+  sandbox limitation on that endpoint) before it can be relied on. See
+  `docs/ARCHITECTURE.md`'s "Webull integration" section for the current
+  state of that investigation.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

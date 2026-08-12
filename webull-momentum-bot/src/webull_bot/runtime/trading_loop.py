@@ -1797,6 +1797,65 @@ class TradingLoop:
             max_adverse_excursion=position.max_adverse_excursion,
         )
 
+    def _build_trade_for_external_close(self, symbol: str, position: Position, now: datetime) -> Trade:
+        """Counterpart to _build_trade_from_fill for a position
+        reconcile_positions_from_broker confirmed closed externally (see
+        that method's ExitReason.EXTERNAL_CLOSE branch) -- this process
+        never submitted or saw fill for the exit itself, so there's no
+        Order/Signal to build from. Without this, an external close
+        (manual close in the Webull app, scripts/list_and_close_positions.py,
+        or any other out-of-band close) previously vanished from tracking
+        with NO Trade record at all -- confirmed live 2026-08-12: BIVI was
+        correctly detected as closed and removed from the dashboard, but
+        never showed up in trade history/performance, because
+        record_trade()/on_trade_closed are only ever called from
+        _finalize_exit's own internal fill-confirmation path.
+
+        exit_price here is a genuine best-effort approximation, not a
+        confirmed fill price -- tries broker.poll_fills() first (an exit-
+        side fill for this symbol at/after the position's opened_at is
+        almost certainly the real closing fill), falling back to the same
+        stop/target/entry-price chain _build_trade_from_fill already uses
+        when poll_fills comes up empty or fails. Callers needing the exact
+        real fill price/time should prefer a Webull order-history backfill
+        (scripts/*) over trusting this approximation once one exists."""
+        exit_side = OrderSide.SELL if position.side == OrderSide.BUY else OrderSide.BUY_TO_COVER
+        exit_price = None
+        try:
+            fills = [
+                f for f in self.broker.poll_fills(since=position.opened_at)
+                if f.symbol == symbol and f.side == exit_side
+            ]
+            if fills:
+                exit_price = max(fills, key=lambda f: f.filled_at).price
+        except Exception:
+            logger.warning("poll_fills failed while building an external-close Trade for %s.", symbol, exc_info=True)
+
+        if exit_price is None:
+            exit_price = position.stop_price or position.target_price or position.avg_entry_price
+
+        pnl = (exit_price - position.avg_entry_price) * position.quantity
+        pnl_pct = (
+            (exit_price - position.avg_entry_price) / position.avg_entry_price * 100.0
+            if position.avg_entry_price else 0.0
+        )
+
+        return Trade(
+            symbol=symbol,
+            strategy_name=position.strategy_name,
+            side=position.side,
+            entry_price=position.avg_entry_price,
+            exit_price=exit_price,
+            quantity=position.quantity,
+            opened_at=position.opened_at,
+            closed_at=now,
+            exit_reason=ExitReason.EXTERNAL_CLOSE,
+            pnl=pnl,
+            pnl_pct=pnl_pct,
+            max_favorable_excursion=position.max_favorable_excursion,
+            max_adverse_excursion=position.max_adverse_excursion,
+        )
+
     def _finalize_exit(self, candidate: Candidate, position: Position, order: Order, exit_signal: Signal, now: datetime) -> None:
         trade = self._build_trade_from_fill(candidate, position, order, exit_signal, now)
 
@@ -1964,6 +2023,13 @@ class TradingLoop:
                 "tracking so the dashboard reflects reality. Confirmed missing across %d "
                 "consecutive reconcile passes.", symbol, miss_count,
             )
+            trade = self._build_trade_for_external_close(symbol, stale_position, now)
+            self.risk_engine.record_trade_closed(symbol, trade.pnl, now=now)
+            if self.on_trade_closed is not None:
+                try:
+                    self.on_trade_closed(trade)
+                except Exception:
+                    logger.exception("on_trade_closed callback raised for %s (external close).", symbol)
             del self._positions[symbol]
             del self._missing_from_broker_counts[symbol]
             candidate = self.candidates.get(symbol)
