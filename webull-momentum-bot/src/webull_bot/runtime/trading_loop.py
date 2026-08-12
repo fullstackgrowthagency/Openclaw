@@ -1015,6 +1015,59 @@ class TradingLoop:
         self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot, now: datetime,
         momentum_event: Optional[MomentumEvent] = None,
     ) -> None:
+        # Defense-in-depth against a real incident (BIVI, 2026-08-12): a
+        # position wrongly dropped from self._positions by a since-fixed
+        # reconcile_positions_from_broker bug went to COOLDOWN, then back
+        # to WATCHING once the cooldown timer expired, and this loop
+        # fired a genuine SECOND entry on top of a position that was
+        # still very much open at the broker the entire time -- ballooning
+        # it to Webull's own 200k-share order ceiling and a ~$250k
+        # unrealized loss before anyone noticed. Fixing the false-drop
+        # trigger (see reconcile_positions_from_broker's docstring) closes
+        # THAT specific path, but local candidate/position tracking could
+        # still theoretically get corrupted some other way (a crash mid-
+        # tick, a future bug) -- this check doesn't trust local tracking
+        # at all: it asks the broker directly, right before ANY new entry
+        # order goes out, whether it already reports an open position for
+        # this exact symbol, independent of self._positions or the
+        # candidate's own state. Deliberately calls broker.get_positions()
+        # directly, NOT _get_positions_for_tick() -- that method caches
+        # its result for the rest of the current _process_all_candidates
+        # pass (self._tick_positions_cache), and this check runs BEFORE
+        # the entry order below is placed. Populating the tick cache with
+        # a pre-entry (position-not-yet-open) snapshot here would poison
+        # it for every later same-tick caller that needs to see the
+        # position this call is about to create -- confirmed while adding
+        # this check: it broke _maybe_verify_entry_via_positions' self-
+        # heal path, which stopped seeing its own just-placed fill
+        # because it kept reusing this call's stale empty cache instead
+        # of fetching fresh. One extra broker call per entry attempt (not
+        # per tick, not per candidate) is a fine price for correctness.
+        try:
+            broker_positions = self.broker.get_positions()
+        except Exception:
+            logger.warning(
+                "Could not verify with the broker whether %s already has an open position "
+                "before submitting a new entry (get_positions failed) -- proceeding without "
+                "this extra check this tick.", candidate.symbol, exc_info=True,
+            )
+        else:
+            existing = next(
+                (p for p in broker_positions if p.symbol == candidate.symbol and p.quantity), None,
+            )
+            if existing is not None:
+                logger.error(
+                    "Refusing to submit a new entry for %s -- the broker already reports an "
+                    "open position (quantity=%s) even though it isn't in this process's own "
+                    "local tracking. Reverting to ARMED instead of risking a duplicate entry "
+                    "on top of it.", candidate.symbol, existing.quantity,
+                )
+                transition(
+                    candidate, CandidateState.ARMED, now=now,
+                    reason="broker already reports an open position for this symbol",
+                )
+                return
+
         try:
             # open_positions=list(self._positions.values()), NOT
             # self.broker.get_positions() -- see submit_signal's docstring:

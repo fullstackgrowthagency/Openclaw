@@ -1398,6 +1398,74 @@ mistake before (`_position_from_dict`'s originally-unconfirmed field-name
 guesses, see the module docstring's "account_v2.get_account_position"
 history).
 
+**Update, same day: `get_order_open` (currently-resting orders) DOES
+return real data for this account** -- a live check against a real OCO
+bracket (its two legs, one `SUBMITTED` one `CANCELLED`) came back
+correctly populated. That narrows the mystery: this account's order-query
+endpoints work in general, so `get_order_history` specifically not
+returning anything (rather than every read endpoint being empty on this
+sandbox) is the open question -- still not resolved as of this writing.
+Next probe planned: `get_order_detail` against a `client_order_id`
+already confirmed `FILLED` in the local `orders` table, to check whether
+Webull retains any record of an already-filled order on this account at
+all before concluding `get_order_history` itself is broken/unsupported
+here.
+
+**A real, serious incident (2026-08-12) surfaced while investigating
+trade history: BIVI, believed closed based on an earlier (mistaken) user
+report, was still genuinely open at the broker** -- confirmed via a
+direct, uncached `account_v2.get_account_position` call: 199,999 shares,
+cost basis $2.74, then trading at $1.49, an unrealized loss of roughly
+**$250,000 (-45.6%)**. Its entry fill earlier the same day was only
+44,729 shares -- the position had grown nearly 4.5x since then. The
+leading explanation, consistent with every other bug fixed this same
+session: the price-rounding bug (see the "Order prices are rounded"
+entry above) meant BIVI's broker-side bracket never attached, leaving it
+on software-only management; the reconcile false-drop bug (see
+`reconcile_positions_from_broker`'s docstring) then wrongly declared it
+"closed externally" on a single flaky poll and pushed its candidate to
+`COOLDOWN`; once that 15-minute cooldown timer expired, the candidate
+cycled back to `WATCHING` with zero awareness a real position was still
+open at the broker; and this loop then fired a genuine SECOND entry on
+BIVI, averaging the cost basis down and growing the position all the way
+to Webull's own 200,000-share order ceiling. Both the price-rounding bug
+and the reconcile false-drop bug were already fixed earlier the same day
+-- this incident is what those fixes were protecting against, discovered
+after the fact rather than before.
+
+**Fix (defense-in-depth, independent of local tracking entirely):**
+`TradingLoop._submit_entry` now calls `self.broker.get_positions()`
+directly -- NOT `self._get_positions_for_tick()` -- immediately before
+any new entry order is submitted, and refuses the entry outright
+(reverting the candidate to `ARMED`, not `TRIGGERED`) if the broker
+already reports a nonzero-quantity position for that exact symbol.
+Deliberately does not use the tick-level position cache
+`reconcile_positions_from_broker`/`_maybe_verify_entry_via_positions`
+share: this check runs BEFORE the entry it's guarding creates a new
+position, so caching its (necessarily pre-entry, position-not-yet-open)
+result would poison `self._tick_positions_cache` for every later
+same-tick caller expecting to see the position this call is about to
+create -- confirmed while building this fix: it silently broke
+`_maybe_verify_entry_via_positions`' self-heal path, which stopped seeing
+its own just-placed fill because it kept reusing this call's stale empty
+cache instead of fetching fresh (see
+`tests/test_trading_loop.py`'s six now-passing
+`test_verify_via_positions_*`/`test_poll_pending_entry_self_heals_*`
+tests, which briefly broke while diagnosing this). The one extra
+`get_positions()` call this costs happens once per entry ATTEMPT, not
+once per tick or once per candidate -- entries are comparatively rare
+events, so this is an acceptable price for a check that's supposed to be
+trustworthy independent of everything else in this process. A
+`get_positions()` failure during this specific check doesn't block the
+entry (logged, then proceeds as if the check hadn't run) -- this is
+meant as defense-in-depth layered on top of `RiskEngine.evaluate`'s own
+gating, not a replacement for it, and a transient broker/network hiccup
+here shouldn't cost a legitimate entry. See
+`tests/test_trading_loop.py`'s
+`test_submit_entry_refuses_a_duplicate_when_broker_already_has_the_position`,
+`test_submit_entry_proceeds_normally_when_broker_has_no_existing_position`,
+and `test_submit_entry_proceeds_when_the_broker_check_itself_fails`.
+
 Called from `_process_all_candidates`, throttled by
 `TradingLoopConfig.position_reconcile_interval_seconds` (default 30s) --
 but firing immediately on that method's very first-ever call regardless,

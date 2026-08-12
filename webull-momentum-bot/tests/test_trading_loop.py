@@ -636,6 +636,74 @@ def test_submit_entry_reverts_to_armed_on_unexpected_broker_exception():
     assert loop.risk_engine._daily.trades_per_ticker.get("TEST", 0) == 0
 
 
+def test_submit_entry_refuses_a_duplicate_when_broker_already_has_the_position():
+    # Real incident (BIVI, 2026-08-12): a since-fixed reconcile bug wrongly
+    # dropped a still-genuinely-open position from self._positions, its
+    # candidate cycled COOLDOWN -> WATCHING once the timer expired, and
+    # this loop fired a real second entry on top of a position that was
+    # never actually closed -- ballooning it to the broker's own 200k-
+    # share order ceiling and a ~$250k unrealized loss. This check is
+    # independent of self._positions entirely: it must refuse the entry
+    # purely because the broker itself still reports an open position,
+    # even though nothing in this process's own local tracking would
+    # have caught it.
+    broker = _FakeBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=199_999, avg_entry_price=2.74,
+        stop_price=None, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop, candidate = _armed_candidate_setup(broker)
+    # Local tracking genuinely has nothing for TEST -- exactly the state
+    # a false "closed externally" drop would leave behind.
+    assert "TEST" not in loop._positions
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    assert candidate.state.value == "armed"
+    assert candidate.symbol not in loop._pending_entry_orders
+    # No order was ever placed against the broker for this duplicate attempt.
+    assert len(broker._orders) == 0
+    # The failed attempt must not have consumed a real trade slot either.
+    assert loop.risk_engine._daily.trades_per_ticker.get("TEST", 0) == 0
+
+
+def test_submit_entry_proceeds_normally_when_broker_has_no_existing_position():
+    # The common case -- must not be broken by the new check above.
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    assert candidate.symbol in loop._pending_entry_orders
+    assert len(broker._orders) == 1
+
+
+def test_submit_entry_proceeds_when_the_broker_check_itself_fails():
+    # A get_positions() failure while performing this extra safety check
+    # must not block a legitimate entry outright -- see the comment in
+    # _submit_entry: this is defense-in-depth on top of RiskEngine's own
+    # gating, not a replacement for it, and shouldn't turn a transient
+    # broker/network hiccup into a missed entry.
+    class _BrokenPositionsBroker(_FakeBroker):
+        def get_positions(self):
+            raise RuntimeError("simulated broker outage")
+
+    broker = _BrokenPositionsBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    assert candidate.symbol in loop._pending_entry_orders
+    assert len(broker._orders) == 1
+
+
 def test_exit_stays_managing_while_pending_then_finalizes_on_fill():
     broker = _FakeBroker(fills_after_polls=1)
     loop, candidate = _armed_candidate_setup(broker)

@@ -540,6 +540,31 @@ What's implemented and tested:
   sandbox limitation on that endpoint) before it can be relied on. See
   `docs/ARCHITECTURE.md`'s "Webull integration" section for the current
   state of that investigation.
+- **The false external-close drop above went on to cause a real duplicate
+  entry before its fix was deployed -- a new broker-side check now guards
+  against re-entering a symbol independent of local tracking entirely.**
+  Confirmed live: before the reconcile-debounce fix landed, BIVI was
+  wrongly dropped, its candidate cycled `COOLDOWN -> WATCHING` once the
+  cooldown timer expired, and the bot fired a genuine SECOND entry on a
+  symbol that was never actually closed at the broker -- ballooning the
+  position to Webull's own 200,000-share order ceiling and a roughly
+  **$250,000 unrealized loss** before anyone noticed, since nothing in
+  this codebase's own local state thought there was already a position
+  open. `TradingLoop._submit_entry` now calls `broker.get_positions()`
+  directly (a fresh, uncached call -- deliberately NOT the same
+  `_tick_positions_cache` reconcile uses, since populating that cache
+  before the entry's own fill would poison it for other same-tick callers
+  needing to see the fresh position) immediately before any new entry
+  order goes out, and refuses the entry outright if the broker already
+  reports a nonzero-quantity position for that exact symbol -- reverting
+  to `ARMED` instead. This is deliberately independent of
+  `self._positions`/the candidate's own state: it exists specifically so
+  a *different* future local-tracking bug can't reproduce this same
+  failure mode. A `get_positions()` failure during this check doesn't
+  block the entry (logged and proceeds) -- this is defense-in-depth on
+  top of `RiskEngine`'s own gating, not a replacement for it, and
+  shouldn't turn a transient broker hiccup into a missed legitimate
+  entry.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and
