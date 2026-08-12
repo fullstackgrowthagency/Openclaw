@@ -2583,22 +2583,39 @@ real bug, unlike a dashboard display lagging by up to 30 seconds). See
 and `tests/test_dashboard.py`'s updated `/api/status`/`/api/positions`
 tests.
 
-**What this doesn't cover / other options considered:**
+**Follow-up, same day: `POST /api/scan-symbol` hardened too.** It still
+calls the broker live (`BroadScanner.check_symbol_verbose` ->
+`broker.get_snapshot`) -- the same "read a cache instead" pattern doesn't
+apply here since there's no sensible cached value for an arbitrary
+just-typed symbol that may never have been seen before. It's a one-off,
+user-triggered action (not polled every 5s like the two endpoints above),
+so its exposure was lower in practice, but not zero -- a user clicking it
+during a bad rate-limit window could still see it hang past
+`proxy_read_timeout`. Fixed with a hard wall-clock deadline instead of
+eliminating the call: `dashboard/app.py` now submits
+`trading_loop.scan_and_add_candidate` to a small dedicated
+`_scan_symbol_executor` (`ThreadPoolExecutor(max_workers=4)`, deliberately
+NOT Starlette's own request threadpool) and waits on
+`future.result(timeout=_SCAN_SYMBOL_TIMEOUT_SECONDS)` (12s default,
+comfortably under any reasonable `proxy_read_timeout`). If the deadline
+passes, the endpoint returns immediately with `"state": "pending"` and an
+explanatory reason instead of continuing to block the request thread --
+the scan itself is NOT cancelled (Python threads can't be killed
+mid-call; it isn't worth the complexity for a manual, low-frequency
+action) and keeps running in the background executor thread.
+`scan_and_add_candidate`'s own locked insert (see its docstring) means a
+slow scan that eventually succeeds still adds the candidate for the next
+`/api/candidates` poll to pick up, even though this particular HTTP
+response already returned "pending" -- nothing is lost, the user just
+needs to glance at the table (or retry the scan) a few seconds later
+instead of the request hanging indefinitely. A dedicated executor (rather
+than `asyncio`/threading directly in the route) also bounds worst-case
+thread growth from repeated clicks: `max_workers=4` means a 5th
+concurrent scan just queues rather than spawning an unbounded number of
+threads. See `dashboard/static/style.css`'s new `.state-pending` pill
+style and `tests/test_dashboard.py::test_scan_symbol_returns_pending_when_the_broker_call_is_too_slow`.
 
-- **`POST /api/scan-symbol`** still calls the broker live
-  (`BroadScanner.check_symbol_verbose` -> `broker.get_snapshot`) on its
-  request thread, unchanged. Left alone deliberately: it's a one-off,
-  user-triggered lookup (a manual "check this ticker" action from the
-  dashboard UI), not something polled every 5s, so its exposure to the
-  same starvation/blocking risk is far lower in practice -- but it is
-  NOT zero, and a user clicking it during a bad rate-limit window could
-  still see it hang or 504. If this becomes a real problem, the same
-  "read a cache, never call live" pattern doesn't apply here (there's no
-  sensible cached value for an arbitrary just-typed symbol) -- a request
-  timeout/short-circuit on the endpoint itself (e.g. wrap the call with
-  a hard deadline and return a clear "rate-limited, try again shortly"
-  response rather than hanging until nginx kills it) would be the next
-  step, not attempted here since it wasn't the reported problem.
+**What this doesn't cover / other options considered:**
 - **Batching wasn't the right tool for these two specific endpoints.**
   `get_snapshots()` (plural, already used by the main loop's own
   per-tick candidate processing) reduces N REST calls to `ceil(N/100)`,

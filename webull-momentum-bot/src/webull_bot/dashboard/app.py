@@ -9,6 +9,7 @@ in-memory SQLite session factory without running a real bot or DB.
 """
 from __future__ import annotations
 
+import concurrent.futures
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,6 +30,29 @@ from ..runtime.trading_loop import TradingLoop
 from ..scoring.momentum_ignition_score import MISConfig
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# POST /api/scan-symbol's real broker call (BroadScanner.check_symbol_verbose
+# -> broker.get_snapshot) is unbatched and shares the exact same
+# priority-queued, occasionally-exclusive (place_order/place_oco_bracket)
+# webull_limiter that /api/status and /api/positions used to be exposed to
+# before their 2026-08-12 fix (see docs/ARCHITECTURE.md's "Dashboard 504s"
+# section) -- unlike those two, there's no sensible cached value to read
+# instead here (it's an arbitrary, just-typed, possibly-never-seen-before
+# symbol), so the fix is a hard wall-clock deadline on the request thread's
+# WAIT for the result, not eliminating the broker call. Run in a small,
+# dedicated executor (NOT Starlette's own request threadpool) so that if
+# the deadline is hit, the scan keeps running to completion in the
+# background instead of being abandoned -- scan_and_add_candidate's own
+# locked insert (see its docstring) means a slow scan that eventually
+# succeeds still adds the candidate for the next /api/candidates poll to
+# pick up, even though this particular HTTP response already returned.
+# max_workers bounds worst-case thread growth from a user mashing the
+# button repeatedly; queued-but-not-yet-started submissions just report
+# "still checking" immediately.
+_SCAN_SYMBOL_TIMEOUT_SECONDS = 12.0
+_scan_symbol_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="scan-symbol"
+)
 
 
 class _NoCacheMiddleware(BaseHTTPMiddleware):
@@ -396,9 +420,29 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         newly added or already tracked), or the literal string "rejected"
         when BroadScanner's structural gates turned it away outright (no
         Candidate object -- and therefore no CandidateState -- ever gets
-        created in that case)."""
+        created in that case), or the literal string "pending" if the
+        underlying broker call hasn't finished within
+        _SCAN_SYMBOL_TIMEOUT_SECONDS -- see this module's
+        _scan_symbol_executor comment for why the scan itself keeps
+        running in the background rather than being abandoned; the
+        dashboard should just let the user retry the request shortly."""
         symbol = symbol.strip().upper()
-        candidate, reason, was_newly_added = trading_loop.scan_and_add_candidate(symbol)
+        future = _scan_symbol_executor.submit(trading_loop.scan_and_add_candidate, symbol)
+        try:
+            candidate, reason, was_newly_added = future.result(timeout=_SCAN_SYMBOL_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            return {
+                "symbol": symbol,
+                "added": False,
+                "already_tracked": False,
+                "state": "pending",
+                "reason": (
+                    "Still checking against a rate-limited broker connection -- "
+                    "the scan is continuing in the background, try again in a "
+                    "few seconds."
+                ),
+                "score": None,
+            }
         if candidate is None:
             return {
                 "symbol": symbol,

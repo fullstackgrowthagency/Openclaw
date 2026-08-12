@@ -618,11 +618,23 @@ What's implemented and tested:
   `test_get_account_summary_refresh_is_throttled_to_the_configured_interval`,
   `test_get_account_summary_reports_the_error_when_the_broker_refresh_fails`,
   and `tests/test_dashboard.py`'s updated `/api/status`/`/api/positions`
-  tests. `POST /api/scan-symbol` still calls the broker live on its
-  request thread (a user-triggered, not polled-every-5s action) and
-  wasn't changed -- see `docs/ARCHITECTURE.md`'s "Dashboard 504s" section
-  for the fuller writeup, remaining exposure, and other optimization
-  options considered.
+  tests.
+- **`POST /api/scan-symbol` hardened the same day, same underlying
+  exposure.** It still calls the broker live (there's no sensible cached
+  value for an arbitrary just-typed symbol), but now bounds the wait
+  with a hard deadline instead of blocking indefinitely: the call runs in
+  a small dedicated `_scan_symbol_executor`
+  (`ThreadPoolExecutor(max_workers=4)`) and the request thread waits at
+  most `_SCAN_SYMBOL_TIMEOUT_SECONDS` (12s default) for it, returning
+  `"state": "pending"` if that deadline passes rather than hanging until
+  nginx would kill it. The scan itself isn't cancelled -- it keeps
+  running in the background and still adds the candidate (picked up by
+  the next `/api/candidates` poll) if it eventually succeeds. See
+  `tests/test_dashboard.py::test_scan_symbol_returns_pending_when_the_broker_call_is_too_slow`
+  and `docs/ARCHITECTURE.md`'s "Dashboard 504s" section for the fuller
+  writeup and other optimization options considered (including why
+  batching wasn't the right tool here, and nginx's `proxy_read_timeout`
+  as a secondary, infra-level mitigation).
 - **`_build_trade_for_external_close`'s exit-price fallback chain used to
   land on `avg_entry_price` far too easily, fabricating an exact $0.00
   P&L.** Confirmed live 2026-08-12 via a dashboard screenshot: WCT closed

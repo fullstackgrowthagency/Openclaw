@@ -241,6 +241,35 @@ def test_scan_symbol_reports_already_tracked_state_without_rescanning(loop, clie
     assert body["state"] == "heating_up"
 
 
+def test_scan_symbol_returns_pending_when_the_broker_call_is_too_slow(loop, client, monkeypatch):
+    # /api/scan-symbol's real broker call is unbatched and shares the same
+    # rate-limiter exposure /api/status and /api/positions used to have --
+    # see dashboard/app.py's _scan_symbol_executor comment. There's no
+    # cached value to fall back to for an arbitrary just-typed symbol, so
+    # this endpoint instead bounds the wait with a hard deadline and
+    # reports "pending" rather than hanging until nginx would kill it.
+    import time
+
+    from webull_bot.dashboard import app as dashboard_app_module
+
+    def _slow_scan(symbol):
+        time.sleep(0.3)
+        return None, "irrelevant -- should never be read", False
+
+    monkeypatch.setattr(loop, "scan_and_add_candidate", _slow_scan)
+    monkeypatch.setattr(dashboard_app_module, "_SCAN_SYMBOL_TIMEOUT_SECONDS", 0.05)
+
+    resp = client.post("/api/scan-symbol", params={"symbol": "SLOW"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "SLOW"
+    assert body["state"] == "pending"
+    assert body["added"] is False
+    assert body["already_tracked"] is False
+    assert "background" in body["reason"].lower()
+
+
 def test_positions_includes_unrealized_pnl_from_the_cached_price(loop, client):
     # /api/positions reads TradingLoop's own per-tick price cache
     # (get_last_known_price), not a live broker.get_snapshot() call -- see

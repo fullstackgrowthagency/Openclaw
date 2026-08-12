@@ -321,6 +321,7 @@ th {
 .state-exited { background: #1c2530; color: var(--muted); }
 .state-cooldown { background: #1c2530; color: var(--muted); }
 .state-rejected { background: #3a1e1e; color: var(--red); }
+.state-pending { background: #3a2c14; color: var(--amber); }
 
 .empty-row td {
   color: var(--muted);
