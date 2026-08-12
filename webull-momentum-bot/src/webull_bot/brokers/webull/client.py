@@ -979,7 +979,6 @@ class WebullBrokerClient(BrokerClient):
             new_symbols = [s for s in symbols if s not in self._streaming_subscribed_symbols]
             if not new_symbols:
                 return
-            self._streaming_subscribed_symbols.update(new_symbols)
 
         if self._streaming_client is not None:
             with self._streaming_lock:
@@ -993,17 +992,47 @@ class WebullBrokerClient(BrokerClient):
                 # were subscribed (nothing told it otherwise) even though
                 # the REST call never actually registered them, so they'd
                 # silently never stream at all for the rest of the process.
+                #
+                # Real bug fixed 2026-08-12: this branch used to mark
+                # new_symbols as subscribed (in the shared block above,
+                # before this if/else even ran) BEFORE this call, not
+                # after. A failure here still raised and propagated
+                # correctly, but the symbols were already in
+                # self._streaming_subscribed_symbols by then -- so the very
+                # "retry" this exception is supposed to enable
+                # (_ensure_streaming_subscribed calling back in here next
+                # tick) recomputed new_symbols as EMPTY (already marked
+                # subscribed) and returned immediately with no exception,
+                # no actual subscribe attempt, and no error surfaced --
+                # silently and permanently stuck on REST polling for that
+                # symbol for the rest of the process, exactly the outcome
+                # this whole propagate-don't-swallow design was meant to
+                # prevent. Subscribing here BEFORE recording success (only
+                # marking new_symbols subscribed once this call actually
+                # returns) is what makes a second call with the same
+                # symbols a genuine retry instead of a silent no-op.
                 self._streaming_client.subscribe(new_symbols, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
+                with self._streaming_lock:
+                    self._streaming_subscribed_symbols.update(new_symbols)
                 return
-            # Still waiting on the connect callback. A healthy connection
-            # (per every live test so far) finishes in well under
-            # _STREAMING_RECONNECT_DELAY_SECONDS -- if it's been pending
-            # longer than that, treat the attempt as dead rather than
-            # waiting on a callback that may never fire, and retry with a
-            # fresh client below instead of returning early. Every symbol
-            # ever requested (self._streaming_subscribed_symbols, already
-            # updated with new_symbols above) gets resubscribed against
-            # the new connection once it connects, not just new_symbols.
+            # Still waiting on the connect callback (or about to discard a
+            # stale one below and open a fresh client). Neither path makes
+            # a synchronous subscribe call the way the already_connected
+            # branch above does, so there's no success/failure to gate
+            # this on -- record new_symbols as subscribed right away so
+            # _on_connect_success's fresh read of
+            # self._streaming_subscribed_symbols (once it fires) picks
+            # them up too. A healthy connection (per every live test so
+            # far) finishes in well under _STREAMING_RECONNECT_DELAY_SECONDS
+            # -- if it's been pending longer than that, treat the attempt
+            # as dead rather than waiting on a callback that may never
+            # fire, and retry with a fresh client below instead of
+            # returning early. Every symbol ever requested
+            # (self._streaming_subscribed_symbols, already updated with
+            # new_symbols above) gets resubscribed against the new
+            # connection once it connects, not just new_symbols.
+            with self._streaming_lock:
+                self._streaming_subscribed_symbols.update(new_symbols)
             stale = (
                 connect_attempted_at is not None
                 and datetime.utcnow() - connect_attempted_at > timedelta(seconds=_STREAMING_RECONNECT_DELAY_SECONDS)
@@ -1027,6 +1056,16 @@ class WebullBrokerClient(BrokerClient):
                 self._streaming_connected = False
                 self._streaming_connect_attempted_at = None
             # Falls through to create a fresh client below.
+        else:
+            # No streaming client at all yet -- the very first call ever.
+            # Same reasoning as the "still waiting on the connect callback"
+            # branch above: nothing synchronous happens on this path either,
+            # so record new_symbols as subscribed now rather than gating on
+            # a call that doesn't exist here, so _on_connect_success (below)
+            # picks them up once the fresh client this falls through to
+            # create actually connects.
+            with self._streaming_lock:
+                self._streaming_subscribed_symbols.update(new_symbols)
 
         session_id = str(uuid.uuid4())
         mqtt_host = (

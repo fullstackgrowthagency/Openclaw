@@ -1323,6 +1323,34 @@ def test_subscribe_quotes_propagates_a_failed_additional_subscribe(monkeypatch):
         client.subscribe_quotes(["MSFT"], lambda snap: None)
 
 
+def test_subscribe_quotes_retries_a_symbol_after_a_failed_subscribe(monkeypatch):
+    # Real bug fixed 2026-08-12: a failed subscribe used to still mark the
+    # symbol as subscribed (that bookkeeping happened before the call, not
+    # after), so a second call with the SAME symbol recomputed it as
+    # "already subscribed" and returned immediately -- no exception, no
+    # actual subscribe attempt, silently never retried for the rest of the
+    # process. Proves a second call now genuinely retries: it reaches the
+    # broker's subscribe() a second time and succeeds once the transient
+    # failure clears, rather than silently no-op'ing.
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+    fake.on_connect_success(fake, None, "session-1")
+    fake.raise_on_subscribe = RuntimeError("simulated transient failure")
+
+    with pytest.raises(RuntimeError):
+        client.subscribe_quotes(["MSFT"], lambda snap: None)
+    assert "MSFT" not in client._streaming_subscribed_symbols
+
+    fake.raise_on_subscribe = None  # the transient failure clears
+    client.subscribe_quotes(["MSFT"], lambda snap: None)  # must not be a silent no-op
+
+    msft_calls = [call for call in fake.subscribe_calls if call[0] == ["MSFT"]]
+    assert len(msft_calls) == 2  # the failed attempt AND the real retry
+    assert "MSFT" in client._streaming_subscribed_symbols
+
+
 def _fake_utcnow_module(monkeypatch, start):
     from webull_bot.brokers.webull import client as client_module
 
