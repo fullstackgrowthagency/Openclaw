@@ -6,6 +6,11 @@
 # Local OpenClaw runtime state should not live in the workspace repo
 .openclaw/
 
+# Claude Code's own local tooling state (settings, agent worktrees) --
+# machine-local, never project source. Agent worktrees in particular can
+# contain entire unrelated checked-out projects.
+.claude/
+
 # Secret or machine-local files
 .env
 **/.env
