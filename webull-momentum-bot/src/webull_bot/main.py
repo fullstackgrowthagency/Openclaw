@@ -5,10 +5,13 @@ Run with `python -m webull_bot.main`. Account/market-data calls work in both
 PAPER mode (fully local, see brokers/paper/client.py) and SANDBOX mode
 (real Webull sandbox account, verified live -- see brokers/webull/client.py).
 
-Streaming (broker.subscribe_quotes) is NOT implemented for Webull yet: its
-sandbox MQTT host was never confirmed. TradingLoop (runtime/trading_loop.py)
-polls broker.get_snapshot() per candidate instead of reacting to a push
-feed -- see that module's docstring for how it also copes with
+Streaming (broker.subscribe_quotes) IS implemented for Webull (confirmed
+live 2026-08-11 against the sandbox MQTT host) -- TradingLoop
+(runtime/trading_loop.py) prefers a pushed live snapshot over REST polling
+for every WATCHING/HEATING_UP/ARMED/ENTERED/MANAGING candidate, falling
+back to broker.get_snapshot() only when nothing supports streaming
+(PaperBrokerClient) or the last pushed update has gone stale -- see that
+module's docstring for the full lifecycle, including how it copes with
 WebullBrokerClient.place_order returning SUBMITTED rather than FILLED.
 
 PAPER mode has no real market universe of its own (PaperBrokerClient is a
