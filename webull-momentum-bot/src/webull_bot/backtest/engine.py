@@ -136,7 +136,19 @@ class BacktestEngine:
             return
 
         try:
-            order = self.order_manager.submit_signal(signal, snapshot=snapshot, now=snapshot.timestamp)
+            # open_positions=self.broker.get_positions(), not omitted --
+            # unlike the live TradingLoop path, this is actually correct
+            # here: _process_snapshot mutates each Position object returned
+            # by PaperBrokerClient.get_positions() in place right after
+            # entry (position.stop_price = signal.suggested_stop below),
+            # and get_positions() returns the SAME object references every
+            # call (list(self._state.positions.values())), so those
+            # mutations really do persist -- see submit_signal's docstring
+            # for why this isn't true of the live path against either
+            # broker.
+            order = self.order_manager.submit_signal(
+                signal, snapshot=snapshot, open_positions=self.broker.get_positions(), now=snapshot.timestamp,
+            )
         except OrderRejected:
             transition(candidate, CandidateState.ARMED, now=snapshot.timestamp, reason="risk engine rejected entry signal")
             return

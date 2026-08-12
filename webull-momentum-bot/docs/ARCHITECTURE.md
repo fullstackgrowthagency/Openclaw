@@ -953,7 +953,27 @@ with identical dollar size but very different stop distances carry very
 different amounts of real risk, and a notional-only cap (the old
 `max_account_exposure_pct`) couldn't tell them apart. If the existing
 positions alone already consume the full ceiling, the new signal is
-rejected (`MAX_EXPOSURE_HIT`). **Renamed from a shrink-the-trade gate to a
+rejected (`MAX_EXPOSURE_HIT`).
+
+**Real bug fixed here (2026-08-12), not present in this doc's earlier
+description**: `open_positions` is now explicitly supplied by the caller
+(`OrderManager.submit_signal`'s `open_positions` parameter -- see that
+method's docstring) rather than fetched internally via
+`self.broker.get_positions()`. It used to be the latter, and every
+`Position` a broker returns -- `WebullBrokerClient._position_from_dict` and
+`PaperBrokerClient.get_positions()` alike -- hard-codes `stop_price=None`
+(there's no such field in a broker's raw account-positions response; a
+stop is a resting order or a purely local software-managed concept, never
+a property of the position row itself). Since this gate's summation
+filters on `p.stop_price is not None`, it silently saw zero risk from
+every existing position no matter how much was actually on, and could
+never reject a new entry on that basis, in every trading mode, the entire
+time this gate has existed. Only a caller's own locally-tracked positions
+(`TradingLoop._positions`, set from each entry's own `suggested_stop` and
+kept current by breakeven/trailing math) carry a real `stop_price`.
+`max_simultaneous_positions`' count-based gate was unaffected (`len()`
+doesn't need `stop_price`), which is exactly why this went unnoticed.
+**Renamed from a shrink-the-trade gate to a
 pure accept/reject gate (2026-08-11)**: since sizing is no longer
 risk-budget-driven (see #3 below), there's no "budgeted risk" left to trim
 to fit remaining room -- this can only refuse a trade outright once

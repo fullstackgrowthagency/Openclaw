@@ -418,6 +418,58 @@ def test_entry_stays_triggered_while_order_pending_then_enters_on_fill():
     assert "TEST" in loop._positions
 
 
+def test_submit_entry_uses_locally_tracked_positions_for_the_total_risk_gate():
+    # Real bug fixed 2026-08-11 (see order_manager.py's submit_signal
+    # docstring): the max_total_risk_pct gate used to be fed
+    # broker.get_positions(), whose returned Positions always hard-code
+    # stop_price=None (no such field in a broker's raw account-positions
+    # response) -- so it silently saw zero assumed risk from any existing
+    # position and could never reject a new entry on that basis, no matter
+    # how much risk was already on. Proves the fix end-to-end through the
+    # real _submit_entry pipeline: a position this process is already
+    # tracking locally (loop._positions, with a real stop_price) now
+    # correctly blocks a new entry once its assumed risk breaches the
+    # ceiling -- using _FakeBroker's default empty get_positions() so a
+    # regression back to reading the broker's own (always risk-blind)
+    # position list would show up as this test's new entry wrongly being
+    # approved instead of rejected.
+    from webull_bot.scanner.trigger_engine import TriggerEngine
+
+    broker = _FakeBroker()  # get_positions() returns [] by default -- irrelevant now for entry sizing
+    risk_engine = RiskEngine(RiskConfig(stop_loss_required=True, max_total_risk_pct=10.0))  # ceiling: $2,500 (25,000 equity)
+    order_manager = OrderManager(broker, risk_engine, get_settings())
+    loop = TradingLoop(
+        broker, StaticUniverseProvider([]), BroadScanner(broker, _SingleSymbolFloatProvider("TEST", 1_000_000)),
+        CandidateWatcher(), TriggerEngine(strategies=[MomentumBreakoutStrategy()]),
+        order_manager, PositionManager(), risk_engine,
+        config=TradingLoopConfig(universe_rescan_interval_seconds=3600),
+    )
+    from webull_bot.state_machine import new_candidate, transition
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    transition(candidate, CandidateState.HEATING_UP)
+    transition(candidate, CandidateState.ARMED)
+    loop.candidates["TEST"] = candidate
+
+    # A position this process already has open (a different symbol), with
+    # $4,000 of assumed risk ($4.00/share * 1,000 shares) -- well over the
+    # $2,500 ceiling.
+    loop._positions["EFGH"] = Position(
+        symbol="EFGH", side=OrderSide.BUY, quantity=1_000, avg_entry_price=5.0,
+        stop_price=1.0, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _trigger_and_build_signal(candidate, snapshot)
+
+    loop._submit_entry(candidate, signal, snapshot, snapshot.timestamp)
+
+    assert candidate.symbol not in loop._pending_entry_orders
+    assert candidate.state.value == "armed"  # reverted -- OrderRejected, never placed
+    assert "TEST" not in loop._positions
+
+
 def test_confirm_entry_filled_still_tracks_position_when_broker_get_positions_raises():
     # Real production incident: WebullBrokerClient.get_positions() raised
     # (a real, populated get_account_position() response hit a field-name
@@ -430,16 +482,13 @@ def test_confirm_entry_filled_still_tracks_position_when_broker_get_positions_ra
     # shown as an open position anywhere, buying power silently consumed.
     # This proves the fallback now covers ANY exception, not just "no match".
     class _BrokerPositionsBlowUp(_FakeBroker):
-        # First call is the risk engine's own open_positions lookup inside
-        # order_manager.submit_signal (must succeed, or the order is never
-        # even placed) -- only the SECOND call, _confirm_entry_filled's own
-        # post-fill reconciliation lookup, simulates the real incident.
-        _get_positions_calls: int = 0
-
+        # submit_signal's entry path no longer calls broker.get_positions()
+        # at all (2026-08-11 fix -- it uses the caller's own
+        # locally-tracked open_positions instead, see order_manager.py's
+        # docstring), so the only remaining call here is
+        # _confirm_entry_filled's own post-fill reconciliation lookup --
+        # simulate the real incident on that one directly.
         def get_positions(self):
-            self._get_positions_calls += 1
-            if self._get_positions_calls == 1:
-                return []
             raise KeyError("simulated _position_from_dict field-name mismatch")
 
     broker = _BrokerPositionsBlowUp(fills_after_polls=1)
@@ -464,8 +513,7 @@ def test_confirm_entry_filled_still_tracks_position_when_broker_get_positions_ra
     # stranded in TRIGGERED or silently reverted to ARMED.
     assert candidate.state.value == "managing"
     assert "TEST" in loop._positions
-    assert loop._positions["TEST"].avg_entry_price == 5.20
-    assert loop._positions["TEST"].avg_entry_price == 5.20  # from broker.get_positions()
+    assert loop._positions["TEST"].avg_entry_price == 5.20  # fallback: signal.reference_price
 
 
 def _trigger_and_build_signal(candidate, snapshot):

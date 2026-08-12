@@ -49,6 +49,7 @@ class OrderManager:
         *,
         snapshot: MarketSnapshot,
         position: Optional[Position] = None,
+        open_positions: Optional[list[Position]] = None,
         now: Optional[datetime] = None,
     ) -> Order:
         """Runs a Signal through the risk engine and, if approved, places the order.
@@ -59,6 +60,27 @@ class OrderManager:
         (spread/liquidity/exposure gates exist to control *new* risk, not to
         trap the bot in a losing position) and go straight to the broker to
         close out `position`.
+
+        `open_positions` (entries only -- required there, see the ValueError
+        below; irrelevant for EXIT/SCALE_OUT): the caller's own
+        locally-tracked open positions, e.g. TradingLoop's `self._positions`
+        or BacktestEngine's broker-held ones -- deliberately NOT fetched
+        internally via `self.broker.get_positions()` the way it briefly was.
+        Real bug fixed 2026-08-11: WebullBrokerClient._position_from_dict and
+        PaperBrokerClient's own get_positions() both hard-code
+        `stop_price=None` on every Position they return (there's no such
+        field in a broker's raw account-positions response -- a stop is a
+        separate resting order, or a purely local concept for a
+        software-managed position, never a property of the position row
+        itself), so RiskEngine.evaluate's `max_total_risk_pct` gate -- which
+        filters on `p.stop_price is not None` to sum up assumed risk across
+        open positions -- silently saw an empty set and NEVER rejected an
+        entry no matter how much risk was already on, in every trading mode.
+        Only the caller's own locally-tracked positions (set from each
+        entry's own suggested_stop, kept current by breakeven/trailing math)
+        carry a real stop_price. `max_simultaneous_positions`'s count-based
+        gate was unaffected by this bug (it only needs len(), not
+        stop_price), which is exactly why it went unnoticed for so long.
 
         `now`: forwarded to RiskEngine.evaluate (entries only -- exits don't
         call evaluate at all, see above), which needs it for the core-trading-
@@ -109,11 +131,17 @@ class OrderManager:
             )
             return self.broker.place_order(order)
 
+        if open_positions is None:
+            raise ValueError(
+                f"{signal.action.value} signal for {signal.symbol} requires open_positions "
+                "(the caller's own locally-tracked positions, not broker.get_positions() -- "
+                "see this method's docstring for why)"
+            )
         decision = self.risk_engine.evaluate(
             signal,
             account_equity=self.broker.get_account_equity(),
             account_buying_power=self.broker.get_buying_power(),
-            open_positions=self.broker.get_positions(),
+            open_positions=open_positions,
             snapshot=snapshot,
             now=now,
         )

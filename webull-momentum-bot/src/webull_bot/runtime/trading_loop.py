@@ -913,7 +913,14 @@ class TradingLoop:
         momentum_event: Optional[MomentumEvent] = None,
     ) -> None:
         try:
-            order = self.order_manager.submit_signal(signal, snapshot=snapshot, now=now)
+            # open_positions=list(self._positions.values()), NOT
+            # self.broker.get_positions() -- see submit_signal's docstring:
+            # only this process's own locally-tracked positions carry a
+            # real stop_price, which RiskEngine.evaluate's max_total_risk_pct
+            # gate needs to compute actual assumed risk.
+            order = self.order_manager.submit_signal(
+                signal, snapshot=snapshot, open_positions=list(self._positions.values()), now=now,
+            )
         except OrderRejected as exc:
             transition(candidate, CandidateState.ARMED, now=now, reason=f"risk engine rejected entry: {exc.decision.reason}")
             return

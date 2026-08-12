@@ -8,19 +8,33 @@ way anything outside this class reaches those broker calls (see this
 module's own docstring: "the ONLY component in this codebase allowed to
 call a BrokerClient's order-placement methods").
 
-submit_signal (the pre-existing Signal-driven entry/exit path) already has
-coverage via test_trading_loop.py/test_risk_engine.py; not duplicated here.
+submit_signal's ENTRY-sizing behavior (Signal -> RiskEngine.evaluate ->
+Order) already has coverage via test_trading_loop.py/test_risk_engine.py;
+not duplicated here. What IS covered here: submit_signal's open_positions
+requirement for entries specifically -- a real bug fixed 2026-08-11, see
+submit_signal's own docstring. Briefly, self.broker.get_positions() used to
+be called internally to build RiskEngine.evaluate's open_positions
+argument, but every Position a broker returns (WebullBrokerClient or
+PaperBrokerClient) hard-codes stop_price=None -- there's no such field in a
+broker's raw account-positions response -- so the max_total_risk_pct gate,
+which sums assumed risk by filtering on `stop_price is not None`, silently
+saw zero risk from every existing position no matter how much was actually
+on, and could never reject a new entry on that basis. Now the caller must
+pass its own locally-tracked positions (the only ones with a real
+stop_price) explicitly.
 """
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
+import pytest
+
 from webull_bot.config import get_settings
-from webull_bot.enums import OrderSide, OrderStatus, OrderType
-from webull_bot.execution.order_manager import OrderManager
+from webull_bot.enums import OrderSide, OrderStatus, OrderType, SignalAction
+from webull_bot.execution.order_manager import OrderManager, OrderRejected
 from webull_bot.interfaces.broker import BrokerClient
-from webull_bot.models import Fill, MarketSnapshot, Order, Position
-from webull_bot.risk.risk_engine import RiskEngine
+from webull_bot.models import Fill, MarketSnapshot, Order, Position, Signal
+from webull_bot.risk.risk_engine import RiskConfig, RiskEngine
 
 
 @dataclass
@@ -182,3 +196,65 @@ def test_cancel_resting_order_delegates_to_broker_cancel_order():
     om = _order_manager(broker)
     om.cancel_resting_order("stop-leg-id")
     assert calls == ["stop-leg-id"]
+
+
+# -- submit_signal's open_positions requirement for entries (2026-08-11 fix) --
+
+def _entry_signal(**overrides) -> Signal:
+    base = dict(
+        symbol="ABCD", action=SignalAction.ENTER_LONG, generated_at=datetime(2026, 8, 11, 15, 0, 0),
+        strategy_name="test", strategy_version="v1", reference_price=10.0, suggested_stop=9.7,
+    )
+    base.update(overrides)
+    return Signal(**base)
+
+
+def _entry_snapshot(**overrides) -> MarketSnapshot:
+    base = dict(
+        symbol="ABCD", timestamp=datetime(2026, 8, 11, 15, 0, 0), last_price=10.0,
+        bid=9.99, ask=10.01, bid_size=100, ask_size=100, cumulative_volume=1_000_000,
+        vwap=9.8, high_of_day=10.1, low_of_day=9.5, open_price=9.6,
+    )
+    base.update(overrides)
+    return MarketSnapshot(**base)
+
+
+@dataclass
+class _EntryOnlyBroker(_NoRestingOrdersBroker):
+    """A broker whose get_positions() raises if it's ever called --
+    proves submit_signal's entry path no longer calls it internally (see
+    this module's docstring)."""
+    def get_positions(self):
+        raise AssertionError("submit_signal must not call broker.get_positions() for entry sizing")
+
+
+def test_submit_signal_requires_open_positions_for_an_entry_signal():
+    broker = _EntryOnlyBroker()
+    om = OrderManager(broker, RiskEngine(), get_settings())
+    with pytest.raises(ValueError, match="open_positions"):
+        om.submit_signal(_entry_signal(), snapshot=_entry_snapshot(), now=datetime(2026, 8, 11, 15, 0, 0))
+
+
+def test_submit_signal_uses_caller_supplied_open_positions_not_the_brokers():
+    # A locally-tracked position with a real stop_price, sized so its
+    # assumed risk alone already consumes the entire max_total_risk_pct
+    # ceiling -- if submit_signal were still calling broker.get_positions()
+    # (which raises here, and which would return stop_price=None even if it
+    # didn't), this open position's risk would be invisible and the new
+    # entry would wrongly be approved.
+    broker = _EntryOnlyBroker()  # get_account_equity/get_buying_power both return 25,000
+    risk_engine = RiskEngine(RiskConfig(max_total_risk_pct=10.0))  # ceiling: $2,500
+    om = OrderManager(broker, risk_engine, get_settings())
+    existing_position = Position(
+        symbol="EFGH", side=OrderSide.BUY, quantity=1_000, avg_entry_price=5.0,
+        stop_price=1.0,  # $4.00/share * 1,000 = $4,000 assumed risk -- well over the $2,500 ceiling
+        target_price=None, trailing_stop_pct=None, opened_at=datetime(2026, 8, 11, 14, 0, 0),
+        strategy_name="test",
+    )
+
+    with pytest.raises(OrderRejected) as exc_info:
+        om.submit_signal(
+            _entry_signal(), snapshot=_entry_snapshot(), open_positions=[existing_position],
+            now=datetime(2026, 8, 11, 15, 0, 0),
+        )
+    assert "risk" in exc_info.value.decision.reason.lower()
