@@ -135,6 +135,45 @@ def test_order_payload_includes_limit_price_when_set():
     assert payload["limit_price"] == "25.5"
 
 
+def test_order_payload_rounds_limit_price_to_cents_at_or_above_a_dollar():
+    # Confirmed live 2026-08-12: a resting OCO bracket's target/LIMIT leg
+    # for BIVI was rejected (OAUTH_OPENAPI_STOCK_ORDER_PRICE_PRECISION_EXCEED,
+    # HTTP 417, "Price increment should be 0.01 when price is equal to or
+    # greater than 0.9999") because target_price -- computed as
+    # entry_price + risk_per_share * reward_risk_ratio by every strategy,
+    # none of which round -- came out as 3.4667600000000003, an unrounded
+    # float with far more than 2 decimal digits.
+    client = _client()
+    order = Order(
+        symbol="BIVI", side=OrderSide.SELL, order_type=OrderType.LIMIT,
+        quantity=100, limit_price=3.4667600000000003, client_order_id="x",
+    )
+    payload = client._order_payload(order)
+    assert payload["limit_price"] == "3.47"
+
+
+def test_order_payload_rounds_stop_price_to_cents_at_or_above_a_dollar():
+    client = _client()
+    order = Order(
+        symbol="BIVI", side=OrderSide.SELL, order_type=OrderType.STOP,
+        quantity=100, stop_price=3.171999999999999, client_order_id="x",
+    )
+    payload = client._order_payload(order)
+    assert payload["stop_price"] == "3.17"
+
+
+def test_order_payload_rounds_sub_dollar_prices_to_four_decimals():
+    # Sub-penny quoting is allowed below $1 -- this shouldn't be rounded
+    # down to the nearest cent the way an at-or-above-$1 price is.
+    client = _client()
+    order = Order(
+        symbol="DOGZ", side=OrderSide.SELL, order_type=OrderType.LIMIT,
+        quantity=100, limit_price=0.05123456, client_order_id="x",
+    )
+    payload = client._order_payload(order)
+    assert payload["limit_price"] == "0.0512"
+
+
 def test_order_payload_includes_trailing_fields_when_set():
     # NOT YET independently confirmed live for a US-market equity on this
     # account -- see _ORDER_TYPE_TO_WEBULL's docstring and

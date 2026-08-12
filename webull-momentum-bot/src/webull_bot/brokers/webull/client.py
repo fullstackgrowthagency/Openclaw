@@ -242,6 +242,30 @@ _WEBULL_STATUS_TO_OURS = {
 }
 
 
+def _round_to_valid_price_increment(price: float) -> float:
+    """Rounds `price` to whatever tick size Webull actually accepts for an
+    order, per the standard SEC Rule 612 sub-penny convention their own
+    rejection message implies -- confirmed live 2026-08-12
+    (`OAUTH_OPENAPI_STOCK_ORDER_PRICE_PRECISION_EXCEED`, HTTP 417, "Price
+    increment should be 0.01 when price is equal to or greater than
+    0.9999") on a resting OCO bracket's target/LIMIT leg for BIVI, whose
+    `target_price` -- computed as `entry_price + risk_per_share *
+    reward_risk_ratio` by every strategy in `strategy/*.py`, none of which
+    round the result -- came out as an unrounded float
+    (`3.4667600000000003`) with far more than 2 decimal digits. Every
+    order this client sends carries a price computed somewhere upstream
+    (strategy target math, RiskEngine/PositionManager stop math,
+    OrderManager's extended-hours marketable-limit pricing) with no
+    guarantee any of them already round cleanly -- rounding once here, at
+    the single choke point every order's price passes through before
+    being serialized to Webull, catches all of them rather than requiring
+    every price-computing call site to remember to round itself. Below
+    $1, sub-penny quoting is allowed (finer than $0.01) -- this mirrors
+    that with 4 decimal places rather than assuming every stock needs the
+    same tick size."""
+    return round(price, 2) if price >= 1.0 else round(price, 4)
+
+
 def _epoch_ms_to_dt(ms: Optional[int]) -> datetime:
     if not ms:
         return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1220,12 +1244,12 @@ class WebullBrokerClient(BrokerClient):
             "client_order_id": client_order_id,
         }
         if order.limit_price is not None:
-            payload["limit_price"] = str(order.limit_price)
+            payload["limit_price"] = str(_round_to_valid_price_increment(order.limit_price))
         if order.stop_price is not None:
             # UNVERIFIED field name -- current strategies only ever submit
             # MARKET orders (see execution/order_manager.py), so this path
             # has not been exercised live. Confirm before relying on it.
-            payload["stop_price"] = str(order.stop_price)
+            payload["stop_price"] = str(_round_to_valid_price_increment(order.stop_price))
         if order.trailing_pct is not None:
             # PERCENTAGE-only -- see Order.trailing_pct's docstring for why
             # this model has no AMOUNT-mode field to map from. Field names

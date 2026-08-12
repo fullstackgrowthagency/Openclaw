@@ -474,6 +474,26 @@ What's implemented and tested:
   whatever `max_position_size_pct` is configured to -- a broker-side
   constraint the bot should never depend on risk-settings tuning alone to
   avoid.
+- **Every order price is rounded to a valid tick size before being sent to
+  Webull.** Confirmed live 2026-08-12: a resting OCO bracket's target/LIMIT
+  leg for BIVI was rejected
+  (`OAUTH_OPENAPI_STOCK_ORDER_PRICE_PRECISION_EXCEED`, HTTP 417, "Price
+  increment should be 0.01 when price is equal to or greater than
+  0.9999") because `target_price` -- computed as `entry_price +
+  risk_per_share * reward_risk_ratio` by every strategy, none of which
+  round the result -- came out as `3.4667600000000003`, an unrounded
+  float with far more than 2 decimal digits. The position still opened
+  fine (a plain `MARKET` entry has no price to round), but every
+  subsequent attempt to attach its broker-side stop+target bracket failed
+  outright, leaving it on software-only management indefinitely.
+  `WebullBrokerClient._order_payload` now rounds both `limit_price` and
+  `stop_price` (`_round_to_valid_price_increment`: 2 decimals at/above
+  $1, 4 decimals below, matching the standard SEC Rule 612 sub-penny
+  convention Webull's own message implies) at the single point every
+  order's price passes through before serialization -- catching this for
+  every price-computing call site (strategy target math, position stop
+  math, extended-hours marketable-limit pricing) rather than requiring
+  each one to remember to round itself.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

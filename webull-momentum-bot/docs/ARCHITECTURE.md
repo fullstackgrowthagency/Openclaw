@@ -1050,6 +1050,33 @@ unconditionally in `RiskEngine.evaluate` (`_WEBULL_MAX_ORDER_QUANTITY` in
 a deployment happens to have configured. See
 `tests/test_risk_engine.py::test_position_size_is_clamped_to_webulls_hard_order_quantity_ceiling`.
 
+**Order prices are rounded to a valid tick size before hitting the wire
+(2026-08-12).** Same incident window as above, different Webull rejection:
+once the quantity-ceiling clamp let a BIVI entry actually open, every
+attempt to attach its broker-side OCO stop+target bracket then failed with
+`OAUTH_OPENAPI_STOCK_ORDER_PRICE_PRECISION_EXCEED` (HTTP 417, "Price
+increment should be 0.01 when price is equal to or greater than 0.9999").
+Root cause: `target_price = entry_price + risk_per_share *
+reward_risk_ratio` in every strategy (`strategy/*.py`) is a plain float
+computation with no rounding step, so a real run produced
+`3.4667600000000003` as the bracket's LIMIT leg price -- valid Python, but
+not a price Webull's own tick-size rule (2-decimal increments at/above
+$1) accepts. `WebullBrokerClient._order_payload` now rounds both
+`limit_price` and `stop_price` through a new
+`_round_to_valid_price_increment` helper (2 decimals at/above $1, 4 below
+-- mirroring the standard SEC Rule 612 sub-penny convention Webull's own
+message implies) right before they're serialized into the request. This
+is deliberately fixed at that one choke point rather than in each
+strategy's own target-price math, `RiskEngine`/`PositionManager`'s stop
+math, or `OrderManager`'s extended-hours marketable-limit pricing --
+every one of those computes a price somewhere upstream with no guarantee
+any of them already round cleanly, and a single rounding point downstream
+of all of them catches every case rather than requiring each call site to
+remember to round itself. See
+`tests/test_webull_broker_client.py::test_order_payload_rounds_limit_price_to_cents_at_or_above_a_dollar`,
+`::test_order_payload_rounds_stop_price_to_cents_at_or_above_a_dollar`, and
+`::test_order_payload_rounds_sub_dollar_prices_to_four_decimals`.
+
 **Why the split**: the old model coupled "how far away is the stop" and
 "how many shares to buy" through a single risk-budget number, which meant
 changing one strategy's stop distance silently changed its position size
