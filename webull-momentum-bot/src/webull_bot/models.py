@@ -380,6 +380,23 @@ class Position:
     # PositionManager.check_exit's docstring) -- those ride on a plain
     # STOP for their whole lifetime, same as before this field existed.
     broker_stop_is_trailing: bool = False
+    # Consecutive _attach_broker_bracket failures for this exact position
+    # (reset to 0 on any success) -- added 2026-08-12 after a real
+    # incident: two positions whose broker-side data was permanently
+    # inconsistent (a resting sell was rejected as "would reverse the
+    # position" regardless of order type/session/quantity -- a Webull
+    # sandbox data-integrity issue, not a transient failure) each burned a
+    # real place_order call, at CRITICAL rate-limiter priority, on EVERY
+    # single tick forever, since _sync_broker_protective_orders' retry
+    # logic has no way to distinguish "will eventually succeed" from
+    # "will never succeed" from the exception alone -- starving discovery/
+    # candidate-scanning traffic behind it. See TradingLoopConfig.
+    # max_broker_bracket_attach_failures: once this counter reaches that
+    # ceiling, _attach_broker_bracket gives up permanently for this
+    # position (falls back to pure software-side management, same
+    # contract as a broker that never supported resting orders at all)
+    # rather than retrying every tick indefinitely.
+    broker_bracket_attach_failures: int = 0
 
 
 @dataclass

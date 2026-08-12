@@ -644,6 +644,19 @@ incident where a stop-loss exit kept losing that rate-limit race for over
 itself automatically; no dashboard action needed to release it. See
 `docs/ARCHITECTURE.md`'s "Safety" section for the full mechanics.
 
+**Broker-side bracket attach gives up after 5 consecutive failures per
+position** (`TradingLoopConfig.max_broker_bracket_attach_failures`,
+added 2026-08-12): protects against a position whose broker-side data is
+permanently broken (confirmed live: two adopted-at-startup positions
+where Webull rejected every close/protective-order attempt with "would
+reverse the position," regardless of order type, session, or quantity --
+a Webull-side data issue, not a bug here) from being retried forever at
+CRITICAL rate-limiter priority, which was silently starving candidate
+discovery. Falls back to pure software-side position management for that
+position once the ceiling is hit, same as a broker that never supported
+resting orders at all. See `docs/ARCHITECTURE.md`'s "Broker-side
+(resting) stop/target management" section for the full incident.
+
 `TRADING_MODE=sandbox` now runs end-to-end against a real Webull sandbox
 account (fake money) -- verified live for account balance/positions,
 snapshots, historical bars, and order submission (rejected only for being
