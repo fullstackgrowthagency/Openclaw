@@ -1034,6 +1034,22 @@ to compute it from (`stop_loss_required=False` and no `suggested_stop`).
 No consumer in this codebase reads it yet; it exists purely for
 transparency into what a filled trade's real dollar risk turned out to be.
 
+**Clamped to Webull's own hard order-quantity ceiling (2026-08-12).**
+`max_shares` above is now `min(int((buying_power * max_position_size_pct /
+100) // entry_price), 199_999)`. Confirmed live: a cheap/penny-priced
+signal (DOGZ) combined with `max_position_size_pct=100.0` (the default)
+and a large sandbox buying-power balance computed a share count well past
+200,000 -- Webull rejected it outright
+(`OAUTH_OPENAPI_ORDER_QUANTITY_EXCEED_LIMIT`, HTTP 417, "Order quantity
+must be below 200,000"), and since every re-trigger on the symbol
+recomputed the exact same oversized quantity, the candidate just kept
+failing and reverting to `ARMED` forever, never opening a position. This
+is a genuine broker-side constraint, not a risk-tuning question -- clamped
+unconditionally in `RiskEngine.evaluate` (`_WEBULL_MAX_ORDER_QUANTITY` in
+`risk/risk_engine.py`) rather than left to whatever `max_position_size_pct`
+a deployment happens to have configured. See
+`tests/test_risk_engine.py::test_position_size_is_clamped_to_webulls_hard_order_quantity_ceiling`.
+
 **Why the split**: the old model coupled "how far away is the stop" and
 "how many shares to buy" through a single risk-budget number, which meant
 changing one strategy's stop distance silently changed its position size

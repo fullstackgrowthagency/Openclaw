@@ -462,6 +462,18 @@ What's implemented and tested:
   `WEBULL_SUPPORT_TRADING_SESSION=ALL` set permanently and get correct
   behavior in both windows, rather than needing a manual `.env` flip and
   restart at each session boundary.
+- **Position sizing is clamped to Webull's hard 200,000-share-per-order
+  ceiling.** Confirmed live 2026-08-12: a cheap/penny-priced signal (DOGZ)
+  combined with `max_position_size_pct=100.0` and a large buying-power
+  balance computed a share count Webull itself rejected outright
+  (`OAUTH_OPENAPI_ORDER_QUANTITY_EXCEED_LIMIT`, HTTP 417, "Order quantity
+  must be below 200,000") -- every entry attempt on the symbol then failed
+  and reverted to `ARMED`, never actually opening a position, no matter how
+  many times it re-triggered. `RiskEngine.evaluate`'s sizing step now
+  clamps `max_shares` to this ceiling unconditionally, independent of
+  whatever `max_position_size_pct` is configured to -- a broker-side
+  constraint the bot should never depend on risk-settings tuning alone to
+  avoid.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

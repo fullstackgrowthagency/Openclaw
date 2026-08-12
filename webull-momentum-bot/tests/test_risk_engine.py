@@ -102,6 +102,27 @@ def test_position_size_cap_uses_buying_power_not_equity():
     assert decision.max_shares == 200
 
 
+def test_position_size_is_clamped_to_webulls_hard_order_quantity_ceiling():
+    # Confirmed live 2026-08-12: a cheap/penny-priced signal combined with
+    # max_position_size_pct=100.0 and a large buying-power balance computes
+    # a share count Webull itself rejects outright
+    # (OAUTH_OPENAPI_ORDER_QUANTITY_EXCEED_LIMIT, "Order quantity must be
+    # below 200,000") -- every entry attempt on the symbol then fails and
+    # reverts to ARMED, never actually opening a position. max_shares must
+    # never exceed that ceiling regardless of the notional math.
+    engine = RiskEngine(RiskConfig(max_position_size_pct=100.0))
+    decision = _evaluate(
+        engine,
+        _signal(reference_price=0.05, suggested_stop=0.045),
+        account_equity=1_000_000,
+        account_buying_power=1_000_000,
+        snapshot=_snapshot(last_price=0.05, bid=0.0499, ask=0.0501, cumulative_volume=20_000_000),
+    )
+    assert decision.approved
+    # Uncapped this would be 1,000,000 * 100% // 0.05 = 20,000,000 shares.
+    assert decision.max_shares == 199_999
+
+
 def test_rejects_when_stop_missing_and_required():
     engine = RiskEngine(RiskConfig(stop_loss_required=True))
     decision = _evaluate(engine, _signal(suggested_stop=None))

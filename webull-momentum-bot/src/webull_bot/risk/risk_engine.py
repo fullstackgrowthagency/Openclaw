@@ -16,6 +16,20 @@ from ..enums import RiskEventType
 from ..market_hours import is_within_core_trading_hours, is_within_extended_trading_hours
 from ..models import MarketSnapshot, Position, RiskDecision, RiskEvent, Signal
 
+# Webull's own hard ceiling on a single order's share quantity -- confirmed
+# live 2026-08-12 (OAUTH_OPENAPI_ORDER_QUANTITY_EXCEED_LIMIT, HTTP 417,
+# "Order quantity must be below 200,000") when a cheap/penny-priced signal
+# (DOGZ) combined with max_position_size_pct=100% and a large sandbox
+# buying-power balance to compute a share count well past this. This is a
+# broker-side constraint independent of whatever max_position_size_pct is
+# configured to -- evaluate() clamps to it below so a misconfigured (or
+# just unlucky: cheap stock + large buying power) sizing calculation
+# reliably produces a rejected/undersized order at worst, never the
+# "every single entry silently fails" starvation this incident caused
+# (every trigger on the symbol kept re-attempting the same oversized
+# order and reverting to ARMED, never actually opening a position).
+_WEBULL_MAX_ORDER_QUANTITY = 199_999
+
 
 @dataclass
 class RiskConfig:
@@ -331,6 +345,11 @@ class RiskEngine:
         # without account_buying_power > 0 or entry_price > 0.
         max_notional = account_buying_power * self.config.max_position_size_pct / 100.0
         max_shares = int(max_notional // entry_price) if entry_price > 0 else 0
+        # Clamp to Webull's own hard per-order ceiling -- see
+        # _WEBULL_MAX_ORDER_QUANTITY's docstring for the real incident this
+        # guards against (a cheap stock + a generous max_position_size_pct
+        # computing a share count the broker rejects outright).
+        max_shares = min(max_shares, _WEBULL_MAX_ORDER_QUANTITY)
 
         if max_shares <= 0:
             return reject(RiskEventType.TRADE_REJECTED, "Computed position size is zero given current risk/exposure limits.")
