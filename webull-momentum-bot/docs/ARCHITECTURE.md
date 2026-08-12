@@ -1840,11 +1840,9 @@ not.
    partial exit (`partial_exit_taken` is `True`) instead gets a native
    `TRAILING_STOP` via `OrderManager.place_resting_trailing_stop` (added
    2026-08-11 at the account owner's explicit instruction that Webull
-   supports this order type for US equities -- NOT yet independently
-   confirmed live the way the plain `OCO` bracket was; see
-   `scripts/verify_trailing_stop.py` and
-   `WebullBrokerClient._ORDER_TYPE_TO_WEBULL`'s docstring for the open
-   question and what to do if it turns out unsupported). Stores both legs'
+   supports this order type for US equities, and confirmed working live
+   in this account's real trading 2026-08-12 -- see
+   `WebullBrokerClient._ORDER_TYPE_TO_WEBULL`'s docstring). Stores both legs'
    broker order ids, the synced stop price, and whether the resting stop
    is a trailing order on `Position` (`broker_stop_order_id`,
    `broker_target_order_id`, `broker_stop_price_synced`,
@@ -1973,24 +1971,24 @@ retry loop can only ever succeed against a call that's CAPABLE of
 succeeding. Two real gaps found during the audit, neither fixable by
 retrying harder:
 
-1. **Two fields feeding every bracket leg's order payload are explicitly
-   flagged UNVERIFIED in the code that builds them** -- `_order_payload`'s
-   `stop_price` field name (`client.py`, "current strategies only ever
-   submit MARKET orders... this path has not been exercised live") and
-   the entire `TRAILING_STOP_LOSS` order type (used post-partial-exit,
-   see "Position management (exits)" above's trailing-stop section). If
-   either is wrong, EVERY attach attempt for that leg type fails, forever
-   -- not "briefly," not "eventually self-heals" -- because the payload
-   itself is structurally wrong, not rate-limited or transiently
-   rejected. The retry loop cannot distinguish this from an ordinary
-   transient failure; it just keeps trying at the same cadence either
-   way. **Action for the user:** run `scripts/verify_bracket_orders.py`
-   and `scripts/verify_trailing_stop.py` live, during core hours, against
-   a real fill, to close these two unverified fields the same way every
-   other "UNVERIFIED" flag in this codebase has eventually been closed
-   (price rounding, `total_quantity`, `filled_price`, ...). This can't be
-   done from a non-market-hours investigation -- both scripts need a
-   real order to attach a bracket to.
+1. **~~Two fields feeding every bracket leg's order payload were flagged
+   UNVERIFIED in the code that builds them~~ -- corrected, both are
+   confirmed.** This investigation initially flagged `_order_payload`'s
+   `stop_price` field name and the `TRAILING_STOP_LOSS` order type
+   (post-partial-exit trailing stop) as still-open risks, going by a
+   stale code comment that predated their actual confirmation. The
+   account owner corrected this directly: both have already worked in
+   this account's real trading. In hindsight the evidence was already in
+   this file -- `place_oco_bracket`'s own docstring says `stop_price`
+   was "Confirmed live 2026-08-11 (see scripts/verify_bracket_orders.py)"
+   as part of the OCO bracket's resting `STOP_LOSS` leg, which is built
+   through the exact same `_order_payload` code path the stale comment
+   was still flagging -- the comment simply never got updated once that
+   confirmation landed. Both comments in `client.py` (`_order_payload`'s
+   `stop_price` branch and `_ORDER_TYPE_TO_WEBULL`'s `TRAILING_STOP`
+   entry) have been corrected to reflect this. This particular gap is
+   closed; it isn't why the alert below was added (see that section for
+   what it actually guards against instead).
 2. **`market_hours.is_within_core_trading_hours` has no market-holiday
    or early-close calendar** -- it's purely a weekday + 9:30-16:00 ET
    time-window check. On a weekday market holiday (Thanksgiving,
@@ -2018,11 +2016,15 @@ event -- surfaced on the dashboard's existing Risk Events panel via
 share the same events list) -- once a `MANAGING` position has gone
 `TradingLoopConfig.unprotected_position_alert_seconds` (60s default, 12
 ticks at the 5s `poll_interval_seconds` default) with no broker-side
-bracket. This closes the actual dangerous gap: without it, a
-structurally broken payload (gap #1 above) would fail completely
-silently for that position's ENTIRE lifetime -- retried forever, visible
-nowhere except a per-position `broker_managed: false` flag on the
-dashboard's Positions table that's easy to not notice in the moment.
+bracket. Kept even though gap #1 above turned out to already be closed
+-- the underlying concern is general, not specific to those two fields:
+ANY future structurally-broken payload (a Webull API change, a new order
+type added later without the same live verification, an account-level
+restriction) would otherwise fail completely silently for that
+position's ENTIRE lifetime -- retried forever, visible nowhere except a
+per-position `broker_managed: false` flag on the dashboard's Positions
+table that's easy to not notice in the moment. This alert is what turns
+that into something a human actually sees.
 Fires once per unprotected "episode" (`Position.unprotected_alert_logged`,
 reset by `_attach_broker_bracket` the instant it next succeeds, so a
 LATER unprotected stretch -- e.g. after a future cancel+replace cycle --

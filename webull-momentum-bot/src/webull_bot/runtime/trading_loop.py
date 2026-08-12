@@ -276,11 +276,17 @@ class TradingLoopConfig:
     # circuit breaker -- see Position.broker_bracket_attach_failures'
     # deliberate absence from this codebase, referenced in several nearby
     # docstrings, for why a give-up-after-N mechanism was rejected here).
-    # The gap this closes: a structurally broken order payload (e.g. an
-    # unverified field name Webull silently rejects every single time)
-    # would otherwise make this retry loop fail forever with NOTHING
-    # surfaced anywhere a human would actually see it -- the position just
-    # quietly rides on software-only management for its whole lifetime.
+    # The gap this closes: ANY structurally broken order payload (a
+    # future Webull API change, a new order type added without live
+    # verification, an account-level restriction) would otherwise make
+    # this retry loop fail forever with NOTHING surfaced anywhere a human
+    # would actually see it -- the position just quietly rides on
+    # software-only management for its whole lifetime. Not needed for
+    # this codebase's current bracket/trailing-stop payload fields --
+    # both confirmed working live (see _order_payload's stop_price
+    # comment and _ORDER_TYPE_TO_WEBULL's TRAILING_STOP entry in
+    # brokers/webull/client.py) -- this is defense-in-depth against a
+    # FUTURE regression, not a currently-known problem.
     # 60s (12 ticks at the 5s poll_interval_seconds default) is long enough
     # that a single transient 429/rate-limit blip self-healing within a
     # few ticks (the normal case) never fires this, but short enough that
@@ -1591,10 +1597,15 @@ class TradingLoop:
         RiskEngine.events) once a position has gone
         TradingLoopConfig.unprotected_position_alert_seconds or longer
         riding on software-only management, so a structurally broken
-        order payload that can NEVER succeed (e.g. an unverified field
-        name Webull silently rejects on every single attempt) doesn't
+        order payload that can NEVER succeed (a future Webull API
+        change, a new order type added without live verification) doesn't
         fail completely silently for the rest of the position's
         lifetime -- a human watching the dashboard actually sees it.
+        Defense-in-depth against a FUTURE regression, not a currently-
+        known problem: this codebase's bracket/trailing-stop payload
+        fields are both confirmed working live as of this writing (see
+        _order_payload's stop_price comment and
+        WebullBrokerClient._ORDER_TYPE_TO_WEBULL's TRAILING_STOP entry).
 
         Uses position.opened_at as the start of the unprotected clock
         (not a separate "first attach attempt" timestamp): a fresh

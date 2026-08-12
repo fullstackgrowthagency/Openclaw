@@ -212,17 +212,15 @@ _ORDER_TYPE_TO_WEBULL = {
     OrderType.STOP_LIMIT: "STOP_LOSS_LIMIT",
     # webull.trade.common.order_type.OrderType lists TRAILING_STOP_LOSS as a
     # real order type (trailing_type/trailing_stop_step fields -- see
-    # _order_payload). NOT YET independently confirmed live for a US-market
-    # equity on this account as of this writing -- the SDK's own sample
+    # _order_payload). Wired in at the account owner's explicit instruction
+    # ("I know for a fact trailing stop loss orders are allowed") ahead of
+    # an independent live confirmation -- the SDK's own sample
     # (samples/trade/trade_client_v3.py) only demonstrates it against
-    # market="HK". scripts/verify_trailing_stop.py exists to confirm this
-    # the same way verify_bracket_orders.py confirmed the plain OCO
-    # bracket; wired in ahead of that confirmation at the user's explicit
-    # instruction ("I know for a fact trailing stop loss orders are
-    # allowed") rather than waiting for the next core-hours window -- if
-    # that verification comes back negative, this mapping and everything
-    # in TradingLoop that reads Position.broker_stop_is_trailing needs
-    # reverting, not just this one line.
+    # market="HK", and scripts/verify_trailing_stop.py was built to close
+    # that gap the same way verify_bracket_orders.py confirmed the plain
+    # OCO bracket. Confirmed working in this account's real trading
+    # (2026-08-12, per the account owner directly) -- this mapping is
+    # correct for a US-market equity, not just a guess.
     OrderType.TRAILING_STOP: "TRAILING_STOP_LOSS",
 }
 
@@ -1246,9 +1244,15 @@ class WebullBrokerClient(BrokerClient):
         if order.limit_price is not None:
             payload["limit_price"] = str(_round_to_valid_price_increment(order.limit_price))
         if order.stop_price is not None:
-            # UNVERIFIED field name -- current strategies only ever submit
-            # MARKET orders (see execution/order_manager.py), so this path
-            # has not been exercised live. Confirm before relying on it.
+            # Confirmed live 2026-08-11 (scripts/verify_bracket_orders.py,
+            # via place_oco_bracket's resting STOP_LOSS leg, which builds
+            # its payload through this exact same branch) and reconfirmed
+            # by the account owner directly (2026-08-12) -- this field
+            # name is correct, not a guess. (Earlier revisions of this
+            # comment flagged it UNVERIFIED before that confirmation
+            # existed; left this note rather than silently deleting the
+            # history in case it's useful context for why the caution
+            # existed at all.)
             payload["stop_price"] = str(_round_to_valid_price_increment(order.stop_price))
         if order.trailing_pct is not None:
             # PERCENTAGE-only -- see Order.trailing_pct's docstring for why

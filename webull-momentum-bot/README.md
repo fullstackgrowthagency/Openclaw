@@ -206,13 +206,9 @@ What's implemented and tested:
   `_sync_broker_protective_orders` would otherwise cancel+replace every
   time `PositionManager`'s own trailing-stop math ratchets it. Wired in at
   the account owner's explicit instruction that this order type is
-  supported for US equities on this account -- **NOT yet independently
-  live-verified the way the plain `OCO` bracket was** (the SDK's own
-  sample only demonstrates `TRAILING_STOP_LOSS` against the HK market);
-  `scripts/verify_trailing_stop.py` exists to confirm it during the next
-  core-hours window, and `WebullBrokerClient._ORDER_TYPE_TO_WEBULL`'s
-  docstring says exactly what to revert if that comes back negative.
-  Unaffected: the pre-partial stop+target bracket (still plain
+  supported for US equities on this account (the SDK's own sample only
+  demonstrates `TRAILING_STOP_LOSS` against the HK market) -- **confirmed
+  working live in this account's real trading, 2026-08-12.** Unaffected: the pre-partial stop+target bracket (still plain
   `STOP`+`LIMIT`), and a too-small-to-split position that never takes a
   partial (rides on a plain `STOP` + breakeven for its whole lifetime, as
   before). Defensively cancels any leftover resting order before adding
@@ -719,28 +715,32 @@ What's implemented and tested:
   made without reintroducing the reverted `broker_bracket_attach_failures`
   circuit breaker (see above), and found the honest limit isn't the retry
   logic, it's that a retry loop can only succeed against a call CAPABLE
-  of succeeding. Two of `_order_payload`'s fields feeding every bracket
-  leg are explicitly flagged UNVERIFIED in the code itself (`stop_price`'s
-  field name, and the entire `TRAILING_STOP_LOSS` order type) -- if
-  either is wrong, every attach attempt fails forever, not transiently,
-  and the retry loop can't tell the difference. **Fix, not a new retry
-  mechanism:** `TradingLoop._maybe_raise_unprotected_position_alert`
-  raises one `RiskEventType.POSITION_UNPROTECTED_TOO_LONG` event (new
+  of succeeding. The initial pass at this audit flagged two
+  `_order_payload` fields (`stop_price`'s field name, the entire
+  `TRAILING_STOP_LOSS` order type) as still-UNVERIFIED per a stale code
+  comment -- the account owner corrected this directly: both have
+  already worked live in this account's real trading (in hindsight,
+  `place_oco_bracket`'s own docstring already said `stop_price` was
+  confirmed live 2026-08-11 via `scripts/verify_bracket_orders.py`; the
+  comment on `_order_payload` itself just never got updated). Both
+  comments in `client.py` are now corrected. **Fix, not a new retry
+  mechanism -- kept anyway as general defense-in-depth:**
+  `TradingLoop._maybe_raise_unprotected_position_alert` raises one
+  `RiskEventType.POSITION_UNPROTECTED_TOO_LONG` event (new
   `RiskEngine.record_operational_event`, surfaced on the dashboard's
   existing Risk Events panel) once a `MANAGING` position has gone
   `unprotected_position_alert_seconds` (60s default) with no
-  `broker_stop_order_id` -- closing the real gap, which was that a
-  structurally broken payload would otherwise fail completely silently
-  for a position's entire lifetime. Fires once per unprotected episode,
-  resets the moment `_attach_broker_bracket` next succeeds. See
+  `broker_stop_order_id`. Not needed for the two fields above anymore,
+  but still useful against any FUTURE structurally-broken payload (a
+  Webull API change, a new order type added later without the same live
+  verification) that would otherwise fail completely silently for a
+  position's entire lifetime. Fires once per unprotected episode, resets
+  the moment `_attach_broker_bracket` next succeeds. See
   `docs/ARCHITECTURE.md`'s "Visibility for a broker bracket that can
-  never attach" section for the full audit, including two open items
-  flagged but not auto-implemented pending the user's input: running
-  `scripts/verify_bracket_orders.py`/`verify_trailing_stop.py` live to
-  close the two UNVERIFIED payload fields, and whether
-  `market_hours.py`'s core-hours check is worth hardening against market
-  holidays/early closes (currently a pure weekday+time-window check with
-  no calendar awareness).
+  never attach" section for the full audit, including one remaining open
+  item: whether `market_hours.py`'s core-hours check is worth hardening
+  against market holidays/early closes (currently a pure weekday+time-
+  window check with no calendar awareness).
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and
