@@ -1377,14 +1377,40 @@ exact $0.00/0.00% "trade" no matter what actually happened to the real
 position. This was not a display/formatting limitation (negative P&L
 already renders correctly elsewhere in the dashboard, e.g. a real
 -$55,979.72 loss shown in red) -- the fallback price itself was simply
-wrong. **Fix:** insert a fresh `broker.get_snapshot(symbol).last_price`
-call ahead of the `avg_entry_price` last resort -- a live quote taken at
-detection time is still real market data, and strictly better evidence
-than silently assuming a break-even close. `avg_entry_price` is now only
-reached if even that live snapshot call fails (e.g. a broker error). See
-`tests/test_trading_loop.py`'s
-`test_reconcile_external_close_falls_back_to_a_live_snapshot_not_entry_price`
-and `test_reconcile_external_close_falls_back_to_entry_price_only_as_a_last_resort`.
+wrong. **First fix:** insert a fresh `broker.get_snapshot(symbol).last_price`
+REST call ahead of the `avg_entry_price` last resort -- a live quote taken
+at detection time is still real market data, and strictly better evidence
+than silently assuming a break-even close.
+
+**Reverted the same day: that REST call was itself contributing to
+renewed rate-limit pressure, per the user's direct report.** The call
+runs synchronously inside `reconcile_positions_from_broker`'s drop loop --
+one call per externally-closed symbol found in a SINGLE reconcile pass,
+each routed through `call_with_retry`'s own up to 4 paced attempts
+(exponential backoff on every 429) -- at exactly the moments this
+codebase has repeatedly seen sustained rate-limit contention already
+under way (see the CYCU/SCKT/BIVI incidents above and below). If several
+positions are confirmed externally closed in the same pass -- plausible
+during exactly this kind of contention, since sustained 429s are also
+what causes `get_positions()` to intermittently omit real open positions
+in the first place -- this fired several REST calls in a row on top of
+an already-strained budget, competing with genuinely critical traffic
+(a stuck exit retry, a real entry) for the same shared limiter.
+
+**Fixed properly:** read `self._get_streaming_snapshot(symbol, now)`
+instead of making any new request at all. MANAGING positions are already
+streaming-subscribed for their own stop/target management
+(`_ensure_streaming_subscribed`), so the last live-streamed price for a
+symbol is already sitting in memory -- this just reads a value being kept
+warm for another purpose rather than placing a dedicated call. The
+tradeoff: it only helps when streaming has a fresh price for that exact
+symbol (within `TradingLoopConfig.streaming_staleness_seconds`, 10s
+default) -- `avg_entry_price` remains the final fallback when it doesn't,
+deliberately accepted rather than spending scarce account-wide request
+budget on what is, ultimately, a best-effort historical record rather
+than a live trading decision. See `tests/test_trading_loop.py`'s
+`test_reconcile_external_close_falls_back_to_the_streaming_cache_not_entry_price`
+and `test_reconcile_external_close_falls_back_to_entry_price_when_streaming_cache_is_stale_or_empty`.
 
 **Still an approximation, not a guarantee of the real fill price/time --
 a Webull order-history backfill would be strictly better, and was

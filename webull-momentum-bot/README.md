@@ -575,14 +575,26 @@ What's implemented and tested:
   $0.00/0.00% trade regardless of what actually happened to the position.
   This wasn't a display/formatting bug (negative P&L already renders
   correctly elsewhere, e.g. a real -$55,979.72 loss shown in red) -- the
-  fallback price itself was wrong. Fixed by inserting a fresh
-  `broker.get_snapshot(symbol).last_price` call ahead of the
-  `avg_entry_price` last resort: a live quote taken at detection time is
-  still real market data and strictly better evidence than silently
-  assuming break-even. `avg_entry_price` now only fires when even a live
-  snapshot fails (e.g. broker error). See
-  `tests/test_trading_loop.py::test_reconcile_external_close_falls_back_to_a_live_snapshot_not_entry_price`
-  and `::test_reconcile_external_close_falls_back_to_entry_price_only_as_a_last_resort`.
+  fallback price itself was wrong. First fixed by inserting a fresh
+  `broker.get_snapshot(symbol).last_price` REST call ahead of the
+  `avg_entry_price` last resort -- **reverted the same day** after the
+  user reported it was contributing to renewed rate-limit pressure: that
+  call runs synchronously inside `reconcile_positions_from_broker`'s drop
+  loop (one call per externally-closed symbol found in a single pass,
+  each with `call_with_retry`'s own up to 4 paced attempts on a 429) at
+  exactly the moments this codebase has repeatedly seen sustained
+  rate-limit contention already in progress -- see the CYCU/SCKT/BIVI
+  incidents below. **Fixed properly** by reading
+  `self._get_streaming_snapshot(symbol, now)` instead -- the last live-
+  STREAMED price for this symbol, already sitting in memory because
+  MANAGING positions are streaming-subscribed for their own stop/target
+  management anyway, so this costs no extra request at all. Only helps
+  when streaming has a fresh price for that exact symbol (per
+  `streaming_staleness_seconds`); `avg_entry_price` is still the final
+  fallback when it doesn't, deliberately accepted rather than spending
+  scarce account-wide request budget on a best-effort historical record.
+  See `tests/test_trading_loop.py::test_reconcile_external_close_falls_back_to_the_streaming_cache_not_entry_price`
+  and `::test_reconcile_external_close_falls_back_to_entry_price_when_streaming_cache_is_stale_or_empty`.
 - **A stuck exit-order retry now backs off instead of hammering the
   broker every tick.** Real incident (CYCU/SCKT, 2026-08-12): a genuine
   stop-loss exit signal kept firing every `poll_interval_seconds` tick,

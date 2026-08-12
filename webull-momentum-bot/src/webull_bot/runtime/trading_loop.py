@@ -1907,16 +1907,37 @@ class TradingLoop:
         confirmed fill price -- tries broker.poll_fills() first (an exit-
         side fill for this symbol at/after the position's opened_at is
         almost certainly the real closing fill), then the position's own
-        stop/target price, then a fresh broker.get_snapshot() (real,
-        still-fetchable market data even though the account no longer
-        holds the position), and only falls all the way back to
-        avg_entry_price -- which fabricates an exact $0 P&L regardless of
-        what actually happened -- as an absolute last resort when every
-        other source is unavailable. Confirmed live 2026-08-12: WCT had
-        neither a matched fill nor a stop_price/target_price set, so this
-        chain used to land straight on avg_entry_price and record a
-        misleadingly exact break-even trade no matter what the real
-        outcome was."""
+        stop/target price, then the last live-STREAMED price for this
+        symbol (self._get_streaming_snapshot -- an already-in-memory value
+        from the existing quote stream, NOT a new network call), and only
+        falls all the way back to avg_entry_price -- which fabricates an
+        exact $0 P&L regardless of what actually happened -- as an
+        absolute last resort when every other source is unavailable.
+        Confirmed live 2026-08-12: WCT had neither a matched fill nor a
+        stop_price/target_price set, so this chain used to land straight
+        on avg_entry_price and record a misleadingly exact break-even
+        trade no matter what the real outcome was.
+
+        A same-day earlier version of this fallback used a fresh
+        broker.get_snapshot() REST call here instead of the streaming
+        cache -- reverted after the user reported it was contributing to
+        renewed rate-limit pressure. That call runs synchronously inside
+        reconcile_positions_from_broker's drop loop (one per externally-
+        closed symbol found in a single pass, with call_with_retry's own
+        up to 4 paced attempts each on a 429) at exactly the moments this
+        codebase has repeatedly seen sustained rate-limit contention
+        already in progress -- see the CYCU/SCKT/BIVI incidents elsewhere
+        in this file's history. The streaming cache costs nothing extra:
+        MANAGING positions are already streaming-subscribed for
+        stop/target management (_ensure_streaming_subscribed), so this
+        just reads a value already being kept warm for another purpose
+        instead of placing a dedicated request. The tradeoff is a
+        narrower window (only helps when streaming has a fresh price for
+        this exact symbol, per streaming_staleness_seconds) -- accepted
+        deliberately: this is a best-effort historical record, not
+        something worth spending scarce account-wide request budget on
+        during exactly the conditions most likely to need that budget
+        elsewhere (a genuine stuck exit retry, a real entry)."""
         exit_side = OrderSide.SELL if position.side == OrderSide.BUY else OrderSide.BUY_TO_COVER
         exit_price = None
         try:
@@ -1933,13 +1954,9 @@ class TradingLoop:
             exit_price = position.stop_price or position.target_price
 
         if exit_price is None:
-            try:
-                exit_price = self.broker.get_snapshot(symbol).last_price
-            except Exception:
-                logger.warning(
-                    "get_snapshot failed while building a fallback exit price for %s's "
-                    "external-close Trade.", symbol, exc_info=True,
-                )
+            streaming_snapshot = self._get_streaming_snapshot(symbol, now)
+            if streaming_snapshot is not None:
+                exit_price = streaming_snapshot.last_price
 
         if exit_price is None:
             exit_price = position.avg_entry_price

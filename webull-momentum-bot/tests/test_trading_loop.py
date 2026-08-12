@@ -1935,16 +1935,22 @@ def test_reconcile_records_a_trade_for_an_externally_closed_position_falling_bac
     assert trades[0].exit_price == pytest.approx(4.50)  # falls back to stop_price
 
 
-def test_reconcile_external_close_falls_back_to_a_live_snapshot_not_entry_price():
+def test_reconcile_external_close_falls_back_to_the_streaming_cache_not_entry_price():
     # Real gap (2026-08-12, WCT): no matching fill AND no stop_price/
     # target_price set -- the fallback chain used to land straight on
     # avg_entry_price, fabricating an exact $0.00/0.00% "trade" no matter
-    # what actually happened. A fresh live snapshot is real market data
-    # and strictly better evidence than silently assuming break-even.
+    # what actually happened. The last live-STREAMED price for this
+    # symbol is real market data and strictly better evidence than
+    # silently assuming break-even -- and, unlike a fresh REST
+    # get_snapshot() call (tried and reverted the same day after it was
+    # found to add to renewed rate-limit pressure during exactly the
+    # incidents this fallback exists for), reading it costs no extra
+    # request at all: it's already being kept warm by streaming for
+    # stop/target management.
     from webull_bot.state_machine import transition
     from webull_bot.enums import CandidateState, ExitReason
 
-    broker = _FakeBroker()  # get_snapshot always returns last_price=5.20
+    broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
     trades = []
     loop.on_trade_closed = trades.append
@@ -1955,26 +1961,32 @@ def test_reconcile_external_close_falls_back_to_a_live_snapshot_not_entry_price(
         symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=1.04, stop_price=None,
         target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
     )
+    loop._live_snapshots["TEST"] = (
+        MarketSnapshot(
+            symbol="TEST", timestamp=_IN_HOURS_NOW, last_price=1.75, bid=1.74, ask=1.76,
+            bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=1.75, high_of_day=1.80,
+            low_of_day=1.00, open_price=1.10,
+        ),
+        _IN_HOURS_NOW,
+    )
 
     loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
     loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
 
     assert len(trades) == 1
     assert trades[0].exit_reason == ExitReason.EXTERNAL_CLOSE
-    assert trades[0].exit_price == pytest.approx(5.20)  # live snapshot, not avg_entry_price
+    assert trades[0].exit_price == pytest.approx(1.75)  # streaming cache, not avg_entry_price
     assert trades[0].pnl != 0.0
 
 
-def test_reconcile_external_close_falls_back_to_entry_price_only_as_a_last_resort():
-    # avg_entry_price is only reached when even a live snapshot fails.
+def test_reconcile_external_close_falls_back_to_entry_price_when_streaming_cache_is_stale_or_empty():
+    # avg_entry_price is only reached when the streaming cache has
+    # nothing fresh for this symbol -- no dedicated REST call is made to
+    # try harder than that (see this fallback's docstring for why).
     from webull_bot.state_machine import transition
     from webull_bot.enums import CandidateState, ExitReason
 
-    class _SnapshotFailsBroker(_FakeBroker):
-        def get_snapshot(self, symbol):
-            raise RuntimeError("snapshot unavailable")
-
-    broker = _SnapshotFailsBroker()
+    broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
     trades = []
     loop.on_trade_closed = trades.append
@@ -1984,6 +1996,15 @@ def test_reconcile_external_close_falls_back_to_entry_price_only_as_a_last_resor
     loop._positions["TEST"] = Position(
         symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=1.04, stop_price=None,
         target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    # Stale: older than streaming_staleness_seconds (10s default).
+    loop._live_snapshots["TEST"] = (
+        MarketSnapshot(
+            symbol="TEST", timestamp=_IN_HOURS_NOW, last_price=1.75, bid=1.74, ask=1.76,
+            bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=1.75, high_of_day=1.80,
+            low_of_day=1.00, open_price=1.10,
+        ),
+        _IN_HOURS_NOW - timedelta(seconds=30),
     )
 
     loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
