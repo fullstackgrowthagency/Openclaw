@@ -212,6 +212,31 @@ class TradingLoopConfig:
     # call per interval (not per-candidate, unlike get_snapshots) is cheap
     # enough to run this fairly often.
     position_reconcile_interval_seconds: float = 30.0
+    # How many CONSECUTIVE reconcile_positions_from_broker passes a
+    # position must be absent from broker.get_positions() before it's
+    # treated as closed externally -- see that method's "missing from
+    # broker" branch and Position-abandonment incident (2026-08-12): a
+    # position (BIVI) was dropped from tracking and its candidate pushed
+    # straight to COOLDOWN after a SINGLE reconcile pass came back without
+    # it, moments after a 429 TOO_MANY_REQUESTS on an unrelated call in
+    # the same tick -- get_positions() itself never raised (that's
+    # already handled, see the try/except around _get_positions_for_tick
+    # below), it returned a normal 200 whose body just didn't include a
+    # position that was, per the dashboard and this bot's own fill
+    # records, very much still open. A live account under the kind of
+    # sustained rate-limit contention this bot can generate is not
+    # guaranteed to return a complete positions list on every single
+    # request even when it responds 200 -- treating one such response as
+    # ground truth is enough to silently walk away from an open,
+    # unprotected position (no more broker-side bracket, no more
+    # software-side stop/target checks -- PositionManager.check_exit
+    # never runs again for it) for the rest of the trading day. Requiring
+    # the SAME symbol to be missing across this many consecutive passes
+    # (~position_reconcile_interval_seconds apart) before acting adds a
+    # `(N-1) * interval` detection delay for a GENUINE external close,
+    # trading a little responsiveness there for never abandoning a real,
+    # still-open position on one flaky poll.
+    position_missing_confirmations_required: int = 2
     # How long a candidate can sit TRIGGERED (entry order submitted, not yet
     # confirmed filled) before _poll_pending_entry also cross-checks
     # broker.get_positions() directly, on top of (not instead of) the
@@ -365,6 +390,15 @@ class TradingLoop:
         self._pending_entry_position_checked: set[str] = set()
         self._pending_exit_orders: dict[str, tuple[Order, Signal]] = {}  # symbol -> (order, exit signal)
         self._positions: dict[str, Position] = {}          # symbol -> our own tracked open position
+        # symbol -> consecutive reconcile_positions_from_broker passes it's
+        # been absent from broker.get_positions() -- see
+        # TradingLoopConfig.position_missing_confirmations_required's
+        # docstring for the incident this guards against (a single
+        # degraded/rate-limited-adjacent poll abandoning a still-open
+        # position). Only ever holds entries for symbols currently in
+        # self._positions; cleared the moment a symbol reappears in a
+        # broker response or is actually declared closed.
+        self._missing_from_broker_counts: dict[str, int] = {}
         self._last_universe_scan: Optional[datetime] = None
         self._last_position_reconcile: Optional[datetime] = None
         # Reset at the start of every _process_all_candidates pass (see
@@ -1878,6 +1912,13 @@ class TradingLoop:
             return
 
         broker_symbols = {p.symbol for p in broker_positions}
+        # Any symbol the broker DID report this pass has recovered (or was
+        # never actually missing) -- forget its miss streak, if any, so a
+        # later transient miss starts counting from zero again rather than
+        # inheriting stale history.
+        for symbol in broker_symbols & self._missing_from_broker_counts.keys():
+            del self._missing_from_broker_counts[symbol]
+
         for symbol in set(self._positions.keys()) - broker_symbols:
             if symbol in self._pending_exit_orders:
                 # This process's own exit is already in flight for this
@@ -1885,7 +1926,30 @@ class TradingLoop:
                 # finish it normally instead of yanking it out from under
                 # that machinery just because the broker-side quantity has
                 # already dropped to zero ahead of this process noticing.
+                # Not a "missing" observation at all -- don't let it count
+                # toward the streak below.
+                self._missing_from_broker_counts.pop(symbol, None)
                 continue
+
+            miss_count = self._missing_from_broker_counts.get(symbol, 0) + 1
+            self._missing_from_broker_counts[symbol] = miss_count
+            if miss_count < self.config.position_missing_confirmations_required:
+                # Not yet confirmed -- see
+                # TradingLoopConfig.position_missing_confirmations_required's
+                # docstring: a single broker.get_positions() response
+                # missing a symbol isn't trusted as "actually closed" on
+                # its own, since a live account under rate-limit
+                # contention isn't guaranteed to return a complete list
+                # even on a 200. Left fully tracked/managed in the
+                # meantime -- next tick's software/broker-side checks run
+                # exactly as if this pass hadn't happened.
+                logger.warning(
+                    "%s missing from broker.get_positions() (%d/%d consecutive reconcile passes) "
+                    "-- not yet treating as closed externally.", symbol,
+                    miss_count, self.config.position_missing_confirmations_required,
+                )
+                continue
+
             stale_position = self._positions[symbol]
             if stale_position.broker_stop_order_id is not None or stale_position.broker_target_order_id is not None:
                 # Whatever closed this position out-of-band (a manual close
@@ -1897,9 +1961,11 @@ class TradingLoop:
             logger.warning(
                 "%s no longer exists at the broker (closed outside this process -- a manual "
                 "close, scripts/list_and_close_positions.py, etc.) -- removing from local "
-                "tracking so the dashboard reflects reality.", symbol,
+                "tracking so the dashboard reflects reality. Confirmed missing across %d "
+                "consecutive reconcile passes.", symbol, miss_count,
             )
             del self._positions[symbol]
+            del self._missing_from_broker_counts[symbol]
             candidate = self.candidates.get(symbol)
             if candidate is not None and candidate.state in (CandidateState.ENTERED, CandidateState.MANAGING):
                 transition(candidate, CandidateState.EXITED, now=now, reason="position closed externally (not by this process)")

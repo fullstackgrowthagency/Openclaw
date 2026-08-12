@@ -1293,6 +1293,46 @@ so `_flush_state_transitions` persists the fresh object's complete history
 from zero rather than misapplying an index meant for a different object's
 transition list.
 
+**The drop path required a THIRD real incident's worth of hardening
+(2026-08-12): one missing pass alone is not trustworthy evidence a
+position actually closed.** Confirmed live, post sandbox-account-reset,
+during a stretch of sustained 429 contention (multiple positions
+simultaneously retrying bracket-attach/cancel calls -- see the
+"support_trading_session" and quantity-ceiling incidents elsewhere in
+this doc for the same window): a genuinely open position (BIVI) was
+dropped from `self._positions` and its candidate pushed straight to
+`COOLDOWN` -- ending not just broker-side but ALL software-side
+management too, since `PositionManager.check_exit` is never called again
+for a candidate that isn't `MANAGING` -- after exactly ONE
+`reconcile_positions_from_broker` pass came back without it. Crucially,
+`broker.get_positions()` itself never raised (the try/except around
+`_get_positions_for_tick` already handles that failure mode, logging and
+skipping the whole pass) -- it returned an ordinary 200 whose body simply
+omitted a position this bot's own `orders` table confirmed was filled
+minutes earlier. The 429 immediately preceding the drop in the logs was
+from a *different*, unrelated call in the same tick, not the
+`get_positions()` call itself -- but it's strong circumstantial evidence
+the account was under exactly the kind of contention where a "successful"
+200 response isn't guaranteed to be a complete one.
+
+**Fix:** a new `self._missing_from_broker_counts: dict[str, int]` streak
+counter, keyed by symbol, incremented each pass a tracked position is
+absent from `broker_symbols` and reset to nothing the moment that symbol
+reappears in any later pass. The drop-and-transition-to-COOLDOWN branch
+now only fires once a symbol's streak reaches
+`TradingLoopConfig.position_missing_confirmations_required` (2 default)
+-- below that, the position is logged as "not yet treating as closed
+externally" and left fully tracked and managed exactly as if the pass
+hadn't happened at all, so a transient/incomplete response costs nothing
+beyond a log line. This trades up to one extra
+`position_reconcile_interval_seconds` of detection latency for a
+GENUINE external close (still confirmed and acted on -- a real close
+stays missing on every subsequent pass too) against never again silently
+abandoning a real, still-open, unprotected position on a single flaky
+poll. See `tests/test_trading_loop.py`'s
+`test_reconcile_does_not_drop_a_position_missing_from_a_single_pass` and
+`test_reconcile_miss_streak_resets_once_the_broker_reports_the_symbol_again`.
+
 Called from `_process_all_candidates`, throttled by
 `TradingLoopConfig.position_reconcile_interval_seconds` (default 30s) --
 but firing immediately on that method's very first-ever call regardless,

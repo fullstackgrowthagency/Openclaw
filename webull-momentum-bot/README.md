@@ -494,6 +494,27 @@ What's implemented and tested:
   every price-computing call site (strategy target math, position stop
   math, extended-hours marketable-limit pricing) rather than requiring
   each one to remember to round itself.
+- **A single reconcile pass can no longer abandon a still-open position.**
+  Confirmed live 2026-08-12: `reconcile_positions_from_broker` (runs every
+  `position_reconcile_interval_seconds`, 30s default) dropped a genuinely
+  open position (BIVI) from local tracking and pushed its candidate
+  straight to `COOLDOWN` -- ending ALL further management, software-side
+  included -- after a SINGLE pass came back without it in
+  `broker.get_positions()`'s response, immediately following a 429 on an
+  unrelated call in the same tick. `get_positions()` itself never raised
+  (that failure mode was already handled); it returned an ordinary 200
+  whose body simply didn't include a position this bot's own fill records
+  confirmed was still open. A live account under the kind of sustained
+  rate-limit contention this bot can generate isn't guaranteed to return a
+  complete positions list on every single request just because it
+  responded 200. `reconcile_positions_from_broker` now requires a symbol
+  to be missing across `TradingLoopConfig.position_missing_confirmations_
+  required` (2 default) CONSECUTIVE passes before treating it as closed
+  externally, via a new `self._missing_from_broker_counts` streak counter
+  that resets the moment the symbol reappears in any pass. Trades a little
+  detection latency for a genuine external close (up to one extra
+  `position_reconcile_interval_seconds`) for never again silently walking
+  away from an open, unprotected position on one flaky poll.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

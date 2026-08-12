@@ -1769,6 +1769,12 @@ def test_reconcile_drops_a_position_no_longer_at_the_broker():
     # by calling broker.place_order directly, entirely outside this
     # running process -- the dashboard kept showing it as open indefinitely
     # afterward since nothing ever told the bot it was gone.
+    #
+    # Two reconcile passes now required (2026-08-12, see
+    # TradingLoopConfig.position_missing_confirmations_required's
+    # docstring) before this drop actually happens -- a genuinely closed
+    # position stays missing on the second pass too, so this still ends
+    # in the same place, just one call later.
     from webull_bot.state_machine import transition
     from webull_bot.enums import CandidateState
 
@@ -1783,9 +1789,83 @@ def test_reconcile_drops_a_position_no_longer_at_the_broker():
     )
 
     loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    assert "TEST" in loop._positions  # not yet -- only one miss so far
+    assert candidate.state == CandidateState.MANAGING
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
 
     assert "TEST" not in loop._positions
     assert candidate.state.value == "cooldown"
+
+
+def test_reconcile_does_not_drop_a_position_missing_from_a_single_pass():
+    # The bug this guards against (2026-08-12): a live position (BIVI) was
+    # dropped from tracking -- and its candidate pushed straight to
+    # COOLDOWN, abandoning all further stop/target management -- after a
+    # SINGLE reconcile pass came back without it, immediately following a
+    # 429 on an unrelated call in the same tick. get_positions() itself
+    # never raised (that path is separately covered by
+    # test_reconcile_is_a_no_op_when_get_positions_fails); it returned a
+    # normal response that simply didn't include a position that was, in
+    # fact, still open. One missing pass alone must never be enough.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState
+
+    broker = _FakeBroker()  # no positions this pass -- simulates one degraded/incomplete response
+    loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert "TEST" in loop._positions
+    assert candidate.state == CandidateState.MANAGING
+    assert loop._missing_from_broker_counts["TEST"] == 1
+
+
+def test_reconcile_miss_streak_resets_once_the_broker_reports_the_symbol_again():
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState
+
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    assert loop._missing_from_broker_counts["TEST"] == 1
+
+    # The broker reports it again -- e.g. the earlier response really was
+    # just incomplete/degraded, not a real close. _tick_positions_cache is
+    # only reset between real ticks (_process_all_candidates) -- clear it
+    # by hand here since this test drives reconcile_positions_from_broker
+    # directly, or it would just keep replaying the first call's cached
+    # (empty) get_positions() result.
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="unknown",
+    ))
+    loop._tick_positions_cache = None
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    assert "TEST" not in loop._missing_from_broker_counts
+
+    # A later single miss must count from zero again, not resume from the
+    # earlier streak.
+    broker._positions.clear()
+    loop._tick_positions_cache = None
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    assert "TEST" in loop._positions
+    assert loop._missing_from_broker_counts["TEST"] == 1
 
 
 def test_reconcile_does_not_drop_a_position_with_a_pending_exit_in_flight():
@@ -2879,7 +2959,11 @@ def test_reconcile_cancels_resting_orders_when_dropping_an_externally_closed_pos
     # Broker itself has no position for TEST at all (e.g. closed manually in
     # the Webull app) -- broker._positions (the _FakeBroker/get_positions
     # store) stays empty, unlike the resting-order cleanup this asserts.
+    # Two reconcile passes required before this is treated as a real close
+    # (2026-08-12, see TradingLoopConfig.position_missing_confirmations_
+    # required's docstring) -- both see the same empty broker._positions.
 
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
     loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
 
     assert "TEST" not in loop._positions
