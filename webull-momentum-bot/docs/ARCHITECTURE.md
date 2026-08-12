@@ -2465,6 +2465,166 @@ Two different data paths, deliberately:
 - **Historical panels** (trade history, performance/win-rate) read from the
   database via `db/repository.py`.
 
+**A third category, easy to miss: broker-derived fields folded into an
+otherwise in-memory panel.** `/api/status`'s `equity`/`buying_power` and
+`/api/positions`'s `current_price`/`unrealized_pnl` are NOT part of
+`Candidate`/`Position`'s own in-memory state -- they used to be fetched
+live from the broker inside the request handler itself. See "Dashboard
+504s" immediately below for why that was a real production incident and
+how it's fixed now (both fields are cached, no live broker call from
+either endpoint's request thread anymore).
+
+### Dashboard 504s: broker calls inside a request handler shared the
+order-placement rate limiter (2026-08-12)
+
+**Incident, reported directly by the user:** `GET /api/status` and `GET
+/api/positions` intermittently returned HTTP 504 (nginx Gateway Timeout).
+Root cause, traced end to end:
+
+- `/api/status` called `trading_loop.broker.get_account_equity()` and
+  `get_buying_power()` synchronously, on every single HTTP request
+  (`dashboard/app.py`'s old `get_status()`). Both delegate to
+  `WebullBrokerClient._get_primary_currency_asset()`
+  (`brokers/webull/client.py`), a real `account_v2.get_account_balance`
+  call routed through `call_with_retry(..., priority=CallPriority.NORMAL)`.
+- `/api/positions` called `trading_loop.broker.get_snapshot(symbol)`
+  once PER OPEN POSITION, sequentially, inside a single request handler
+  -- N open positions meant N sequential rate-limited broker round-trips
+  before the response could even start being built.
+- Both routes are `NORMAL` priority and go through the exact same
+  singleton `webull_limiter` (`retry.py`) that order placement uses. Two
+  separate ways a dashboard request could stall behind it:
+  1. **Priority starvation.** `RateLimiter` is a strict priority
+     min-heap (see "Performance/rate-limit rehaul" below) -- a `NORMAL`
+     ticket is serviced only once every currently-queued `CRITICAL`
+     ticket has been. Under real trading load (batched candidate
+     snapshot fetches, `reconcile_positions_from_broker`'s
+     `get_positions()`, pending order-status polling, every entry/exit
+     submission this tick) there can easily be 10-20+ `CRITICAL` tickets
+     ahead of a dashboard's `NORMAL` one in a single tick, each paced
+     >=1s apart -- this codebase's own incident history already
+     documents a real 20+ second wait from `CRITICAL`-vs-`CRITICAL`
+     contention alone (see "Position management (exits)"'s CYCU/SCKT
+     entries), so `NORMAL` traffic queued behind that is worse, not
+     better.
+  2. **Full blocking, not just deprioritization.** `place_order`/
+     `place_oco_bracket` both wrap their call in
+     `webull_limiter.exclusive()` (see "Give order placement exclusive
+     access..." below) -- while held, EVERY other thread's `wait()`
+     call is fully blocked regardless of priority, `NORMAL` included.
+     A dashboard request landing during a real order submission simply
+     waits for that submission (and all its own internal retries) to
+     finish first.
+
+  Either path, stacked with `call_with_retry`'s own up to 4 paced
+  retry attempts on a 429 (exponential backoff on top of the ~1s
+  pacing), could easily push a single dashboard request's broker call(s)
+  past nginx's `proxy_read_timeout` (commonly 60s) -- and `/api/positions`
+  multiplies this once per open position in the same request. Since the
+  frontend polls both endpoints every 5 seconds
+  (`docs/ARCHITECTURE.md` above, "it polls the REST endpoints every
+  5s"), this wasn't a rare edge case: it was exposed on essentially
+  every refresh cycle during exactly the periods when the bot is under
+  the most load -- i.e. exactly when a user most wants the dashboard to
+  stay responsive.
+
+**Fix: neither endpoint calls the broker from the request thread at
+all anymore.** Both now read small in-memory caches on `TradingLoop`,
+populated as a side effect of work the main loop thread is already doing
+every tick -- genuinely zero new broker calls, not just lower-priority
+ones, so these two routes can no longer contend for `webull_limiter` in
+any way:
+
+- **`TradingLoop.get_last_known_price(symbol)`** reads
+  `self._last_known_snapshots[symbol]`, a plain dict populated by
+  `_manage_position` from the `snapshot` argument it's already given
+  every tick for MANAGING/ENTERED positions -- whichever source
+  `_process_candidate_inner` resolved that tick (live-streamed,
+  batched REST via `get_snapshots`, or a per-candidate REST fallback).
+  `_manage_position` was already receiving this value; the only change
+  is also stashing a copy where the dashboard can read it. Returns
+  `None` if the position hasn't had a tick processed yet (e.g. the
+  instant after being adopted) -- `/api/positions` treats that exactly
+  like the old code's `except Exception: pass` fallback (both
+  `current_price` and `unrealized_pnl` come back `null`).
+- **`TradingLoop.get_account_summary()`** reads
+  `self._cached_equity`/`self._cached_buying_power`/
+  `self._cached_account_summary_error`, refreshed in the background by
+  `_process_all_candidates` on its own throttled cadence
+  (`TradingLoopConfig.account_summary_refresh_interval_seconds`, 30s
+  default) -- the exact same pattern `position_reconcile_interval_seconds`
+  already established for `reconcile_positions_from_broker`. Before the
+  first successful refresh, `equity`/`buying_power` are `None` with
+  `equity_error` explaining why -- same shape the endpoint already
+  returned for a failed live call, so this is a drop-in swap for the
+  frontend. A LATER refresh failing after an earlier one succeeded is
+  handled differently on purpose: `equity`/`buying_power` keep their
+  last good (stale, not `None`) values while `equity_error` still
+  reports the failure, since a brief broker hiccup blanking out a number
+  that was correct 30 seconds ago would be a worse dashboard experience
+  than showing a slightly-stale one with a visible error flag.
+
+  This also reduces total call volume, not just moves it off the
+  request thread: previously 1 equity + 1 buying-power call per
+  dashboard poll (every 5s) times however many browser tabs/clients were
+  open; now capped at 1 pair per `account_summary_refresh_interval_seconds`
+  regardless of dashboard traffic.
+
+Nothing about order placement, `RiskEngine.evaluate`'s sizing, or
+`OrderManager.submit_signal`'s own equity/buying-power reads changed --
+those remain fully live (correctness there depends on genuinely current
+numbers; a stale equity read feeding into position sizing would be a
+real bug, unlike a dashboard display lagging by up to 30 seconds). See
+`tests/test_trading_loop.py`'s
+`test_manage_position_caches_the_ticks_price_for_the_dashboard_to_read`,
+`test_get_account_summary_is_populated_by_the_periodic_background_refresh`,
+`test_get_account_summary_refresh_is_throttled_to_the_configured_interval`,
+`test_get_account_summary_reports_the_error_when_the_broker_refresh_fails`,
+and `tests/test_dashboard.py`'s updated `/api/status`/`/api/positions`
+tests.
+
+**What this doesn't cover / other options considered:**
+
+- **`POST /api/scan-symbol`** still calls the broker live
+  (`BroadScanner.check_symbol_verbose` -> `broker.get_snapshot`) on its
+  request thread, unchanged. Left alone deliberately: it's a one-off,
+  user-triggered lookup (a manual "check this ticker" action from the
+  dashboard UI), not something polled every 5s, so its exposure to the
+  same starvation/blocking risk is far lower in practice -- but it is
+  NOT zero, and a user clicking it during a bad rate-limit window could
+  still see it hang or 504. If this becomes a real problem, the same
+  "read a cache, never call live" pattern doesn't apply here (there's no
+  sensible cached value for an arbitrary just-typed symbol) -- a request
+  timeout/short-circuit on the endpoint itself (e.g. wrap the call with
+  a hard deadline and return a clear "rate-limited, try again shortly"
+  response rather than hanging until nginx kills it) would be the next
+  step, not attempted here since it wasn't the reported problem.
+- **Batching wasn't the right tool for these two specific endpoints.**
+  `get_snapshots()` (plural, already used by the main loop's own
+  per-tick candidate processing) reduces N REST calls to `ceil(N/100)`,
+  but that still means N/100 live broker round-trips PER DASHBOARD
+  REQUEST -- better than N, but still exposed to the exact same
+  priority-starvation/`exclusive()`-blocking risk above, still capable
+  of a 504 under load, just less often. Reading an already-fetched
+  in-memory value (this fix) removes the exposure entirely rather than
+  just reducing its frequency, which is why it was chosen over batching
+  here. Batching remains the right tool where a genuinely new, distinct
+  set of broker round-trips is unavoidable (see "Batched snapshot
+  fetching" above for where it already is used) -- it just wasn't
+  applicable to two endpoints that had no real need to hit the broker
+  live in the first place.
+- **Infrastructure-level mitigation (not implemented, outside this
+  repo):** raising nginx's `proxy_read_timeout` for the `/api/*`
+  location would reduce how often a slow-but-eventually-successful
+  broker call turns into a 504, but doesn't address the underlying
+  contention, and a dashboard user staring at a 30-60s spinner isn't a
+  great outcome either -- treated as a secondary mitigation worth
+  configuring at the infra level, not a substitute for removing the live
+  broker call from the request path (this fix). Nginx config isn't
+  tracked in this repository (no `nginx.conf`, systemd unit, or
+  Dockerfile found here as of this writing), so this is a manual step
+  the operator would need to apply separately if desired.
+
 `scripts/run_dashboard.py` is what makes the historical panels have
 anything to show: it wires `TradingLoop`'s `on_trade_closed`/`on_order_update`
 callbacks to `record_trade()`/`record_order()`, runs the loop in a

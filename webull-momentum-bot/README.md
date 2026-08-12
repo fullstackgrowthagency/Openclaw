@@ -565,6 +565,64 @@ What's implemented and tested:
   top of `RiskEngine`'s own gating, not a replacement for it, and
   shouldn't turn a transient broker hiccup into a missed legitimate
   entry.
+- **The dashboard could 504 under real trading load -- `/api/status` and
+  `/api/positions` no longer touch the broker at all.** Real incident
+  reported by the user (2026-08-12): `GET /api/status` and `GET
+  /api/positions` intermittently returned HTTP 504 from nginx. Root
+  cause: both endpoints called the live Webull broker synchronously, on
+  EVERY single HTTP request -- `/api/status` via
+  `broker.get_account_equity()`/`get_buying_power()`, `/api/positions`
+  via one `broker.get_snapshot()` call per open position, sequentially --
+  through the exact same shared, priority-queued `webull_limiter`
+  (`retry.py`) that order placement uses, including its `exclusive()`
+  hold during a real `place_order`/`place_oco_bracket` call (see the
+  "exclusive access to the rate-limit budget" entry above), where every
+  OTHER thread's call is fully blocked, not just deprioritized. Under
+  real trading load -- many candidates/positions, several entries/exits
+  in flight, or a stuck retry -- these NORMAL-priority dashboard reads
+  could queue behind tens of seconds of CRITICAL trading traffic (a real
+  20+ second CRITICAL-vs-CRITICAL wait is already documented elsewhere in
+  this codebase's incident history), comfortably exceeding nginx's
+  `proxy_read_timeout` and producing a 504 on what should be a cheap
+  read. Since the dashboard frontend polls both endpoints every 5
+  seconds, this wasn't a rare edge case -- it was exposed on essentially
+  every refresh cycle during exactly the periods when the bot is doing
+  the most (i.e., when a user most wants the dashboard to be responsive).
+  **Fix:** both endpoints now read from small in-memory caches on
+  `TradingLoop` instead, populated as a side effect of work the main loop
+  is already doing every tick -- zero new broker calls, and these two
+  endpoints can no longer contend for the rate limiter at all:
+  - `TradingLoop.get_last_known_price(symbol)` (`/api/positions`) reads
+    `self._last_known_snapshots`, populated by `_manage_position` from
+    the snapshot it already fetches every tick for that position's own
+    stop/target check (streaming, batched REST, or a per-candidate
+    fallback -- whichever `_process_candidate_inner` resolved this tick).
+    Returns `None` (same as the old code's exception fallback) if a
+    position hasn't had a tick processed yet.
+  - `TradingLoop.get_account_summary()` (`/api/status`) reads
+    `self._cached_equity`/`self._cached_buying_power`, refreshed in the
+    background by `_process_all_candidates` on its own schedule
+    (`TradingLoopConfig.account_summary_refresh_interval_seconds`, 30s
+    default -- same throttle pattern as `position_reconcile_interval_seconds`),
+    not by the request thread. This also cuts total equity/buying-power
+    call volume: previously 1 call pair per dashboard poll (every 5s, ×N
+    concurrent browser tabs); now capped at 1 pair per 30s regardless of
+    how many dashboard clients are watching.
+
+  Both caches are read-only from the dashboard's perspective -- nothing
+  about order placement, risk sizing, or `OrderManager.submit_signal`'s
+  own (still fully live, still fully correct) equity/buying-power reads
+  changed. See `tests/test_trading_loop.py`'s
+  `test_manage_position_caches_the_ticks_price_for_the_dashboard_to_read`,
+  `test_get_account_summary_is_populated_by_the_periodic_background_refresh`,
+  `test_get_account_summary_refresh_is_throttled_to_the_configured_interval`,
+  `test_get_account_summary_reports_the_error_when_the_broker_refresh_fails`,
+  and `tests/test_dashboard.py`'s updated `/api/status`/`/api/positions`
+  tests. `POST /api/scan-symbol` still calls the broker live on its
+  request thread (a user-triggered, not polled-every-5s action) and
+  wasn't changed -- see `docs/ARCHITECTURE.md`'s "Dashboard 504s" section
+  for the fuller writeup, remaining exposure, and other optimization
+  options considered.
 - **`_build_trade_for_external_close`'s exit-price fallback chain used to
   land on `avg_entry_price` far too easily, fabricating an exact $0.00
   P&L.** Confirmed live 2026-08-12 via a dashboard screenshot: WCT closed

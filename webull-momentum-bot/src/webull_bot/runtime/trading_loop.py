@@ -212,6 +212,22 @@ class TradingLoopConfig:
     # call per interval (not per-candidate, unlike get_snapshots) is cheap
     # enough to run this fairly often.
     position_reconcile_interval_seconds: float = 30.0
+    # How often TradingLoop refreshes its own cached account equity/buying
+    # power in the background -- see get_account_summary's docstring. Real
+    # incident (2026-08-12): the dashboard's /api/status called
+    # broker.get_account_equity()/get_buying_power() live on EVERY HTTP
+    # request, through the same shared, priority-queued, occasionally-
+    # exclusive (place_order/place_oco_bracket) webull_limiter used for
+    # order placement -- under real trading load a dashboard request could
+    # queue behind CRITICAL trading traffic (or a whole exclusive() hold)
+    # for tens of seconds, past nginx's proxy_read_timeout, producing 504s.
+    # This value only needs to be "fresh enough for a human glancing at a
+    # dashboard," not "fresh for a trading decision" (nothing in this
+    # codebase's own trading logic reads the cache this populates -- see
+    # order_manager.py's own direct, per-signal get_account_equity/
+    # get_buying_power calls, which are unaffected by this and still
+    # always live).
+    account_summary_refresh_interval_seconds: float = 30.0
     # How many CONSECUTIVE reconcile_positions_from_broker passes a
     # position must be absent from broker.get_positions() before it's
     # treated as closed externally -- see that method's "missing from
@@ -413,8 +429,22 @@ class TradingLoop:
         # self._positions; cleared the moment a symbol reappears in a
         # broker response or is actually declared closed.
         self._missing_from_broker_counts: dict[str, int] = {}
+        # symbol -> the most recent MarketSnapshot _manage_position saw for
+        # a MANAGING/ENTERED position -- see get_last_known_price's
+        # docstring. Deliberately never cleared when a position closes (a
+        # harmless, small, bounded-by-universe-size dict entry left behind
+        # -- simpler than adding cleanup for a value nothing reads once its
+        # position is gone).
+        self._last_known_snapshots: dict[str, MarketSnapshot] = {}
         self._last_universe_scan: Optional[datetime] = None
         self._last_position_reconcile: Optional[datetime] = None
+        self._last_account_summary_refresh: Optional[datetime] = None
+        # See get_account_summary's docstring -- refreshed periodically by
+        # _process_all_candidates (account_summary_refresh_interval_seconds),
+        # never by a dashboard request itself.
+        self._cached_equity: Optional[float] = None
+        self._cached_buying_power: Optional[float] = None
+        self._cached_account_summary_error: Optional[str] = None
         # Reset at the start of every _process_all_candidates pass (see
         # that method) and populated lazily by _get_positions_for_tick --
         # collapses multiple independent broker.get_positions() calls that
@@ -1737,6 +1767,15 @@ class TradingLoop:
         return False
 
     def _manage_position(self, candidate: Candidate, snapshot: MarketSnapshot, now: datetime) -> None:
+        # Cache this tick's price for the dashboard's /api/positions to
+        # read (see get_last_known_price) -- costs nothing extra: `snapshot`
+        # here is already fetched (streaming, batch REST, or per-candidate
+        # fallback) for this position's own stop/target check below, this
+        # just also keeps a copy the dashboard can read without ever
+        # calling the broker itself. See get_last_known_price's docstring
+        # for why the dashboard was calling broker.get_snapshot() directly
+        # before (a real incident, 2026-08-12 -- 504s on /api/positions).
+        self._last_known_snapshots[candidate.symbol] = snapshot
         pending = self._pending_exit_orders.get(candidate.symbol)
         if pending is not None:
             self._poll_pending_exit(candidate, snapshot, now)
@@ -2028,6 +2067,53 @@ class TradingLoop:
 
     def get_open_positions(self) -> dict[str, Position]:
         return dict(self._positions)
+
+    def get_last_known_price(self, symbol: str) -> Optional[float]:
+        """Dashboard-facing (see dashboard/app.py's /api/positions): the
+        most recent price _manage_position saw for `symbol`, already
+        fetched as part of that position's own tick processing (streaming,
+        batch REST, or a per-candidate fallback call) -- NEVER a new broker
+        call of its own. Real incident (2026-08-12): /api/positions used
+        to call broker.get_snapshot() directly, once per open position,
+        sequentially, on every single HTTP request -- through the same
+        shared, priority-queued, occasionally-exclusive (place_order/
+        place_oco_bracket) webull_limiter order placement uses. Under real
+        trading load that could queue behind CRITICAL trading traffic (or
+        a whole exclusive() hold) for tens of seconds per position, well
+        past nginx's proxy_read_timeout, producing 504s on a page that's
+        supposed to be a cheap read. Returns None if this position hasn't
+        had a tick processed yet (e.g. the instant after it was adopted/
+        opened) -- callers should treat that exactly like the old
+        get_snapshot()-failed case: no current price/unrealized P&L
+        available this refresh, nothing more alarming than that."""
+        snapshot = self._last_known_snapshots.get(symbol)
+        return snapshot.last_price if snapshot is not None else None
+
+    def get_account_summary(self) -> dict:
+        """Dashboard-facing (see dashboard/app.py's /api/status): cached
+        equity/buying_power, refreshed in the background by
+        _process_all_candidates every
+        TradingLoopConfig.account_summary_refresh_interval_seconds --
+        NEVER a live broker call made from the request thread. Same
+        real incident as get_last_known_price's docstring: /api/status
+        used to call broker.get_account_equity()/get_buying_power() live
+        on every single HTTP request, exposed to the exact same rate-
+        limiter contention. Values are None (with equity_error explaining
+        why) until the first background refresh completes -- same
+        shape/meaning /api/status already returned for a failed live
+        call, so this is a drop-in swap for the dashboard frontend, not a
+        breaking change. If a LATER refresh fails after an earlier one
+        succeeded, equity/buying_power deliberately keep their last
+        good values (stale, not None) while equity_error still reports
+        the failure -- a brief broker hiccup shouldn't blank out a number
+        that was correct 30 seconds ago; the frontend can use
+        equity_error's presence to show a "may be stale" indicator
+        without losing the last known figure entirely."""
+        return {
+            "equity": self._cached_equity,
+            "buying_power": self._cached_buying_power,
+            "equity_error": self._cached_account_summary_error,
+        }
 
     # -- startup reconciliation --------------------------------------------
 
@@ -2369,6 +2455,19 @@ class TradingLoop:
                 self.reconcile_positions_from_broker(now)
             except Exception:
                 logger.exception("Unhandled error reconciling positions against the broker.")
+
+        if (
+            self._last_account_summary_refresh is None
+            or (now - self._last_account_summary_refresh) >= timedelta(seconds=self.config.account_summary_refresh_interval_seconds)
+        ):
+            self._last_account_summary_refresh = now
+            try:
+                self._cached_equity = self.broker.get_account_equity()
+                self._cached_buying_power = self.broker.get_buying_power()
+                self._cached_account_summary_error = None
+            except Exception as exc:
+                self._cached_account_summary_error = str(exc)
+                logger.warning("Failed to refresh cached account equity/buying power this cycle.", exc_info=True)
 
         candidates = self._snapshot_candidates()
 

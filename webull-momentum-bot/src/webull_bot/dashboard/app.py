@@ -116,19 +116,18 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
 
     @app.get("/api/status")
     def get_status():
-        try:
-            equity = trading_loop.broker.get_account_equity()
-            buying_power = trading_loop.broker.get_buying_power()
-        except Exception as exc:
-            equity = buying_power = None
-            equity_error = str(exc)
-        else:
-            equity_error = None
+        # Reads TradingLoop's own periodically-refreshed cache
+        # (get_account_summary) instead of calling the broker live on
+        # every request -- see that method's docstring for the 504
+        # incident (2026-08-12) this fixes: a live call here shared the
+        # same rate-limiter queue as order placement, including its
+        # exclusive() hold during a real order submission.
+        account_summary = trading_loop.get_account_summary()
         return {
             "trading_mode": trading_mode,
-            "equity": equity,
-            "buying_power": buying_power,
-            "equity_error": equity_error,
+            "equity": account_summary["equity"],
+            "buying_power": account_summary["buying_power"],
+            "equity_error": account_summary["equity_error"],
             "candidate_count": len(trading_loop.get_candidates()),
             "open_position_count": len(trading_loop.get_open_positions()),
             "kill_switch_active": trading_loop.risk_engine.kill_switch_active,
@@ -270,13 +269,16 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
     def get_positions():
         rows = []
         for symbol, position in trading_loop.get_open_positions().items():
-            current_price = None
-            unrealized_pnl = None
-            try:
-                current_price = trading_loop.broker.get_snapshot(symbol).last_price
-                unrealized_pnl = (current_price - position.avg_entry_price) * position.quantity
-            except Exception:
-                pass
+            # Reads TradingLoop's own per-tick price cache
+            # (get_last_known_price) instead of calling broker.get_snapshot()
+            # live, once per position, on every request -- see that
+            # method's docstring for the 504 incident (2026-08-12) this
+            # fixes.
+            current_price = trading_loop.get_last_known_price(symbol)
+            unrealized_pnl = (
+                (current_price - position.avg_entry_price) * position.quantity
+                if current_price is not None else None
+            )
             rows.append({
                 "symbol": symbol,
                 "side": position.side.value,

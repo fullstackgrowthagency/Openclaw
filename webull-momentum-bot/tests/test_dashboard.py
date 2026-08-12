@@ -69,7 +69,15 @@ def client(loop, session_factory):
     return TestClient(app)
 
 
-def test_status_reports_paper_mode_and_equity(client):
+def test_status_reports_paper_mode_and_equity(loop, client):
+    # /api/status reads TradingLoop's own periodically-refreshed cache
+    # (get_account_summary), not a live broker call -- see that method's
+    # docstring for the 504 incident this replaced. Nothing populates the
+    # cache until _process_all_candidates' background refresh runs, so
+    # this test sets it directly, the same way other dashboard tests set
+    # loop._positions directly rather than driving a full tick.
+    loop._cached_equity = 25_000.0
+    loop._cached_buying_power = 25_000.0
     resp = client.get("/api/status")
     assert resp.status_code == 200
     body = resp.json()
@@ -77,6 +85,13 @@ def test_status_reports_paper_mode_and_equity(client):
     assert body["equity"] == 25_000.0
     assert body["candidate_count"] == 0
     assert body["kill_switch_active"] is False
+
+
+def test_status_reports_none_equity_before_the_cache_is_ever_populated(client):
+    resp = client.get("/api/status")
+    body = resp.json()
+    assert body["equity"] is None
+    assert body["buying_power"] is None
 
 
 def test_status_reflects_kill_switch(loop, client):
@@ -226,13 +241,17 @@ def test_scan_symbol_reports_already_tracked_state_without_rescanning(loop, clie
     assert body["state"] == "heating_up"
 
 
-def test_positions_includes_unrealized_pnl_from_live_snapshot(loop, client):
-    loop.broker.feed_snapshot(
-        MarketSnapshot(
-            symbol="TEST", timestamp=datetime.utcnow(), last_price=12.0, bid=11.9, ask=12.1,
-            bid_size=100, ask_size=100, cumulative_volume=100_000, vwap=11.5, high_of_day=12.5,
-            low_of_day=10.0, open_price=10.5,
-        )
+def test_positions_includes_unrealized_pnl_from_the_cached_price(loop, client):
+    # /api/positions reads TradingLoop's own per-tick price cache
+    # (get_last_known_price), not a live broker.get_snapshot() call -- see
+    # that method's docstring for the 504 incident this replaced. That
+    # cache is populated by _manage_position as a side effect of a real
+    # tick, so this test sets it directly rather than driving one, the
+    # same way it already sets loop._positions directly.
+    loop._last_known_snapshots["TEST"] = MarketSnapshot(
+        symbol="TEST", timestamp=datetime.utcnow(), last_price=12.0, bid=11.9, ask=12.1,
+        bid_size=100, ask_size=100, cumulative_volume=100_000, vwap=11.5, high_of_day=12.5,
+        low_of_day=10.0, open_price=10.5,
     )
     loop._positions["TEST"] = Position(
         symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0, stop_price=9.0,
@@ -247,6 +266,18 @@ def test_positions_includes_unrealized_pnl_from_live_snapshot(loop, client):
     # this position was never (and never could be) broker-bracketed -- see
     # TradingLoop._attach_broker_bracket.
     assert rows[0]["broker_managed"] is False
+
+
+def test_positions_reports_none_price_when_nothing_has_been_cached_yet(loop, client):
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0, stop_price=9.0,
+        target_price=13.0, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    resp = client.get("/api/positions")
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["current_price"] is None
+    assert rows[0]["unrealized_pnl"] is None
 
 
 def test_risk_events_reflects_live_risk_engine(loop, client):

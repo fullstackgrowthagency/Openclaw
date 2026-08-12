@@ -1208,6 +1208,114 @@ def _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0, q
     return candidate
 
 
+def test_manage_position_caches_the_ticks_price_for_the_dashboard_to_read():
+    # Real incident (2026-08-12): the dashboard's /api/positions used to
+    # call broker.get_snapshot() live, once per open position, on every
+    # single HTTP request -- through the same rate-limiter order placement
+    # uses, causing 504s under real trading load. Fixed by having
+    # _manage_position cache the snapshot it already fetches for its own
+    # stop/target check, readable via get_last_known_price with zero new
+    # broker calls.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker, symbol="TEST", price=12.0)
+
+    assert loop.get_last_known_price("TEST") is None  # nothing ticked yet
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert loop.get_last_known_price("TEST") == pytest.approx(12.0)
+
+
+def test_get_account_summary_is_populated_by_the_periodic_background_refresh():
+    # Real incident (2026-08-12): the dashboard's /api/status used to call
+    # broker.get_account_equity()/get_buying_power() live on every single
+    # HTTP request, exposed to the same rate-limiter contention as order
+    # placement. Fixed by refreshing a small cache in the background, on
+    # the main loop thread's own cadence, instead.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+
+    summary = loop.get_account_summary()
+    assert summary == {"equity": None, "buying_power": None, "equity_error": None}
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    summary = loop.get_account_summary()
+    assert summary["equity"] == pytest.approx(broker.get_account_equity())
+    assert summary["buying_power"] == pytest.approx(broker.get_buying_power())
+    assert summary["equity_error"] is None
+
+
+def test_get_account_summary_refresh_is_throttled_to_the_configured_interval():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    loop._process_all_candidates(_IN_HOURS_NOW)
+    loop._cached_equity = 999.0  # sentinel -- would be overwritten by a real refresh
+
+    loop._process_all_candidates(_IN_HOURS_NOW + timedelta(seconds=1))
+
+    assert loop._cached_equity == 999.0  # too soon since the last refresh
+
+    loop._process_all_candidates(
+        _IN_HOURS_NOW + timedelta(seconds=loop.config.account_summary_refresh_interval_seconds + 1)
+    )
+
+    assert loop._cached_equity == pytest.approx(broker.get_account_equity())
+
+
+def test_get_account_summary_reports_the_error_when_the_broker_refresh_fails():
+    class _FailingEquityBroker(PaperBrokerClient):
+        def get_account_equity(self):
+            raise RuntimeError("account balance unavailable")
+
+    broker = _FailingEquityBroker()
+    broker.connect()
+    loop = _build_loop(broker)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    summary = loop.get_account_summary()
+    assert summary["equity"] is None
+    assert summary["equity_error"] == "account balance unavailable"
+
+
+def test_get_account_summary_keeps_the_last_good_value_when_a_later_refresh_fails():
+    # A refresh failing AFTER an earlier one succeeded is handled
+    # differently from never having succeeded at all: equity/buying_power
+    # deliberately keep their last good (stale) values rather than going
+    # None, since a brief broker hiccup blanking out a number that was
+    # correct 30 seconds ago would be a worse dashboard experience than a
+    # slightly-stale one with equity_error flagging the failure.
+    calls = {"n": 0}
+
+    class _FlakyEquityBroker(PaperBrokerClient):
+        def get_account_equity(self):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise RuntimeError("account balance unavailable")
+            return super().get_account_equity()
+
+    broker = _FlakyEquityBroker()
+    broker.connect()
+    loop = _build_loop(broker)
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+    good_equity = loop.get_account_summary()["equity"]
+    assert good_equity is not None
+
+    loop._process_all_candidates(
+        _IN_HOURS_NOW + timedelta(seconds=loop.config.account_summary_refresh_interval_seconds + 1)
+    )
+
+    summary = loop.get_account_summary()
+    assert summary["equity"] == pytest.approx(good_equity)  # stale, not None
+    assert summary["equity_error"] == "account balance unavailable"
+
+
 def test_engage_kill_switch_and_flatten_blocks_new_entries_immediately():
     broker = PaperBrokerClient()
     broker.connect()
