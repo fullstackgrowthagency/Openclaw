@@ -54,6 +54,15 @@ class BreakoutPullbackStrategy(Strategy):
         self._reward_risk_ratio_fn = reward_risk_ratio_fn
         self._phase: dict[str, _Phase] = {}
         self._prior_volume_rate: dict[str, float] = {}
+        # Real bug fixed 2026-08-12: min_pullback_bars was declared and
+        # documented ("require at least this many snapshots of pulling
+        # back") but never actually read anywhere -- the PULLBACK_FORMING
+        # -> READY_TO_ENTER transition below had no bar-count check at
+        # all, so a pullback lasting exactly one tick (price dips once,
+        # reverses up on the very next snapshot) satisfied it just as
+        # readily as a genuine multi-bar pullback, defeating the quality
+        # filter this config field exists to be.
+        self._pullback_bars: dict[str, int] = {}
 
     def on_snapshot(self, candidate: Candidate, snapshot: MarketSnapshot) -> Optional[Signal]:
         if candidate.state != CandidateState.ARMED or candidate.resistance_level is None:
@@ -68,10 +77,12 @@ class BreakoutPullbackStrategy(Strategy):
                 candidate.breakout_price = snapshot.last_price
                 candidate.pullback_low = snapshot.last_price
                 self._phase[candidate.symbol] = _Phase.PULLBACK_FORMING
+                self._pullback_bars[candidate.symbol] = 0
             return None
 
         if phase == _Phase.PULLBACK_FORMING:
             assert candidate.breakout_price is not None
+            self._pullback_bars[candidate.symbol] = self._pullback_bars.get(candidate.symbol, 0) + 1
             if snapshot.last_price < (candidate.pullback_low or candidate.breakout_price):
                 candidate.pullback_low = snapshot.last_price
 
@@ -87,9 +98,14 @@ class BreakoutPullbackStrategy(Strategy):
                 self._phase[candidate.symbol] = _Phase.AWAITING_BREAKOUT
                 candidate.breakout_price = None
                 candidate.pullback_low = None
+                self._pullback_bars.pop(candidate.symbol, None)
                 return None
 
-            if metrics is not None and snapshot.last_price > (candidate.pullback_low or 0):
+            if (
+                metrics is not None
+                and snapshot.last_price > (candidate.pullback_low or 0)
+                and self._pullback_bars[candidate.symbol] >= self.config.min_pullback_bars
+            ):
                 # Price is turning back up off the pullback low -- check if momentum
                 # is returning (volume accelerating again) before arming for entry.
                 if not self.config.pullback_volume_decline_required or metrics.volume_accel_1m_3m > 1.0:
@@ -130,6 +146,7 @@ class BreakoutPullbackStrategy(Strategy):
             self._phase[candidate.symbol] = _Phase.AWAITING_BREAKOUT
             candidate.breakout_price = None
             candidate.pullback_low = None
+            self._pullback_bars.pop(candidate.symbol, None)
             return signal
 
         return None
