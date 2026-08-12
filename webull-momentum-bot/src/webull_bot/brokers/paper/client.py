@@ -143,8 +143,46 @@ class PaperBrokerClient(BrokerClient):
                 existing.quantity -= fill.quantity
                 if existing.quantity <= 0:
                     del self._state.positions[fill.symbol]
+        elif fill.side == OrderSide.SELL_SHORT:
+            # Opens/adds to a short: proceeds received now (mirrors BUY's
+            # cash outflow in direction, not sign), quantity is share count
+            # held short, avg_entry_price is the price shorted at.
+            self._state.cash += fill.price * fill.quantity - fill.fees
+            if existing is None:
+                self._state.positions[fill.symbol] = Position(
+                    symbol=fill.symbol,
+                    side=OrderSide.SELL_SHORT,
+                    quantity=fill.quantity,
+                    avg_entry_price=fill.price,
+                    stop_price=None,
+                    target_price=None,
+                    trailing_stop_pct=None,
+                    opened_at=fill.filled_at,
+                    strategy_name="unknown",
+                )
+            else:
+                total_qty = existing.quantity + fill.quantity
+                existing.avg_entry_price = (
+                    existing.avg_entry_price * existing.quantity + fill.price * fill.quantity
+                ) / total_qty
+                existing.quantity = total_qty
+        elif fill.side == OrderSide.BUY_TO_COVER:
+            # Closes/reduces a short: buying back shares costs cash now: P&L
+            # is realized in the OPPOSITE direction from a long's SELL close
+            # -- profit comes from price falling below avg_entry_price, not
+            # rising above it.
+            self._state.cash -= fill.price * fill.quantity + fill.fees
+            if existing is not None:
+                realized = (existing.avg_entry_price - fill.price) * fill.quantity
+                existing.realized_pnl += realized
+                existing.quantity -= fill.quantity
+                if existing.quantity <= 0:
+                    del self._state.positions[fill.symbol]
+        # A short position is a liability, not an asset -- its notional
+        # contribution to equity is subtracted, not added, unlike a long's.
         self._state.equity = self._state.cash + sum(
-            p.quantity * p.avg_entry_price for p in self._state.positions.values()
+            (p.quantity * p.avg_entry_price if p.side != OrderSide.SELL_SHORT else -p.quantity * p.avg_entry_price)
+            for p in self._state.positions.values()
         )
 
     def cancel_order(self, broker_order_id: str) -> None:
