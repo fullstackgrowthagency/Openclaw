@@ -258,3 +258,130 @@ def test_submit_signal_uses_caller_supplied_open_positions_not_the_brokers():
             now=datetime(2026, 8, 11, 15, 0, 0),
         )
     assert "risk" in exc_info.value.decision.reason.lower()
+
+
+# -- extended-hours order type: marketable LIMIT instead of MARKET (2026-08-12) --
+#
+# Real incident that motivated this: a resting broker-side OCO stop+target
+# bracket (STOP_LOSS+LIMIT legs) was rejected pre-market with
+# support_trading_session="ALL" (OAUTH_OPENAPI_PARAM_ERR), even though a
+# plain LIMIT order tested clean minutes earlier -- see
+# brokers/webull/client.py's _order_payload docstring. MARKET orders were
+# never actually confirmed to work outside core hours at all. A marketable
+# LIMIT (priced through the current bid/ask by
+# OrderManager.EXTENDED_HOURS_LIMIT_BUFFER_PCT) is used instead whenever
+# `now` falls outside core hours, for both entries and exits; core-hours
+# behavior (plain MARKET) is unchanged.
+
+# 09:00 UTC = 5:00am ET -- pre-market, outside core hours.
+_PRE_MARKET_NOW = datetime(2026, 8, 10, 9, 0, 0)
+
+
+def test_order_type_and_limit_price_returns_market_during_core_hours():
+    om = _order_manager(_NoRestingOrdersBroker())
+    order_type, limit_price = om._order_type_and_limit_price(
+        OrderSide.BUY, _entry_snapshot(), datetime(2026, 8, 11, 15, 0, 0),
+    )
+    assert order_type == OrderType.MARKET
+    assert limit_price is None
+
+
+def test_order_type_and_limit_price_buy_side_prices_above_the_ask_outside_core_hours():
+    om = _order_manager(_NoRestingOrdersBroker())
+    order_type, limit_price = om._order_type_and_limit_price(
+        OrderSide.BUY, _entry_snapshot(ask=10.00), _PRE_MARKET_NOW,
+    )
+    assert order_type == OrderType.LIMIT
+    assert limit_price == round(10.00 * (1 + om.EXTENDED_HOURS_LIMIT_BUFFER_PCT / 100.0), 2)
+
+
+def test_order_type_and_limit_price_sell_side_prices_below_the_bid_outside_core_hours():
+    om = _order_manager(_NoRestingOrdersBroker())
+    order_type, limit_price = om._order_type_and_limit_price(
+        OrderSide.SELL, _entry_snapshot(bid=9.98), _PRE_MARKET_NOW,
+    )
+    assert order_type == OrderType.LIMIT
+    assert limit_price == round(9.98 * (1 - om.EXTENDED_HOURS_LIMIT_BUFFER_PCT / 100.0), 2)
+
+
+def test_order_type_and_limit_price_falls_back_to_last_price_without_a_quote():
+    om = _order_manager(_NoRestingOrdersBroker())
+    order_type, limit_price = om._order_type_and_limit_price(
+        OrderSide.BUY, _entry_snapshot(bid=0.0, ask=0.0, last_price=11.0), _PRE_MARKET_NOW,
+    )
+    assert order_type == OrderType.LIMIT
+    assert limit_price == round(11.0 * (1 + om.EXTENDED_HOURS_LIMIT_BUFFER_PCT / 100.0), 2)
+
+
+def test_submit_signal_entry_uses_market_during_core_hours():
+    broker = _NoRestingOrdersBroker()
+    om = _order_manager(broker)
+    om.submit_signal(
+        _entry_signal(), snapshot=_entry_snapshot(), open_positions=[],
+        now=datetime(2026, 8, 11, 15, 0, 0),
+    )
+    placed = broker._orders[-1]
+    assert placed.order_type == OrderType.MARKET
+    assert placed.limit_price is None
+
+
+def test_submit_signal_entry_uses_marketable_limit_outside_core_hours():
+    broker = _NoRestingOrdersBroker()
+    # allow_extended_hours_trading=True -- otherwise RiskEngine.evaluate's
+    # own trading-hours gate rejects this signal before order construction
+    # is ever reached; that gate is tested separately in test_risk_engine.py,
+    # this test is only about the resulting order's TYPE/PRICE once a
+    # signal is approved.
+    risk_engine = RiskEngine(RiskConfig(allow_extended_hours_trading=True))
+    om = OrderManager(broker, risk_engine, get_settings())
+    om.submit_signal(
+        _entry_signal(), snapshot=_entry_snapshot(ask=10.00), open_positions=[],
+        now=_PRE_MARKET_NOW,
+    )
+    placed = broker._orders[-1]
+    assert placed.order_type == OrderType.LIMIT
+    assert placed.limit_price == round(10.00 * (1 + om.EXTENDED_HOURS_LIMIT_BUFFER_PCT / 100.0), 2)
+
+
+def _open_position(**overrides) -> Position:
+    base = dict(
+        symbol="ABCD", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0,
+        stop_price=9.5, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime(2026, 8, 11, 14, 0, 0), strategy_name="test",
+    )
+    base.update(overrides)
+    return Position(**base)
+
+
+def _exit_signal(**overrides) -> Signal:
+    base = dict(
+        symbol="ABCD", action=SignalAction.EXIT, generated_at=datetime(2026, 8, 11, 15, 0, 0),
+        strategy_name="test", strategy_version="v1", reference_price=10.0, suggested_stop=None,
+    )
+    base.update(overrides)
+    return Signal(**base)
+
+
+def test_submit_signal_exit_uses_market_during_core_hours():
+    broker = _NoRestingOrdersBroker()
+    om = _order_manager(broker)
+    om.submit_signal(
+        _exit_signal(), snapshot=_entry_snapshot(), position=_open_position(),
+        now=datetime(2026, 8, 11, 15, 0, 0),
+    )
+    placed = broker._orders[-1]
+    assert placed.order_type == OrderType.MARKET
+    assert placed.limit_price is None
+
+
+def test_submit_signal_exit_uses_marketable_limit_outside_core_hours():
+    broker = _NoRestingOrdersBroker()
+    om = _order_manager(broker)
+    om.submit_signal(
+        _exit_signal(), snapshot=_entry_snapshot(bid=9.98), position=_open_position(),
+        now=_PRE_MARKET_NOW,
+    )
+    placed = broker._orders[-1]
+    assert placed.order_type == OrderType.LIMIT
+    # SELL is the exit side for a long position -- prices below the bid.
+    assert placed.limit_price == round(9.98 * (1 - om.EXTENDED_HOURS_LIMIT_BUFFER_PCT / 100.0), 2)

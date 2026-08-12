@@ -128,7 +128,7 @@ from ..enums import CandidateState, ExitReason, OrderSide, OrderStatus, SignalAc
 from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
-from ..market_hours import is_within_closing_buffer
+from ..market_hours import is_within_closing_buffer, is_within_core_trading_hours
 from ..models import Candidate, MarketSnapshot, MomentumEvent, MomentumScore, Order, Position, Signal, Trade
 from ..position.position_manager import PositionManager
 from ..risk.risk_engine import RiskEngine
@@ -1231,8 +1231,30 @@ class TradingLoop:
         blip) self-heals within a few ticks without this loop ever
         blocking to wait for it -- see call_with_retry's own fast,
         429-specific inner retry for the sub-second layer underneath
-        this."""
+        this.
+
+        Outside core hours (2026-08-12): skipped entirely, before any
+        broker call is attempted -- confirmed live that a resting OCO
+        stop+target bracket (STOP_LOSS+LIMIT legs) is rejected pre-market
+        with support_trading_session="ALL" (OAUTH_OPENAPI_PARAM_ERR, the
+        same error as the original 2026-08-10 finding) even though a plain
+        LIMIT order tested clean minutes earlier -- see
+        brokers/webull/client.py's _order_payload docstring. Before this
+        gate existed, _sync_broker_protective_orders' every-tick retry (see
+        above) kept re-attempting and re-failing this call outside core
+        hours, burning CRITICAL-priority rate-limiter budget every single
+        poll cycle and starving BACKGROUND-priority discovery/candidate-
+        scanning calls behind it (observed live: candidates stopped
+        populating during a pre-market run with an open position). Leaves
+        broker_stop_order_id unset exactly like any other failed attempt,
+        so PositionManager's pure-software stop/target/VWAP-failure/
+        time-limit checks protect the position for the whole outside-core-
+        hours duration -- see that class's check_exit docstring. Resumes
+        attempting broker-side brackets normally the moment core hours
+        start again (the very next _sync_broker_protective_orders retry)."""
         if position.stop_price is None:
+            return
+        if not is_within_core_trading_hours(now):
             return
 
         exit_side = OrderSide.SELL if position.side == OrderSide.BUY else OrderSide.BUY_TO_COVER

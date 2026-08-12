@@ -14,8 +14,9 @@ from datetime import datetime
 from typing import Optional
 
 from ..config import Settings
-from ..enums import OrderStatus, OrderType, SignalAction
+from ..enums import OrderSide, OrderStatus, OrderType, SignalAction
 from ..interfaces.broker import BrokerClient
+from ..market_hours import is_within_core_trading_hours
 from ..models import MarketSnapshot, Order, Position, RiskDecision, Signal
 from ..risk.risk_engine import RiskEngine
 
@@ -27,14 +28,26 @@ class OrderRejected(Exception):
 
 
 class OrderManager:
+    # Marketable-limit buffer (2026-08-12) for entries/exits placed outside
+    # core hours -- see submit_signal's "extended_hours" branch below. Not a
+    # real economic edge given up on purpose: a plain MARKET order is
+    # apparently not accepted at all outside core hours (confirmed live --
+    # a resting OCO stop+target bracket built from STOP_LOSS+LIMIT legs was
+    # rejected with support_trading_session="ALL" at 9:10am ET pre-market,
+    # the same OAUTH_OPENAPI_PARAM_ERR as the original 2026-08-10 finding,
+    # even though a plain LIMIT order tested clean minutes earlier -- see
+    # brokers/webull/client.py's _order_payload docstring). A LIMIT order
+    # priced this far through the current quote should fill essentially
+    # like a market order in normal conditions while staying within
+    # whatever the broker actually accepts pre-market/after-hours.
+    EXTENDED_HOURS_LIMIT_BUFFER_PCT = 0.5
+
     def __init__(self, broker: BrokerClient, risk_engine: RiskEngine, settings: Settings):
         self.broker = broker
         self.risk_engine = risk_engine
         self.settings = settings
 
     def _side_for_action(self, action: SignalAction):
-        from ..enums import OrderSide
-
         return {
             SignalAction.ENTER_LONG: OrderSide.BUY,
             SignalAction.SCALE_IN: OrderSide.BUY,
@@ -42,6 +55,29 @@ class OrderManager:
             SignalAction.SCALE_OUT: OrderSide.SELL,
             SignalAction.ENTER_SHORT: OrderSide.SELL_SHORT,
         }[action]
+
+    def _order_type_and_limit_price(
+        self, side: OrderSide, snapshot: MarketSnapshot, now: datetime
+    ) -> tuple[OrderType, Optional[float]]:
+        """MARKET (no limit_price) during core hours -- unchanged behavior.
+        Outside core hours (pre-market/after-hours, gated by
+        RiskConfig.allow_extended_hours_trading before a signal even
+        reaches here for entries; always possible for an exit if a
+        position is still open when core hours end), a marketable LIMIT
+        instead: buy-side orders (BUY/BUY_TO_COVER) priced
+        EXTENDED_HOURS_LIMIT_BUFFER_PCT above the current ask, sell-side
+        orders (SELL/SELL_SHORT) priced the same % below the current bid
+        -- aggressive enough to fill like a market order under normal
+        conditions. Falls back to snapshot.last_price when bid/ask are
+        both falsy (e.g. a very thin pre-market quote), same fallback
+        RiskEngine.evaluate's own spread calculation uses."""
+        if is_within_core_trading_hours(now):
+            return OrderType.MARKET, None
+        buy_like = side in (OrderSide.BUY, OrderSide.BUY_TO_COVER)
+        reference = (snapshot.ask if buy_like else snapshot.bid) or snapshot.last_price
+        buffer = reference * self.EXTENDED_HOURS_LIMIT_BUFFER_PCT / 100.0
+        limit_price = reference + buffer if buy_like else reference - buffer
+        return OrderType.LIMIT, round(limit_price, 2)
 
     def submit_signal(
         self,
@@ -85,14 +121,17 @@ class OrderManager:
         `now`: forwarded to RiskEngine.evaluate (entries only -- exits don't
         call evaluate at all, see above), which needs it for the core-trading-
         hours gate as well as its existing daily-rollover/cooldown checks.
-        Left as None defaults evaluate() to the real wall clock
-        (datetime.utcnow()), which is what every live call site wants and
-        historically got implicitly. Backtests and the live trading loop
-        both already compute a `now` per tick/per bar for their own state
-        transitions -- pass that same value here too, so e.g. a backtest
-        replaying historical bars gates entries against the *simulated*
-        bar's timestamp instead of the real wall-clock time the backtest
-        happens to be run at."""
+        Also used (both entries AND exits, 2026-08-12) by
+        _order_type_and_limit_price to decide MARKET vs. a marketable LIMIT
+        -- see that method's docstring. Left as None defaults to the real
+        wall clock (datetime.utcnow(), resolved once into `effective_now`
+        below), which is what every live call site wants and historically
+        got implicitly. Backtests and the live trading loop both already
+        compute a `now` per tick/per bar for their own state transitions --
+        pass that same value here too, so e.g. a backtest replaying
+        historical bars gates entries against the *simulated* bar's
+        timestamp instead of the real wall-clock time the backtest happens
+        to be run at."""
 
         if self.broker.is_live:
             # Belt-and-suspenders: OrderManager itself refuses to route to a live
@@ -101,6 +140,8 @@ class OrderManager:
             # already checked this.
             self.settings.require_non_live_or_authorized()
 
+        effective_now = now or datetime.utcnow()
+
         if signal.action in (SignalAction.EXIT, SignalAction.SCALE_OUT):
             if position is None:
                 raise ValueError(f"{signal.action.value} signal for {signal.symbol} requires the open position")
@@ -108,10 +149,13 @@ class OrderManager:
             # PositionManager.check_exit only emits SCALE_OUT when
             # position.quantity >= 2 specifically so this is never zero.
             quantity = position.quantity if signal.action == SignalAction.EXIT else int(position.quantity // 2)
+            exit_side = self._side_for_action(signal.action)
+            order_type, limit_price = self._order_type_and_limit_price(exit_side, snapshot, effective_now)
             order = Order(
                 symbol=signal.symbol,
-                side=self._side_for_action(signal.action),
-                order_type=OrderType.MARKET,
+                side=exit_side,
+                order_type=order_type,
+                limit_price=limit_price,
                 quantity=quantity,
                 status=OrderStatus.PENDING,
                 client_order_id=str(uuid.uuid4()),
@@ -148,10 +192,13 @@ class OrderManager:
         if not decision.approved or not decision.max_shares:
             raise OrderRejected(decision)
 
+        entry_side = self._side_for_action(signal.action)
+        order_type, limit_price = self._order_type_and_limit_price(entry_side, snapshot, effective_now)
         order = Order(
             symbol=signal.symbol,
-            side=self._side_for_action(signal.action),
-            order_type=OrderType.MARKET,
+            side=entry_side,
+            order_type=order_type,
+            limit_price=limit_price,
             quantity=decision.max_shares,
             status=OrderStatus.PENDING,
             client_order_id=str(uuid.uuid4()),

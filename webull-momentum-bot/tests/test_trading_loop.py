@@ -66,6 +66,8 @@ def _snapshot(t, last_price, high_of_day, cumulative_volume, bid, ask, vwap) -> 
 # this file's assertions about entries/positions depend on what time of day
 # (and day of week) the suite happens to run.
 _IN_HOURS_NOW = datetime(2026, 8, 10, 15, 0, 0)
+# 09:00 UTC = 5:00am ET on the same day -- pre-market, outside core hours.
+_PRE_MARKET_NOW = datetime(2026, 8, 10, 9, 0, 0)
 
 
 def _build_bars() -> list[MarketSnapshot]:
@@ -1388,7 +1390,7 @@ def test_kill_switch_flatten_still_cancels_a_resting_bracket_not_just_pending_ex
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
     assert stop_id is not None
     assert "TEST" not in loop._pending_exit_orders  # only a resting bracket, no close in flight
@@ -2099,7 +2101,7 @@ def test_attach_broker_bracket_places_stop_and_target_when_supported():
         opened_at=datetime.utcnow(), strategy_name="test",
     )
 
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert position.broker_stop_order_id is not None
     assert position.broker_target_order_id is not None
@@ -2111,6 +2113,32 @@ def test_attach_broker_bracket_places_stop_and_target_when_supported():
     assert stop_order.stop_price == 4.50
     assert target_order.quantity == 5  # floored half
     assert target_order.limit_price == 5.50
+
+
+def test_attach_broker_bracket_is_a_noop_outside_core_hours():
+    # Real incident, 2026-08-12: a resting OCO stop+target bracket was
+    # rejected pre-market with support_trading_session="ALL" (the same
+    # OAUTH_OPENAPI_PARAM_ERR as the original 2026-08-10 finding), and
+    # _sync_broker_protective_orders' every-tick retry kept re-attempting
+    # and re-failing this call, burning CRITICAL-priority rate-limiter
+    # budget every poll cycle and starving candidate discovery behind it.
+    # Outside core hours this must now no-op BEFORE any broker call --
+    # confirmed here by asserting the broker's own bracket-tracking list
+    # stays empty, not just that the position ends up unbracketed (which a
+    # failed API call would also produce).
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop._attach_broker_bracket(candidate, position, _PRE_MARKET_NOW)
+
+    assert position.broker_stop_order_id is None
+    assert position.broker_target_order_id is None
+    assert len(broker._brackets) == 0
 
 
 def test_attach_broker_bracket_places_lone_stop_when_no_target():
@@ -2131,7 +2159,7 @@ def test_attach_broker_bracket_places_lone_stop_when_no_target():
         opened_at=datetime.utcnow(), strategy_name="test",
     )
 
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert position.broker_stop_order_id is not None
     assert position.broker_target_order_id is None
@@ -2154,7 +2182,7 @@ def test_attach_broker_bracket_is_a_noop_without_broker_support():
         opened_at=datetime.utcnow(), strategy_name="test",
     )
 
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert position.broker_stop_order_id is None
     assert position.broker_target_order_id is None
@@ -2169,7 +2197,7 @@ def test_attach_broker_bracket_never_rearms_target_after_partial_exit_taken():
         opened_at=datetime.utcnow(), strategy_name="test", partial_exit_taken=True,
     )
 
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert position.broker_target_order_id is None
     assert broker._brackets == []
@@ -2191,7 +2219,7 @@ def test_attach_broker_bracket_uses_trailing_stop_once_partial_exit_taken():
         opened_at=datetime.utcnow(), strategy_name="test", partial_exit_taken=True,
     )
 
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert position.broker_stop_order_id is not None
     assert position.broker_target_order_id is None
@@ -2212,7 +2240,7 @@ def test_attach_broker_bracket_falls_back_to_plain_stop_when_trailing_disabled()
         opened_at=datetime.utcnow(), strategy_name="test", partial_exit_taken=True,
     )
 
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert position.broker_stop_is_trailing is False
     assert len(broker._lone_stops) == 1
@@ -2234,7 +2262,7 @@ def test_attach_broker_bracket_cancels_a_leftover_resting_order_before_going_tra
     )
     position.broker_stop_order_id = "stale-stop-id"
 
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert "stale-stop-id" in broker._cancelled
     assert position.broker_stop_is_trailing is True
@@ -2281,12 +2309,12 @@ def test_poll_broker_bracket_skips_individual_calls_when_still_resting_per_batch
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     assert position.broker_stop_order_id is not None
     assert position.broker_target_order_id is not None
     broker.get_order_status_calls = 0  # ignore any calls from attaching the bracket itself
 
-    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+    handled = loop._poll_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert handled is False
     assert broker.list_open_orders_calls == 1
@@ -2310,7 +2338,7 @@ def test_poll_broker_bracket_falls_back_to_individual_call_for_a_leg_missing_fro
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
     broker._resting_orders[stop_id].status = OrderStatus.FILLED
     broker._resting_orders[stop_id].quantity = 10
@@ -2318,7 +2346,7 @@ def test_poll_broker_bracket_falls_back_to_individual_call_for_a_leg_missing_fro
 
     trades = []
     loop.on_trade_closed = trades.append
-    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+    handled = loop._poll_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert handled is True
     assert len(trades) == 1
@@ -2347,10 +2375,10 @@ def test_poll_broker_bracket_falls_back_entirely_without_list_open_orders_suppor
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     broker.get_order_status_calls = 0
 
-    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+    handled = loop._poll_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert handled is False
     # No batching capability at all -- both legs fall back to their own
@@ -2366,7 +2394,7 @@ def test_get_open_orders_for_tick_shares_one_broker_call_within_a_pass():
         stop_price=4.50, target_price=None, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test",
     )
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     broker.list_open_orders_calls = 0
 
     first = loop._get_open_orders_for_tick()
@@ -2391,7 +2419,7 @@ def test_poll_broker_bracket_finalizes_full_exit_on_stop_fill():
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
     assert stop_id is not None
 
@@ -2401,7 +2429,7 @@ def test_poll_broker_bracket_finalizes_full_exit_on_stop_fill():
 
     trades = []
     loop.on_trade_closed = trades.append
-    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+    handled = loop._poll_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert handled is True
     assert "TEST" not in loop._positions
@@ -2425,7 +2453,7 @@ def test_poll_broker_bracket_finalizes_partial_exit_on_target_fill_and_reprotect
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     target_id = position.broker_target_order_id
     assert target_id is not None
     assert len(broker._brackets) == 1
@@ -2435,7 +2463,7 @@ def test_poll_broker_bracket_finalizes_partial_exit_on_target_fill_and_reprotect
 
     trades = []
     loop.on_trade_closed = trades.append
-    handled = loop._poll_broker_bracket(candidate, position, datetime.utcnow())
+    handled = loop._poll_broker_bracket(candidate, position, _IN_HOURS_NOW)
 
     assert handled is True
     assert "TEST" in loop._positions  # remainder stays open
@@ -2462,11 +2490,11 @@ def test_sync_broker_protective_orders_replaces_stop_when_price_moved():
         stop_price=4.50, target_price=None, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test",
     )
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     old_stop_id = position.broker_stop_order_id
 
     position.stop_price = 5.00  # simulate PositionManager's breakeven bump
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)
 
     assert old_stop_id in broker._cancelled
     assert position.broker_stop_order_id is not None
@@ -2483,12 +2511,12 @@ def test_sync_broker_protective_orders_replaces_both_legs_when_target_still_acti
         stop_price=4.50, target_price=5.50, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test",
     )
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     old_stop_id = position.broker_stop_order_id
     old_target_id = position.broker_target_order_id
 
     position.stop_price = 5.00
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)
 
     assert old_stop_id in broker._cancelled
     assert old_target_id in broker._cancelled
@@ -2510,12 +2538,12 @@ def test_sync_broker_protective_orders_is_a_noop_for_a_trailing_stop():
         stop_price=4.80, target_price=None, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test", partial_exit_taken=True,
     )
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     assert position.broker_stop_is_trailing is True
     trailing_order_id = position.broker_stop_order_id
 
     position.stop_price = 5.50  # a large software-side trailing move
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)
 
     assert trailing_order_id not in broker._cancelled
     assert position.broker_stop_order_id == trailing_order_id
@@ -2529,10 +2557,10 @@ def test_sync_broker_protective_orders_is_a_noop_when_stop_unchanged():
         stop_price=4.50, target_price=None, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test",
     )
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
 
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)
 
     assert broker._cancelled == []
     assert position.broker_stop_order_id == stop_id
@@ -2549,11 +2577,11 @@ def test_sync_broker_protective_orders_ignores_a_move_below_the_threshold():
         stop_price=4.50, target_price=None, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test",
     )
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
 
     position.stop_price = 4.5045  # +0.1% -- below the 0.25% default threshold
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)
 
     assert broker._cancelled == []
     assert position.broker_stop_order_id == stop_id
@@ -2568,11 +2596,11 @@ def test_sync_broker_protective_orders_acts_on_a_move_at_or_above_the_threshold(
         stop_price=4.50, target_price=None, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test",
     )
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
 
     position.stop_price = 4.52  # ~+0.44% -- above the 0.25% default threshold
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)
 
     assert stop_id in broker._cancelled
     assert position.broker_stop_price_synced == 4.52
@@ -2587,11 +2615,11 @@ def test_stop_sync_min_move_pct_is_configurable():
         stop_price=4.50, target_price=None, trailing_stop_pct=None,
         opened_at=datetime.utcnow(), strategy_name="test",
     )
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
 
     position.stop_price = 4.60  # ~+2.2% -- would clear the 0.25% default, not this 5% override
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)
 
     assert broker._cancelled == []
     assert position.broker_stop_order_id == stop_id
@@ -2610,7 +2638,7 @@ def test_sync_broker_protective_orders_is_a_permanent_noop_when_broker_unsupport
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     position.stop_price = 5.00
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)
     assert position.broker_stop_order_id is None
 
 
@@ -2630,7 +2658,7 @@ def test_sync_broker_protective_orders_retries_a_previously_failed_attach():
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     position.stop_price = 5.00
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)
     assert position.broker_stop_order_id is not None
     assert position.broker_stop_price_synced == 5.00
 
@@ -2655,11 +2683,11 @@ def test_sync_broker_protective_orders_keeps_retrying_across_ticks_until_it_succ
     )
     position.stop_price = 5.00
 
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())  # tick 1: fails
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)  # tick 1: fails
     assert position.broker_stop_order_id is None
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())  # tick 2: fails
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)  # tick 2: fails
     assert position.broker_stop_order_id is None
-    loop._sync_broker_protective_orders(candidate, position, datetime.utcnow())  # tick 3: succeeds
+    loop._sync_broker_protective_orders(candidate, position, _IN_HOURS_NOW)  # tick 3: succeeds
     assert position.broker_stop_order_id is not None
 
 
@@ -2678,7 +2706,7 @@ def test_manage_position_finalizes_via_broker_bracket_without_submitting_its_own
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
     broker._resting_orders[stop_id].status = OrderStatus.FILLED
     broker._resting_orders[stop_id].quantity = 10
@@ -2715,7 +2743,7 @@ def test_manage_position_cancels_resting_orders_before_a_vwap_failure_exit():
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
     assert stop_id is not None
 
@@ -2742,7 +2770,7 @@ def test_close_all_positions_now_cancels_resting_orders_before_flattening():
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
     assert stop_id is not None
 
@@ -2787,7 +2815,7 @@ def test_reconcile_cancels_resting_orders_when_dropping_an_externally_closed_pos
         opened_at=datetime.utcnow(), strategy_name="test",
     )
     loop._positions["TEST"] = position
-    loop._attach_broker_bracket(candidate, position, datetime.utcnow())
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
     stop_id = position.broker_stop_order_id
     assert stop_id is not None
     # Broker itself has no position for TEST at all (e.g. closed manually in

@@ -1580,6 +1580,18 @@ in `WebullBrokerClient`) -- the highest rate-limiter tier, so a retry
 here wins contention over discovery/resistance-refresh traffic exactly
 like every other exit-critical call in this codebase.
 
+**Exception, added 2026-08-12: this whole every-tick retry is skipped
+outside core hours.** `_attach_broker_bracket` no-ops immediately
+(before any broker call) whenever `now` is outside core hours -- a
+resting `STOP_LOSS`-leg bracket is expected to be rejected there
+regardless of `support_trading_session`, and retrying it every tick was
+observed live burning this same CRITICAL-tier rate-limiter budget
+continuously, starving discovery. Positions still open outside core
+hours fall back to `PositionManager`'s pure-software checks for as long
+as that lasts. See "Webull integration"'s extended-hours follow-up
+below for the full incident and `OrderManager._order_type_and_limit_price`
+for the matching MARKET-vs-LIMIT change on the entry/exit side.
+
 ## Extra position-based confirmation for a TRIGGERED entry (2026-08-11)
 
 A `TRIGGERED` candidate (entry order submitted, not yet confirmed filled)
@@ -2451,6 +2463,54 @@ Four non-obvious things worth knowing if you're debugging this client:
    this is an explicit per-deployment opt-in. **Caveat: only verified in
    `TRADING_MODE=sandbox`** -- re-verify with a live-mode test before
    assuming a live account carries the same entitlement.
+
+   **Follow-up, same morning: `"ALL"` does NOT mean every order type is
+   accepted outside core hours.** At 9:10am ET (still pre-market), the
+   live bot's real `_attach_broker_bracket` call -- a resting OCO
+   stop+target bracket, `combo_type="OCO"` with a `STOP_LOSS` leg and a
+   `LIMIT` leg -- was rejected with `support_trading_session="ALL"` using
+   the EXACT SAME error as the original 2026-08-10 finding
+   (`OAUTH_OPENAPI_PARAM_ERR`, "invalid support_trading_session, value:
+   ALL"), even though the simple single-leg LIMIT order
+   `verify_extended_hours_order.py` tested 49 minutes earlier came back
+   clean. The user's diagnosis, which fits both observations: Webull only
+   accepts LIMIT orders outside core hours -- a common brokerage
+   restriction -- so a `STOP_LOSS`-type leg (or possibly the `OCO`
+   combo shape itself) is rejected regardless of `support_trading_session`,
+   while a plain `LIMIT` order is fine. Not independently confirmed via
+   Webull's own docs/support (the working theory, not a proven root
+   cause) but consistent with everything observed so far and a much
+   simpler explanation than another entitlement flip 49 minutes apart.
+   Compounding this: `_sync_broker_protective_orders`' every-tick retry
+   (see "Broker-side (resting) stop/target management" above) kept
+   re-attempting and re-failing this exact call every ~5s, burning
+   CRITICAL-priority rate-limiter budget continuously and starving
+   BACKGROUND-priority discovery/candidate-scanning calls behind it --
+   observed live as candidates failing to populate during this same
+   window.
+
+   **Design change as a result (2026-08-12): pre-market/after-hours now
+   uses LIMIT orders exclusively, with no broker-side resting stop/target
+   at all -- core hours are completely unchanged.**
+   `OrderManager._order_type_and_limit_price` (used by `submit_signal` for
+   both entries and exits) returns a plain `MARKET` order during core
+   hours, or a marketable `LIMIT` outside them -- priced
+   `OrderManager.EXTENDED_HOURS_LIMIT_BUFFER_PCT` (0.5% default) through
+   the current bid/ask (above the ask for a buy-side order, below the bid
+   for a sell-side order), aggressive enough to fill like a market order
+   under normal conditions while staying within whatever order type the
+   broker actually accepts. Separately, `TradingLoop._attach_broker_bracket`
+   now no-ops immediately (before any broker call) whenever `now` falls
+   outside core hours, rather than attempting and retrying a STOP-based
+   resting bracket that's expected to keep failing -- this both stops the
+   rate-limit-starving retry loop above and means a pre-market/after-hours
+   position is protected purely by `PositionManager`'s existing
+   software-side stop/target/VWAP-failure/time-limit checks (the same
+   fallback path used for any broker without resting-order support at
+   all -- see `check_exit`'s docstring), for as long as it stays open
+   outside core hours. The moment core hours resume, the very next
+   `_sync_broker_protective_orders` retry attaches a normal broker-side
+   bracket as usual.
 
 Streaming (`subscribe_quotes`) is confirmed live and working (2026-08-11) --
 see the "Streaming market data" section above and `scripts/verify_streaming.py`.
