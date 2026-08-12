@@ -124,7 +124,7 @@ from typing import Callable, Iterable, Optional
 
 from ..brokers.webull.retry import CallPriority
 from ..collection.event_recorder import MomentumEventTracker
-from ..enums import CandidateState, ExitReason, OrderSide, OrderStatus, SignalAction
+from ..enums import CandidateState, ExitReason, OrderSide, OrderStatus, RiskEventType, SignalAction
 from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
@@ -267,6 +267,26 @@ class TradingLoopConfig:
     # attach) -- only ever slows down how often it's retried.
     exit_submission_backoff_base_seconds: float = 5.0
     exit_submission_backoff_max_seconds: float = 60.0
+    # How long a MANAGING position can go with no broker-side protective
+    # bracket (position.broker_stop_order_id still None) before TradingLoop
+    # raises a RiskEventType.POSITION_UNPROTECTED_TOO_LONG event -- see
+    # _manage_position's check and RiskEngine.record_operational_event.
+    # _attach_broker_bracket/_sync_broker_protective_orders keep retrying
+    # every tick regardless of this value (this is visibility, not a
+    # circuit breaker -- see Position.broker_bracket_attach_failures'
+    # deliberate absence from this codebase, referenced in several nearby
+    # docstrings, for why a give-up-after-N mechanism was rejected here).
+    # The gap this closes: a structurally broken order payload (e.g. an
+    # unverified field name Webull silently rejects every single time)
+    # would otherwise make this retry loop fail forever with NOTHING
+    # surfaced anywhere a human would actually see it -- the position just
+    # quietly rides on software-only management for its whole lifetime.
+    # 60s (12 ticks at the 5s poll_interval_seconds default) is long enough
+    # that a single transient 429/rate-limit blip self-healing within a
+    # few ticks (the normal case) never fires this, but short enough that
+    # a genuinely stuck position is flagged within about a minute rather
+    # than being discovered by accident hours later.
+    unprotected_position_alert_seconds: float = 60.0
     # How long a candidate can sit TRIGGERED (entry order submitted, not yet
     # confirmed filled) before _poll_pending_entry also cross-checks
     # broker.get_positions() directly, on top of (not instead of) the
@@ -1554,6 +1574,57 @@ class TradingLoop:
 
         position.broker_stop_order_id = stop_order.broker_order_id
         position.broker_stop_price_synced = position.stop_price
+        # A later unprotected stretch (e.g. after a future cancel+replace
+        # cycle) should be able to raise its own fresh alert rather than
+        # staying silently suppressed by a flag left over from this
+        # earlier, now-resolved episode -- see
+        # Position.unprotected_alert_logged's docstring.
+        position.unprotected_alert_logged = False
+
+    def _maybe_raise_unprotected_position_alert(self, candidate: Candidate, position: Position, now: datetime) -> None:
+        """Visibility, not a circuit breaker: _attach_broker_bracket/
+        _sync_broker_protective_orders already retry attaching a real
+        broker-side bracket every tick, unconditionally, forever (see
+        those methods' docstrings) -- this doesn't change that. What it
+        adds is a single, one-time RiskEventType.POSITION_UNPROTECTED_TOO_LONG
+        event (surfaced on the dashboard's existing Risk Events panel,
+        RiskEngine.events) once a position has gone
+        TradingLoopConfig.unprotected_position_alert_seconds or longer
+        riding on software-only management, so a structurally broken
+        order payload that can NEVER succeed (e.g. an unverified field
+        name Webull silently rejects on every single attempt) doesn't
+        fail completely silently for the rest of the position's
+        lifetime -- a human watching the dashboard actually sees it.
+
+        Uses position.opened_at as the start of the unprotected clock
+        (not a separate "first attach attempt" timestamp): a fresh
+        position always has _attach_broker_bracket attempted synchronously
+        in the same tick it's created (_confirm_entry_filled), so the two
+        are effectively the same moment in practice, and reusing opened_at
+        avoids adding another timestamp field just for this. No-op if
+        already broker-managed (broker_stop_order_id is not None) or if
+        this exact unprotected stretch already raised its one alert
+        (position.unprotected_alert_logged, reset by _attach_broker_bracket
+        the moment it next succeeds)."""
+        if position.broker_stop_order_id is not None:
+            return
+        if position.unprotected_alert_logged:
+            return
+        if now - position.opened_at < timedelta(seconds=self.config.unprotected_position_alert_seconds):
+            return
+        position.unprotected_alert_logged = True
+        self.risk_engine.record_operational_event(
+            RiskEventType.POSITION_UNPROTECTED_TOO_LONG,
+            candidate.symbol,
+            (
+                f"{candidate.symbol} has had no broker-side protective bracket for at least "
+                f"{self.config.unprotected_position_alert_seconds:.0f}s -- riding on software-"
+                f"only position management. The bot keeps retrying every tick, but this is worth "
+                f"checking (broker rejection reason in the logs, sustained rate-limit contention, "
+                f"or a genuinely unsupported order payload)."
+            ),
+            now,
+        )
 
     def _cancel_broker_protective_orders(self, symbol: str, position: Position) -> None:
         """Cancels any resting broker-side stop/target orders still
@@ -1795,6 +1866,7 @@ class TradingLoop:
         exit_signal = self.position_manager.check_exit(position, snapshot, now=now)
         if exit_signal is None:
             self._sync_broker_protective_orders(candidate, position, now)
+            self._maybe_raise_unprotected_position_alert(candidate, position, now)
             return
 
         if position.exit_submission_failures > 0 and position.last_exit_submission_attempt_at is not None:

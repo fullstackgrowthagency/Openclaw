@@ -397,6 +397,16 @@ class Position:
     exit_submission_failures: int = 0
     last_exit_submission_attempt_at: Optional[datetime] = None
 
+    # True once TradingLoop._manage_position has already raised a
+    # RiskEventType.POSITION_UNPROTECTED_TOO_LONG event for this position's
+    # current unprotected stretch -- prevents re-logging the same warning
+    # every tick for as long as _attach_broker_bracket keeps failing.
+    # Reset to False by _attach_broker_bracket the moment it succeeds, so a
+    # LATER stretch without protection (e.g. after a cancel+replace cycle)
+    # can raise a fresh event rather than staying silently suppressed by a
+    # flag from a completely different episode.
+    unprotected_alert_logged: bool = False
+
 
 @dataclass
 class Trade:

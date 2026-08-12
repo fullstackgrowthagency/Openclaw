@@ -1959,6 +1959,99 @@ as that lasts. See "Webull integration"'s extended-hours follow-up
 below for the full incident and `OrderManager._order_type_and_limit_price`
 for the matching MARKET-vs-LIMIT change on the entry/exit side.
 
+### Visibility for a broker bracket that can never attach (2026-08-12)
+
+The user asked directly: is there anything else that can be done to
+**ensure** a position is broker-managed every time during core hours,
+not just software-managed? A thorough audit of every skip/retry path in
+`_attach_broker_bracket`/`_sync_broker_protective_orders` confirmed the
+retry design is already about as strong as it can be made without
+reintroducing the reverted circuit breaker (see below): unconditional,
+every-tick, forever, at `CallPriority.CRITICAL`, with no cap on attempt
+count. The honest limit isn't the retry logic itself -- it's that a
+retry loop can only ever succeed against a call that's CAPABLE of
+succeeding. Two real gaps found during the audit, neither fixable by
+retrying harder:
+
+1. **Two fields feeding every bracket leg's order payload are explicitly
+   flagged UNVERIFIED in the code that builds them** -- `_order_payload`'s
+   `stop_price` field name (`client.py`, "current strategies only ever
+   submit MARKET orders... this path has not been exercised live") and
+   the entire `TRAILING_STOP_LOSS` order type (used post-partial-exit,
+   see "Position management (exits)" above's trailing-stop section). If
+   either is wrong, EVERY attach attempt for that leg type fails, forever
+   -- not "briefly," not "eventually self-heals" -- because the payload
+   itself is structurally wrong, not rate-limited or transiently
+   rejected. The retry loop cannot distinguish this from an ordinary
+   transient failure; it just keeps trying at the same cadence either
+   way. **Action for the user:** run `scripts/verify_bracket_orders.py`
+   and `scripts/verify_trailing_stop.py` live, during core hours, against
+   a real fill, to close these two unverified fields the same way every
+   other "UNVERIFIED" flag in this codebase has eventually been closed
+   (price rounding, `total_quantity`, `filled_price`, ...). This can't be
+   done from a non-market-hours investigation -- both scripts need a
+   real order to attach a bracket to.
+2. **`market_hours.is_within_core_trading_hours` has no market-holiday
+   or early-close calendar** -- it's purely a weekday + 9:30-16:00 ET
+   time-window check. On a weekday market holiday (Thanksgiving,
+   Christmas, ...) or an early-close day (the day after Thanksgiving,
+   which closes at 1:00pm ET), this function has no way to know the
+   exchange isn't actually open for the nominal window, and would keep
+   reporting core hours as active. If Webull genuinely rejects
+   bracket-attach calls once the exchange is actually closed, the
+   every-tick retry would resume exactly the CRITICAL-tier rate-limiter-
+   burning failure mode the core-hours gate above was built to prevent
+   (see that gate's own incident write-up) -- just relocated to an
+   early-close afternoon instead of pre-market. **Not yet fixed** --
+   this is a real, plausible gap (a handful of days per year), but a
+   correct, low-maintenance holiday calendar is more involved than the
+   fix below and wasn't implemented without the user weighing in on
+   whether it's worth the added complexity/yearly upkeep first.
+
+**What WAS added: a one-time visibility alert, not a new retry
+mechanism.** `TradingLoop._maybe_raise_unprotected_position_alert`
+(called from `_manage_position`, right after `_sync_broker_protective_
+orders`) raises a single `RiskEventType.POSITION_UNPROTECTED_TOO_LONG`
+event -- surfaced on the dashboard's existing Risk Events panel via
+`RiskEngine.record_operational_event` (a new public counterpart to
+`RiskEngine._log_event`, for callers outside the class that need to
+share the same events list) -- once a `MANAGING` position has gone
+`TradingLoopConfig.unprotected_position_alert_seconds` (60s default, 12
+ticks at the 5s `poll_interval_seconds` default) with no broker-side
+bracket. This closes the actual dangerous gap: without it, a
+structurally broken payload (gap #1 above) would fail completely
+silently for that position's ENTIRE lifetime -- retried forever, visible
+nowhere except a per-position `broker_managed: false` flag on the
+dashboard's Positions table that's easy to not notice in the moment.
+Fires once per unprotected "episode" (`Position.unprotected_alert_logged`,
+reset by `_attach_broker_bracket` the instant it next succeeds, so a
+LATER unprotected stretch -- e.g. after a future cancel+replace cycle --
+can raise its own fresh alert rather than staying suppressed by a flag
+from an earlier, already-resolved one). 60s is long enough that an
+ordinary transient 429/network blip self-healing within a few ticks
+(the normal case) never fires this, short enough that a genuinely stuck
+position is flagged within about a minute of going `MANAGING`, not
+discovered by accident hours later. See
+`tests/test_trading_loop.py`'s `test_maybe_raise_unprotected_position_alert_fires_after_the_threshold`,
+`test_maybe_raise_unprotected_position_alert_only_fires_once_per_episode`,
+`test_maybe_raise_unprotected_position_alert_is_a_noop_once_broker_managed`,
+`test_manage_position_wires_the_unprotected_alert_check_end_to_end`,
+`test_attach_broker_bracket_resets_the_unprotected_alert_flag_on_success`,
+and `tests/test_risk_engine.py::test_record_operational_event_surfaces_on_the_shared_events_list`.
+
+**Deliberately NOT a circuit breaker.** `Position.broker_bracket_attach_
+failures` -- a field that gave up permanently after N failed attempts
+and fell back to software-only management -- existed at some point and
+was explicitly reverted (its name survives only as a contrast in nearby
+docstrings, e.g. this same section's exit-backoff note and the module
+docstring). Re-adding anything shaped like it would reintroduce exactly
+the RDGT failure mode broker-side bracketing exists to prevent: a
+position permanently accepting weaker protection instead of a broker
+that would have succeeded on attempt N+1. This alert changes nothing
+about the retry behavior itself -- `_attach_broker_bracket` keeps trying
+forever either way, alerted or not -- it only makes an otherwise-silent
+failure visible to a human.
+
 ## Extra position-based confirmation for a TRIGGERED entry (2026-08-11)
 
 A `TRIGGERED` candidate (entry order submitted, not yet confirmed filled)

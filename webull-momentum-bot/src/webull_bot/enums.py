@@ -117,6 +117,18 @@ class RiskEventType(str, Enum):
     MIN_RISK_REWARD_NOT_MET = "min_risk_reward_not_met"
     OUTSIDE_CORE_TRADING_HOURS = "outside_core_trading_hours"
     ENTRIES_TEMPORARILY_PAUSED = "entries_temporarily_paused"
+    # A MANAGING position has gone TradingLoopConfig.
+    # unprotected_position_alert_seconds or longer with no broker-side
+    # stop/target bracket -- riding on this process's own software-side
+    # checks alone. _attach_broker_bracket/_sync_broker_protective_orders
+    # keep retrying every tick regardless (this event doesn't change that
+    # -- see TradingLoop._manage_position), but a retry loop that can
+    # never succeed against a structurally broken order payload would
+    # otherwise fail completely silently forever. Not a rejection of any
+    # SIGNAL (unlike every other RiskEventType above, all raised from
+    # RiskEngine.evaluate itself) -- raised by TradingLoop via
+    # RiskEngine.record_operational_event instead.
+    POSITION_UNPROTECTED_TOO_LONG = "position_unprotected_too_long"
 
 
 class MomentumOutcome(str, Enum):

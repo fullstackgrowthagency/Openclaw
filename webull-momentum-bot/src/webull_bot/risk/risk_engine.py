@@ -211,6 +211,18 @@ class RiskEngine:
             RiskEvent(event_type=event_type.value, symbol=symbol, timestamp=now or datetime.utcnow(), reason=reason)
         )
 
+    def record_operational_event(
+        self, event_type: RiskEventType, symbol: Optional[str], reason: str, now: Optional[datetime] = None,
+    ) -> None:
+        """Public counterpart to _log_event, for callers OUTSIDE this class
+        that need to surface something onto the same events list/dashboard
+        panel `evaluate()`'s own internal rejections already use -- e.g.
+        TradingLoop reporting a position that's gone too long without a
+        broker-side protective bracket (POSITION_UNPROTECTED_TOO_LONG).
+        Not a signal rejection, just a shared, already-visible place to put
+        an operational warning a human should notice."""
+        self._log_event(event_type, symbol, reason, now)
+
     # -- core gate ---------------------------------------------------------
 
     def evaluate(

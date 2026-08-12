@@ -144,6 +144,22 @@ def test_rejects_when_kill_switch_active():
     assert not decision.approved
 
 
+def test_record_operational_event_surfaces_on_the_shared_events_list():
+    # Public counterpart to _log_event, for callers outside RiskEngine
+    # (TradingLoop) that need to raise something onto the same events
+    # list/dashboard panel evaluate()'s own rejections already use --
+    # e.g. RiskEventType.POSITION_UNPROTECTED_TOO_LONG.
+    from webull_bot.enums import RiskEventType
+
+    engine = RiskEngine()
+    engine.record_operational_event(RiskEventType.POSITION_UNPROTECTED_TOO_LONG, "TEST", "still unprotected")
+
+    assert len(engine.events) == 1
+    assert engine.events[0].event_type == RiskEventType.POSITION_UNPROTECTED_TOO_LONG.value
+    assert engine.events[0].symbol == "TEST"
+    assert engine.events[0].reason == "still unprotected"
+
+
 def test_rejects_new_entries_during_a_pause_window():
     # Dashboard's per-position "Close" button (TradingLoop.
     # request_manual_close) -- distinct from the kill switch: a short,

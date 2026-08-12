@@ -709,6 +709,38 @@ What's implemented and tested:
   -- `webull_limiter` is one process-wide singleton, not scoped per
   symbol/client instance/thread, so any two `place_order` calls anywhere
   in the process serialize regardless of which stock they're for.
+- **A position that's gone too long without a broker-side bracket now
+  raises a visible alert instead of failing silently forever.** The user
+  asked directly whether anything more could be done to guarantee a
+  position is broker-managed every time during core hours.
+  `_attach_broker_bracket`/`_sync_broker_protective_orders` already retry
+  unconditionally, every tick, forever, at `CallPriority.CRITICAL` -- an
+  audit confirmed that design is already about as strong as it can be
+  made without reintroducing the reverted `broker_bracket_attach_failures`
+  circuit breaker (see above), and found the honest limit isn't the retry
+  logic, it's that a retry loop can only succeed against a call CAPABLE
+  of succeeding. Two of `_order_payload`'s fields feeding every bracket
+  leg are explicitly flagged UNVERIFIED in the code itself (`stop_price`'s
+  field name, and the entire `TRAILING_STOP_LOSS` order type) -- if
+  either is wrong, every attach attempt fails forever, not transiently,
+  and the retry loop can't tell the difference. **Fix, not a new retry
+  mechanism:** `TradingLoop._maybe_raise_unprotected_position_alert`
+  raises one `RiskEventType.POSITION_UNPROTECTED_TOO_LONG` event (new
+  `RiskEngine.record_operational_event`, surfaced on the dashboard's
+  existing Risk Events panel) once a `MANAGING` position has gone
+  `unprotected_position_alert_seconds` (60s default) with no
+  `broker_stop_order_id` -- closing the real gap, which was that a
+  structurally broken payload would otherwise fail completely silently
+  for a position's entire lifetime. Fires once per unprotected episode,
+  resets the moment `_attach_broker_bracket` next succeeds. See
+  `docs/ARCHITECTURE.md`'s "Visibility for a broker bracket that can
+  never attach" section for the full audit, including two open items
+  flagged but not auto-implemented pending the user's input: running
+  `scripts/verify_bracket_orders.py`/`verify_trailing_stop.py` live to
+  close the two UNVERIFIED payload fields, and whether
+  `market_hours.py`'s core-hours check is worth hardening against market
+  holidays/early closes (currently a pure weekday+time-window check with
+  no calendar awareness).
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

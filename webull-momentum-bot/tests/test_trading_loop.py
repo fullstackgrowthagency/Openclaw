@@ -1316,6 +1316,86 @@ def test_get_account_summary_keeps_the_last_good_value_when_a_later_refresh_fail
     assert summary["equity_error"] == "account balance unavailable"
 
 
+def test_maybe_raise_unprotected_position_alert_fires_after_the_threshold():
+    # The user asked how to ensure broker-managed protection every time
+    # during core hours: _attach_broker_bracket/_sync_broker_protective_
+    # orders already retry forever (no circuit breaker), but a
+    # structurally broken order payload could make that retry loop fail
+    # forever with nothing surfaced anywhere -- this is the visibility
+    # fix for that gap, not a new retry mechanism.
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()  # never supports resting orders
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
+    position = loop._positions["TEST"]
+
+    loop._maybe_raise_unprotected_position_alert(candidate, position, position.opened_at)
+    assert loop.risk_engine.events == []
+
+    loop._maybe_raise_unprotected_position_alert(
+        candidate, position,
+        position.opened_at + timedelta(seconds=loop.config.unprotected_position_alert_seconds + 1),
+    )
+
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.POSITION_UNPROTECTED_TOO_LONG.value]
+    assert len(alerts) == 1
+    assert alerts[0].symbol == "TEST"
+    assert position.unprotected_alert_logged is True
+
+
+def test_maybe_raise_unprotected_position_alert_only_fires_once_per_episode():
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
+    position = loop._positions["TEST"]
+    past_threshold = position.opened_at + timedelta(seconds=loop.config.unprotected_position_alert_seconds + 1)
+
+    loop._maybe_raise_unprotected_position_alert(candidate, position, past_threshold)
+    loop._maybe_raise_unprotected_position_alert(candidate, position, past_threshold + timedelta(seconds=30))
+
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.POSITION_UNPROTECTED_TOO_LONG.value]
+    assert len(alerts) == 1
+
+
+def test_maybe_raise_unprotected_position_alert_is_a_noop_once_broker_managed():
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
+    position = loop._positions["TEST"]
+    position.broker_stop_order_id = "resting-stop-1"
+
+    loop._maybe_raise_unprotected_position_alert(
+        candidate, position,
+        position.opened_at + timedelta(seconds=loop.config.unprotected_position_alert_seconds + 1),
+    )
+
+    assert not any(e.event_type == RiskEventType.POSITION_UNPROTECTED_TOO_LONG.value for e in loop.risk_engine.events)
+
+
+def test_manage_position_wires_the_unprotected_alert_check_end_to_end():
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
+    position = loop._positions["TEST"]
+    snapshot = _snapshot(_IN_HOURS_NOW, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    later = position.opened_at + timedelta(seconds=loop.config.unprotected_position_alert_seconds + 1)
+
+    loop._manage_position(candidate, snapshot, later)
+
+    assert any(e.event_type == RiskEventType.POSITION_UNPROTECTED_TOO_LONG.value for e in loop.risk_engine.events)
+
+
 def test_engage_kill_switch_and_flatten_blocks_new_entries_immediately():
     broker = PaperBrokerClient()
     broker.connect()
@@ -2730,6 +2810,26 @@ def test_attach_broker_bracket_cancels_a_leftover_resting_order_before_going_tra
 
     assert "stale-stop-id" in broker._cancelled
     assert position.broker_stop_is_trailing is True
+
+
+def test_attach_broker_bracket_resets_the_unprotected_alert_flag_on_success():
+    # A later unprotected stretch should be able to raise its own fresh
+    # alert rather than staying suppressed by a flag left over from an
+    # earlier, now-resolved episode -- see
+    # Position.unprotected_alert_logged's docstring.
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=5, avg_entry_price=5.00,
+        stop_price=4.80, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    position.unprotected_alert_logged = True
+
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
+
+    assert position.broker_stop_order_id is not None
+    assert position.unprotected_alert_logged is False
 
 
 def test_confirm_entry_filled_attaches_broker_bracket_when_supported():
