@@ -565,6 +565,24 @@ What's implemented and tested:
   top of `RiskEngine`'s own gating, not a replacement for it, and
   shouldn't turn a transient broker hiccup into a missed legitimate
   entry.
+- **`_build_trade_for_external_close`'s exit-price fallback chain used to
+  land on `avg_entry_price` far too easily, fabricating an exact $0.00
+  P&L.** Confirmed live 2026-08-12 via a dashboard screenshot: WCT closed
+  with neither a matched `poll_fills` result nor a `stop_price`/
+  `target_price` set (both `None` by the time the position was confirmed
+  externally closed), so the chain fell all the way to
+  `position.avg_entry_price` -- recording entry=exit=1.04, an exact
+  $0.00/0.00% trade regardless of what actually happened to the position.
+  This wasn't a display/formatting bug (negative P&L already renders
+  correctly elsewhere, e.g. a real -$55,979.72 loss shown in red) -- the
+  fallback price itself was wrong. Fixed by inserting a fresh
+  `broker.get_snapshot(symbol).last_price` call ahead of the
+  `avg_entry_price` last resort: a live quote taken at detection time is
+  still real market data and strictly better evidence than silently
+  assuming break-even. `avg_entry_price` now only fires when even a live
+  snapshot fails (e.g. broker error). See
+  `tests/test_trading_loop.py::test_reconcile_external_close_falls_back_to_a_live_snapshot_not_entry_price`
+  and `::test_reconcile_external_close_falls_back_to_entry_price_only_as_a_last_resort`.
 - **A stuck exit-order retry now backs off instead of hammering the
   broker every tick.** Real incident (CYCU/SCKT, 2026-08-12): a genuine
   stop-loss exit signal kept firing every `poll_interval_seconds` tick,

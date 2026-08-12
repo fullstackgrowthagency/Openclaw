@@ -1906,11 +1906,17 @@ class TradingLoop:
         exit_price here is a genuine best-effort approximation, not a
         confirmed fill price -- tries broker.poll_fills() first (an exit-
         side fill for this symbol at/after the position's opened_at is
-        almost certainly the real closing fill), falling back to the same
-        stop/target/entry-price chain _build_trade_from_fill already uses
-        when poll_fills comes up empty or fails. Callers needing the exact
-        real fill price/time should prefer a Webull order-history backfill
-        (scripts/*) over trusting this approximation once one exists."""
+        almost certainly the real closing fill), then the position's own
+        stop/target price, then a fresh broker.get_snapshot() (real,
+        still-fetchable market data even though the account no longer
+        holds the position), and only falls all the way back to
+        avg_entry_price -- which fabricates an exact $0 P&L regardless of
+        what actually happened -- as an absolute last resort when every
+        other source is unavailable. Confirmed live 2026-08-12: WCT had
+        neither a matched fill nor a stop_price/target_price set, so this
+        chain used to land straight on avg_entry_price and record a
+        misleadingly exact break-even trade no matter what the real
+        outcome was."""
         exit_side = OrderSide.SELL if position.side == OrderSide.BUY else OrderSide.BUY_TO_COVER
         exit_price = None
         try:
@@ -1924,7 +1930,19 @@ class TradingLoop:
             logger.warning("poll_fills failed while building an external-close Trade for %s.", symbol, exc_info=True)
 
         if exit_price is None:
-            exit_price = position.stop_price or position.target_price or position.avg_entry_price
+            exit_price = position.stop_price or position.target_price
+
+        if exit_price is None:
+            try:
+                exit_price = self.broker.get_snapshot(symbol).last_price
+            except Exception:
+                logger.warning(
+                    "get_snapshot failed while building a fallback exit price for %s's "
+                    "external-close Trade.", symbol, exc_info=True,
+                )
+
+        if exit_price is None:
+            exit_price = position.avg_entry_price
 
         pnl = (exit_price - position.avg_entry_price) * position.quantity
         pnl_pct = (

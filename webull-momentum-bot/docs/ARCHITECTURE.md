@@ -1367,6 +1367,25 @@ stays consistent regardless of which path closed a position), and invokes
 `test_reconcile_records_a_trade_for_an_externally_closed_position_using_a_real_fill`
 and `test_reconcile_records_a_trade_for_an_externally_closed_position_falling_back_without_a_fill`.
 
+**The fallback chain used to land on `avg_entry_price` far too easily,
+fabricating an exact $0.00 P&L -- fixed the same day.** Confirmed live
+2026-08-12 via a dashboard screenshot: WCT closed with neither a matched
+`poll_fills` result nor a `stop_price`/`target_price` set (both `None` by
+the time the position was confirmed externally closed), so the chain fell
+straight to `position.avg_entry_price` -- recording entry=exit=1.04, an
+exact $0.00/0.00% "trade" no matter what actually happened to the real
+position. This was not a display/formatting limitation (negative P&L
+already renders correctly elsewhere in the dashboard, e.g. a real
+-$55,979.72 loss shown in red) -- the fallback price itself was simply
+wrong. **Fix:** insert a fresh `broker.get_snapshot(symbol).last_price`
+call ahead of the `avg_entry_price` last resort -- a live quote taken at
+detection time is still real market data, and strictly better evidence
+than silently assuming a break-even close. `avg_entry_price` is now only
+reached if even that live snapshot call fails (e.g. a broker error). See
+`tests/test_trading_loop.py`'s
+`test_reconcile_external_close_falls_back_to_a_live_snapshot_not_entry_price`
+and `test_reconcile_external_close_falls_back_to_entry_price_only_as_a_last_resort`.
+
 **Still an approximation, not a guarantee of the real fill price/time --
 a Webull order-history backfill would be strictly better, and was
 explored the same day but is not yet working.** `order_v3.get_order_history`

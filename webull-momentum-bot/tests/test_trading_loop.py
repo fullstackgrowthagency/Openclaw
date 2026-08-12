@@ -1935,6 +1935,66 @@ def test_reconcile_records_a_trade_for_an_externally_closed_position_falling_bac
     assert trades[0].exit_price == pytest.approx(4.50)  # falls back to stop_price
 
 
+def test_reconcile_external_close_falls_back_to_a_live_snapshot_not_entry_price():
+    # Real gap (2026-08-12, WCT): no matching fill AND no stop_price/
+    # target_price set -- the fallback chain used to land straight on
+    # avg_entry_price, fabricating an exact $0.00/0.00% "trade" no matter
+    # what actually happened. A fresh live snapshot is real market data
+    # and strictly better evidence than silently assuming break-even.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState, ExitReason
+
+    broker = _FakeBroker()  # get_snapshot always returns last_price=5.20
+    loop, candidate = _armed_candidate_setup(broker)
+    trades = []
+    loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=1.04, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.EXTERNAL_CLOSE
+    assert trades[0].exit_price == pytest.approx(5.20)  # live snapshot, not avg_entry_price
+    assert trades[0].pnl != 0.0
+
+
+def test_reconcile_external_close_falls_back_to_entry_price_only_as_a_last_resort():
+    # avg_entry_price is only reached when even a live snapshot fails.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState, ExitReason
+
+    class _SnapshotFailsBroker(_FakeBroker):
+        def get_snapshot(self, symbol):
+            raise RuntimeError("snapshot unavailable")
+
+    broker = _SnapshotFailsBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    trades = []
+    loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=1.04, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.EXTERNAL_CLOSE
+    assert trades[0].exit_price == pytest.approx(1.04)
+    assert trades[0].pnl == pytest.approx(0.0)
+
+
 def test_reconcile_does_not_drop_a_position_missing_from_a_single_pass():
     # The bug this guards against (2026-08-12): a live position (BIVI) was
     # dropped from tracking -- and its candidate pushed straight to
