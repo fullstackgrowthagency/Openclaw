@@ -381,6 +381,22 @@ class Position:
     # STOP for their whole lifetime, same as before this field existed.
     broker_stop_is_trailing: bool = False
 
+    # -- software-side exit-submission backoff -----------------------------
+    # Real incident (CYCU/SCKT, 2026-08-12): a genuine exit signal (stop-
+    # loss/VWAP-failure/time-limit) kept firing every single tick, and
+    # broker.place_order kept raising on sustained TOO_MANY_REQUESTS --
+    # with no backoff of its own, TradingLoop._manage_position retried the
+    # exact same place_order call again next tick regardless, adding to
+    # (not easing) the very rate-limit contention blocking it, for two
+    # positions simultaneously, for many consecutive minutes, while the
+    # unrealized loss kept growing. Unlike Position.broker_bracket_attach_
+    # failures (a nice-to-have that can safely give up and fall back to
+    # software management), an exit submission can NEVER be allowed to
+    # give up -- these two fields drive a growing backoff between retries
+    # instead, easing self-inflicted pressure without ever stopping.
+    exit_submission_failures: int = 0
+    last_exit_submission_attempt_at: Optional[datetime] = None
+
 
 @dataclass
 class Trade:

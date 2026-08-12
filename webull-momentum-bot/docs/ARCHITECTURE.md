@@ -1466,6 +1466,68 @@ here shouldn't cost a legitimate entry. See
 `test_submit_entry_proceeds_normally_when_broker_has_no_existing_position`,
 and `test_submit_entry_proceeds_when_the_broker_check_itself_fails`.
 
+**A stuck exit-order retry had no backoff at all -- fixed the same day
+(CYCU/SCKT).** `_manage_position`'s `except Exception:` branch (around
+software-side exit submission, see its docstring for the RDGT incident
+that added it) logs and returns on a `broker.place_order` failure so
+`PositionManager.check_exit` re-evaluates fresh next tick -- correct in
+principle (an exit must never give up), but with no throttle of its own,
+"next tick" meant every single `poll_interval_seconds` (5s default)
+regardless of how many times the exact same call had already failed.
+Confirmed live: a genuine stop-loss condition on two positions
+simultaneously (CYCU, SCKT) kept retrying `place_order` every 5s for
+many consecutive minutes, each attempt failing on
+`TOO_MANY_REQUESTS` -- the retries themselves were adding to the exact
+rate-limit contention blocking them, a self-reinforcing loop, while the
+unrealized loss on one of the two grew past $70,000. Distinct from the
+`_attach_broker_bracket` circuit breaker (`broker_bracket_attach_failures`,
+which gives up permanently after N failures and falls back to
+software-only management) -- an exit submission is the last line of
+defense already; there is no "fall back" state to give up into, so
+giving up was never an option here.
+
+**Fix:** two new `Position` fields, `exit_submission_failures` (a
+consecutive-failure counter) and `last_exit_submission_attempt_at`.
+Right after `check_exit` returns a real signal, `_manage_position` now
+checks whether it's still within an exponential backoff window computed
+from those two fields (`exit_submission_backoff_base_seconds` \*
+2^(failures-1), capped at `exit_submission_backoff_max_seconds` -- 5s,
+10s, 20s, 40s, 60s(capped), 60s, ... with the defaults) and, if so,
+returns immediately without attempting the broker call at all -- zero
+network cost for a tick that would only have failed again anyway. On an
+actual failure the counter increments and the timestamp updates (logged
+now with the computed next-retry delay, not just "will retry next
+tick"); on success the counter resets to zero. This never stops
+retrying -- only slows down how OFTEN it retries, trading a few extra
+seconds of an already-losing position staying open for not actively
+worsening the rate-limit contention that's blocking its own exit. See
+`tests/test_trading_loop.py`'s
+`test_manage_position_backs_off_after_a_failed_exit_submission` and
+`test_manage_position_exit_backoff_caps_and_resets_on_success`.
+
+**Longer-term direction discussed the same day, not yet built:** the
+user's own diagnosis was that ALL of this session's rate-limit-driven
+incidents (this one, the earlier BIVI/reconcile saga, candidates
+starving during bracket-attach storms) share one root cause -- this bot
+tracks order/position state by polling REST endpoints
+(`get_order_status`, `poll_fills`, `get_positions`) far more often than
+necessary, and wants position/order tracking to move to Webull's push-
+based gRPC trade-events stream (`webull.trade.trade_events_client.
+TradeEventsClient`, see `scripts/verify_trade_events_streaming.py`)
+instead, cutting REST call volume at the source rather than continuing
+to patch each individual symptom. Live-confirmed the same day: the
+sandbox host is `events-api.sandbox.webull.com` (not the SDK's bundled
+default `events-api.webull.com`, which rejects this account's app key
+outright with `PERMISSION_DENIED`), and a `do_subscribe()` call
+succeeds against it -- but no real order/position event has been
+captured yet (the listener ran clean with zero messages during a
+window where, per the logs, real order activity WAS happening
+elsewhere in the account, which is itself worth understanding before
+concluding streaming is reliable enough to become the sole source of
+truth). This backoff fix stops the immediate bleeding; the streaming
+migration remains the intended actual fix and is the next real piece of
+work, not yet started.
+
 Called from `_process_all_candidates`, throttled by
 `TradingLoopConfig.position_reconcile_interval_seconds` (default 30s) --
 but firing immediately on that method's very first-ever call regardless,

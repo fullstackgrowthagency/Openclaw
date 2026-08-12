@@ -3030,6 +3030,98 @@ def test_manage_position_cancels_resting_orders_before_a_vwap_failure_exit():
     assert position.broker_target_order_id is None
 
 
+def test_manage_position_backs_off_after_a_failed_exit_submission():
+    # Real incident (CYCU/SCKT, 2026-08-12): a genuine stop-loss exit
+    # signal kept firing every tick, and place_order kept raising on
+    # sustained rate-limiting -- with no backoff, this retried the exact
+    # same call again next tick regardless, adding to the very contention
+    # blocking it, for many consecutive minutes.
+    class _FlakyExitBroker(_FakeBroker):
+        place_order_calls = 0
+
+        def place_order(self, order):
+            self.place_order_calls += 1
+            raise RuntimeError("simulated broker outage")
+
+    broker = _FlakyExitBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.90, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+
+    # last_price below stop_price -- check_exit fires a real STOP_LOSS
+    # signal on every call.
+    snapshot = _snapshot(_IN_HOURS_NOW, 4.50, 4.50, 600_000, 4.49, 4.51, 4.40)
+    loop._manage_position(candidate, snapshot, snapshot.timestamp)
+
+    assert broker.place_order_calls == 1
+    assert position.exit_submission_failures == 1
+    assert position.last_exit_submission_attempt_at == snapshot.timestamp
+
+    # Still within the 5s base backoff window -- must NOT retry.
+    loop._manage_position(candidate, snapshot, snapshot.timestamp + timedelta(seconds=1))
+    assert broker.place_order_calls == 1
+    assert position.exit_submission_failures == 1
+
+    # Past the backoff window -- retries, and the failure count/backoff grow.
+    loop._manage_position(candidate, snapshot, snapshot.timestamp + timedelta(seconds=6))
+    assert broker.place_order_calls == 2
+    assert position.exit_submission_failures == 2
+
+
+def test_manage_position_exit_backoff_caps_and_resets_on_success():
+    class _EventuallySucceedingBroker(_FakeBroker):
+        fail_count = 0
+        place_order_calls = 0
+
+        def place_order(self, order):
+            self.place_order_calls += 1
+            if self.fail_count > 0:
+                self.fail_count -= 1
+                raise RuntimeError("simulated broker outage")
+            return super().place_order(order)
+
+    broker = _EventuallySucceedingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.90, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    snapshot = _snapshot(_IN_HOURS_NOW, 4.50, 4.50, 600_000, 4.49, 4.51, 4.40)
+
+    # Fail 4 times to exceed exit_submission_backoff_max_seconds (60s)'s
+    # cap -- base 5s -> 5, 10, 20, 40, then capped at 60, not 80.
+    broker.fail_count = 4
+    t = snapshot.timestamp
+    for _ in range(4):
+        loop._manage_position(candidate, snapshot, t)
+        t += timedelta(seconds=61)  # always past whatever the current backoff is
+    assert position.exit_submission_failures == 4
+    assert broker.place_order_calls == 4
+
+    # 5th attempt succeeds -- failure count resets.
+    loop._manage_position(candidate, snapshot, t)
+    assert broker.place_order_calls == 5
+    assert position.exit_submission_failures == 0
+
+
 def test_close_all_positions_now_cancels_resting_orders_before_flattening():
     broker = _RestingBroker(fills_after_polls=1)
     loop, candidate = _armed_candidate_setup(broker)

@@ -237,6 +237,20 @@ class TradingLoopConfig:
     # trading a little responsiveness there for never abandoning a real,
     # still-open position on one flaky poll.
     position_missing_confirmations_required: int = 2
+    # Exponential backoff base/ceiling for retrying a failed exit-order
+    # submission -- see Position.exit_submission_failures' docstring for
+    # the real incident (CYCU/SCKT, 2026-08-12) this fixes: with no
+    # backoff at all, a stuck exit retried every single
+    # poll_interval_seconds tick regardless of how many times it had
+    # already failed, adding to the exact rate-limit contention blocking
+    # it. Delay is exit_submission_backoff_base_seconds *
+    # 2^(failures - 1), capped at exit_submission_backoff_max_seconds --
+    # 5s, 10s, 20s, 40s, 60s(capped), 60s, ... with the defaults below.
+    # Never gives up entirely (see that field's docstring for why an exit
+    # must not use the same give-up-after-N pattern as broker bracket
+    # attach) -- only ever slows down how often it's retried.
+    exit_submission_backoff_base_seconds: float = 5.0
+    exit_submission_backoff_max_seconds: float = 60.0
     # How long a candidate can sit TRIGGERED (entry order submitted, not yet
     # confirmed filled) before _poll_pending_entry also cross-checks
     # broker.get_positions() directly, on top of (not instead of) the
@@ -1744,6 +1758,23 @@ class TradingLoop:
             self._sync_broker_protective_orders(candidate, position, now)
             return
 
+        if position.exit_submission_failures > 0 and position.last_exit_submission_attempt_at is not None:
+            # Backing off after a previous submission failure -- see
+            # Position.exit_submission_failures' docstring for the real
+            # incident (CYCU/SCKT, 2026-08-12) this guards against:
+            # retrying a failed exit unconditionally every single tick
+            # only added to the rate-limit contention that was blocking
+            # it in the first place. Skip this tick's attempt entirely
+            # (no network call at all) until the backoff window clears --
+            # check_exit will simply fire the same signal again next tick
+            # once it does, same as if this tick had never run.
+            delay = min(
+                self.config.exit_submission_backoff_base_seconds * (2 ** (position.exit_submission_failures - 1)),
+                self.config.exit_submission_backoff_max_seconds,
+            )
+            if now - position.last_exit_submission_attempt_at < timedelta(seconds=delay):
+                return
+
         if position.broker_stop_order_id is not None or position.broker_target_order_id is not None:
             # A software-side exit for a broker-managed position only ever
             # happens for VWAP failure / time limit (see
@@ -1776,11 +1807,19 @@ class TradingLoop:
             # back to ARMED), but now logs specifically that IT WAS THE
             # EXIT SUBMISSION that failed, for this symbol, with the real
             # traceback, the instant it happens.
+            position.exit_submission_failures += 1
+            position.last_exit_submission_attempt_at = now
+            next_delay = min(
+                self.config.exit_submission_backoff_base_seconds * (2 ** (position.exit_submission_failures - 1)),
+                self.config.exit_submission_backoff_max_seconds,
+            )
             logger.exception(
                 "broker.place_order raised submitting an exit (%s) for %s -- position remains open, "
-                "will retry next tick.", exit_signal.action.value, candidate.symbol,
+                "will retry in %.0fs (%d consecutive failures).", exit_signal.action.value, candidate.symbol,
+                next_delay, position.exit_submission_failures,
             )
             return
+        position.exit_submission_failures = 0
         self._notify_order_update(order)
 
         if order.status == OrderStatus.FILLED:

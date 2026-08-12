@@ -565,6 +565,23 @@ What's implemented and tested:
   top of `RiskEngine`'s own gating, not a replacement for it, and
   shouldn't turn a transient broker hiccup into a missed legitimate
   entry.
+- **A stuck exit-order retry now backs off instead of hammering the
+  broker every tick.** Real incident (CYCU/SCKT, 2026-08-12): a genuine
+  stop-loss exit signal kept firing every `poll_interval_seconds` tick,
+  and `broker.place_order` kept raising on sustained
+  `TOO_MANY_REQUESTS` -- with no backoff of its own, `_manage_position`
+  retried the exact same call again next tick regardless of how many
+  times it had already failed, adding to (not easing) the very
+  rate-limit contention blocking it, for two positions simultaneously,
+  for many consecutive minutes, while the unrealized loss kept growing.
+  `Position.exit_submission_failures`/`last_exit_submission_attempt_at`
+  now drive an exponential backoff between retries
+  (`exit_submission_backoff_base_seconds` \* 2^(failures-1), capped at
+  `exit_submission_backoff_max_seconds` -- 5s/10s/20s/40s/60s(capped) by
+  default) -- unlike `broker_bracket_attach_failures`, this never gives
+  up entirely (an exit can't be allowed to just stop retrying), it only
+  ever slows the retry cadence down. Resets to zero on the next
+  successful submission.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and
