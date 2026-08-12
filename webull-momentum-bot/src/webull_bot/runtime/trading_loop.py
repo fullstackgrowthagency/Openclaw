@@ -277,17 +277,6 @@ class TradingLoopConfig:
     # engaging the full kill switch (which would also force-close every
     # OTHER open position, not just the one requested).
     manual_close_entry_pause_seconds: float = 20.0
-    # See Position.broker_bracket_attach_failures' docstring for the real
-    # incident this addresses. Once a position's broker-side bracket
-    # attach has failed this many consecutive times, _attach_broker_bracket
-    # stops retrying it (permanently, for this position) rather than
-    # burning a CRITICAL-priority place_order call on every single tick
-    # forever against a position whose broker-side data may simply never
-    # allow it to succeed. 5 ticks (~poll_interval_seconds apart, so well
-    # under a minute by default) is enough to absorb ordinary transient
-    # failures (a 429, a brief network blip) without giving up on those,
-    # while still capping the damage from a genuinely permanent failure.
-    max_broker_bracket_attach_failures: int = 5
 
 
 class TradingLoop:
@@ -1331,21 +1320,10 @@ class TradingLoop:
         time-limit checks protect the position for the whole outside-core-
         hours duration -- see that class's check_exit docstring. Resumes
         attempting broker-side brackets normally the moment core hours
-        start again (the very next _sync_broker_protective_orders retry).
-
-        Also gives up permanently (same no-op contract) once
-        position.broker_bracket_attach_failures reaches
-        TradingLoopConfig.max_broker_bracket_attach_failures -- see that
-        field's docstring for the real incident (two positions whose
-        broker-side data was permanently inconsistent burned a real
-        CRITICAL-priority place_order call on every tick forever, with no
-        way for this retry logic to tell "transient" apart from
-        "permanent" from the exception alone)."""
+        start again (the very next _sync_broker_protective_orders retry)."""
         if position.stop_price is None:
             return
         if not is_within_core_trading_hours(now):
-            return
-        if position.broker_bracket_attach_failures >= self.config.max_broker_bracket_attach_failures:
             return
 
         exit_side = OrderSide.SELL if position.side == OrderSide.BUY else OrderSide.BUY_TO_COVER
@@ -1432,14 +1410,10 @@ class TradingLoop:
                 position.broker_target_order_id = None
                 position.broker_stop_is_trailing = False
         except Exception:
-            position.broker_bracket_attach_failures += 1
-            giving_up = position.broker_bracket_attach_failures >= self.config.max_broker_bracket_attach_failures
             logger.exception(
-                "Failed to attach broker-side protective order(s) for %s (%d/%d consecutive failures) -- "
-                "riding on software-only position management for now, %s.", candidate.symbol,
-                position.broker_bracket_attach_failures, self.config.max_broker_bracket_attach_failures,
-                "giving up on broker-side brackets for this position" if giving_up
-                else "will keep retrying to attach a real broker-side bracket every tick until it succeeds",
+                "Failed to attach broker-side protective order(s) for %s -- riding on software-only "
+                "position management for now, will keep retrying to attach a real broker-side "
+                "bracket every tick until it succeeds.", candidate.symbol,
             )
             position.broker_stop_order_id = None
             position.broker_target_order_id = None
@@ -1447,7 +1421,6 @@ class TradingLoop:
             position.broker_stop_is_trailing = False
             return
 
-        position.broker_bracket_attach_failures = 0
         position.broker_stop_order_id = stop_order.broker_order_id
         position.broker_stop_price_synced = position.stop_price
 

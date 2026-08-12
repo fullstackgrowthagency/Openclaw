@@ -1592,36 +1592,7 @@ as that lasts. See "Webull integration"'s extended-hours follow-up
 below for the full incident and `OrderManager._order_type_and_limit_price`
 for the matching MARKET-vs-LIMIT change on the entry/exit side.
 
-**Second exception, added the same day: gives up permanently after
-`TradingLoopConfig.max_broker_bracket_attach_failures` (5) consecutive
-failures on the SAME position.** Real incident: two positions
-(`reconciled_at_startup`, i.e. adopted at process startup rather than
-opened by this bot's own entry flow) had broker-side data that was
-permanently inconsistent -- Webull rejected every resting-order attempt
-against them with `OAUTH_OPENAPI_ORDER_NOT_SUPPORT_REVERSE_OPTION`
-("would reverse the position"), reproduced identically regardless of
-order type (MARKET/LIMIT), `support_trading_session` (CORE/ALL), or
-quantity (full size down to 1 share) -- confirmed via direct one-off
-`place_order` calls bypassing this codebase entirely, so this is a
-Webull sandbox data-integrity issue, not a bug here. With no threshold,
-`_sync_broker_protective_orders`' retry-every-tick design (see above)
-kept re-attempting and re-failing these two positions' bracket attach
-FOREVER, each attempt a real `place_order` call at `CallPriority.CRITICAL`
--- `CallPriority` only helps CRITICAL win against BACKGROUND (discovery)
-traffic, not against other CRITICAL traffic, so this was silently
-starving candidate discovery indefinitely (observed live: candidates
-stopped populating with these two positions still open). `Position.
-broker_bracket_attach_failures` (reset to 0 on any success) tracks
-consecutive failures per position; `_attach_broker_bracket` checks it
-first thing and no-ops once the ceiling is reached, exactly as if the
-broker never supported resting orders for that position at all. 5 ticks
-(well under a minute at the default `poll_interval_seconds`) is enough
-margin to ride out an ordinary transient failure (a 429, a brief network
-blip) without giving up on those. No way to un-stick a position once
-this ceiling is hit except closing it outside this bot's normal flow
-entirely (see the "Per-position Close button" note below -- notably,
-these two specific positions can't even be closed that way, since ANY
-sell attempt against them hits the same broker-side rejection).
+## Extra position-based confirmation for a TRIGGERED entry (2026-08-11)
 
 A `TRIGGERED` candidate (entry order submitted, not yet confirmed filled)
 is normally confirmed purely by `_poll_pending_entry` polling
