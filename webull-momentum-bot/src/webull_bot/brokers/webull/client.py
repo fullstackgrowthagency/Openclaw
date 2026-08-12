@@ -1153,49 +1153,47 @@ class WebullBrokerClient(BrokerClient):
             # so a candidate value can be tested live via
             # WEBULL_SUPPORT_TRADING_SESSION + a restart, no deploy needed
             # -- see Settings.webull_support_trading_session's docstring.
-            # Defaults to "CORE", the only value confirmed to work:
+            # Defaults to "CORE" in code (unchanged, deliberately
+            # conservative -- see below), but "ALL" is now CONFIRMED LIVE TO
+            # WORK, reversing the 2026-08-10 finding below. History:
             # confirmed live on 2026-08-10 that this account/endpoint
-            # REJECTS "ALL" outright: OAUTH_OPENAPI_PARAM_ERR ("Parameter
+            # REJECTED "ALL" outright: OAUTH_OPENAPI_PARAM_ERR ("Parameter
             # error, invalid support_trading_session, value: ALL"), HTTP
-            # 417. This directly contradicts Webull's own public OpenAPI
-            # docs (developer.webull.com/apis/docs/trade-api/stock/), which
-            # (re-checked 2026-08-12) document exactly three values --
-            # CORE (regular hours only), ALL (core + pre-market +
-            # after-hours), NIGHT (overnight session only) -- with ALL
-            # explicitly described as the one to use for extended-hours
-            # orders. A real API response overrides that documentation, not
-            # the other way around. Corroborating evidence found 2026-08-12:
-            # the SDK's OWN bundled sample scripts (samples/trade/
-            # trade_client_v2.py, trade_client_v3.py) never once pass "ALL"
-            # either, across every order type they demonstrate -- only
-            # "CORE" (equity orders) and an undocumented "N" (combo/OCO
-            # legs, meaning unconfirmed) appear. Leading, NOT YET VERIFIED
-            # hypothesis: Webull commonly gates extended-hours trading
-            # behind a separate account-level entitlement/agreement (a
-            # regulatory risk disclosure most brokers require before
-            # allowing pre-market/after-hours orders at all) that this
-            # account may not have enabled, which would explain the docs
-            # (globally true) disagreeing with this specific account's live
-            # behavior (entitlement-gated) -- check the Webull app's
-            # account/trading-permissions settings for an extended-hours
-            # opt-in before re-testing "ALL". This was originally changed to
-            # "ALL" once already, to fix a different real incident
-            # (candidates stuck in TRIGGERED with reserved buying power and
-            # no fill, believed at the time to be an extended-hours ordering
-            # issue) -- that diagnosis was itself later corrected by direct
-            # confirmation that the actual trigger happened during core
-            # hours, and the live 417 confirmed "ALL" was never usable here
-            # regardless. Do not default this back to "ALL" without a
-            # successful live order proving the account/endpoint actually
-            # accepts it -- see scripts/verify_extended_hours_order.py for
-            # the live test written to answer exactly this. Since
-            # RiskEngine.evaluate refuses every entry outside core hours
-            # unless RiskConfig.allow_extended_hours_trading is explicitly
-            # turned on (see risk/risk_engine.py), "CORE" costs nothing by
-            # default; the still-open question is whether the end-of-core-
-            # hours auto-flatten's exit order, fired right at the 4:00pm ET
-            # boundary, can execute under "CORE" -- watch for that
-            # specifically the next time a position is still open at close.
+            # 417 -- contradicting Webull's own public OpenAPI docs, which
+            # document "ALL" as the value for pre-market+core+after-hours.
+            # Re-tested live on 2026-08-12 at ~4:21am ET (genuine pre-market,
+            # sandbox mode, scripts/verify_extended_hours_order.py), with a
+            # clean (non-rate-limited) request this time: "ALL" was
+            # ACCEPTED and cleanly cancelled. Same run also confirmed
+            # "NIGHT" is a real, correctly-scoped value -- rejected at that
+            # same moment with a clear, specific error ("Overnight Trading
+            # is only available during the Overnight Session, which
+            # operates from 8:00pm to 4:00am ET"), not a param error, and
+            # ACCEPTED live the night before (2026-08-11 ~8:54pm ET,
+            # genuinely inside that window, modulo an unrelated
+            # "FIXGW_NOT_READY" infra hiccup that run). Best-guess
+            # explanation for the reversal: an account-level extended-hours
+            # entitlement was enabled between 2026-08-10 and 2026-08-12 (a
+            # common brokerage gate), not a code or documentation error on
+            # either side. Also notable: "CORE" was ALSO accepted during
+            # this same pre-market test -- undermining (not disproving --
+            # order ACCEPTANCE and order MATCHING/fill are different
+            # questions, and this test only exercised the former) the
+            # leading diagnosis behind the end-of-core-hours auto-flatten
+            # timing fix (is_within_closing_buffer, see market_hours.py)
+            # that a "CORE"-scoped order needs a still-live CORE session to
+            # even be accepted. That fix stays as a safety margin regardless
+            # -- this doesn't reopen it, just softens the certainty of why
+            # it was needed. IMPORTANT CAVEAT: all of the above was tested
+            # in TRADING_MODE=sandbox, not live -- do not assume live-account
+            # entitlements match sandbox without an equivalent live test.
+            # Given "ALL" is now confirmed (sandbox), it's safe to set
+            # WEBULL_SUPPORT_TRADING_SESSION=ALL via env var/.env for a
+            # deployment that wants pre-market/after-hours entries, and only
+            # then turn on RiskConfig.allow_extended_hours_trading from the
+            # dashboard -- the code default here stays "CORE" rather than
+            # flipping automatically, so existing deployments don't change
+            # behavior without an explicit opt-in.
             "support_trading_session": self.settings.webull_support_trading_session,
             "entrust_type": "QTY",
             "client_order_id": client_order_id,

@@ -913,16 +913,15 @@ its own docstring), so a stop-loss or the end-of-core-hours auto-flatten
 for exits.
 
 **Important: turning `allow_extended_hours_trading` on only widens WHEN a
-signal is allowed past this gate.** It does not, by itself, make Webull
-accept the resulting order during pre-market/after-hours -- every order
-this bot places still sets `support_trading_session` from
-`Settings.webull_support_trading_session` (default `"CORE"`), and `"CORE"`-
-scoped orders are not expected to fill (or even be accepted) outside core
-hours. See the `support_trading_session` note in "Webull integration" for
-the full history and how to test/change that value live. Until that's
-resolved, turning this toggle on with the default `"CORE"` session value
-will let a signal through the risk gate only to have the broker itself
-reject or silently no-op the resulting order outside core hours.
+signal is allowed past this gate.** It does not, by itself, change what
+`support_trading_session` value the resulting order goes out with -- that's
+`Settings.webull_support_trading_session` (env var
+`WEBULL_SUPPORT_TRADING_SESSION`), which still defaults to `"CORE"` in
+code even though `"ALL"` is now confirmed live to work (see the
+`support_trading_session` note in "Webull integration" for the full
+history). Turning this toggle on without also setting that env var to
+`"ALL"` will let a signal through the risk gate only to have the broker
+still receive a `"CORE"`-scoped order underneath.
 
 `now` matters here as much as it does for the daily-rollover/cooldown logic
 already in this method, so it's threaded through properly rather than left
@@ -2417,6 +2416,41 @@ Four non-obvious things worth knowing if you're debugging this client:
    `WEBULL_SUPPORT_TRADING_SESSION` to whichever value that confirms
    works, and only then turn on `allow_extended_hours_trading` from the
    dashboard for real use.
+
+   **RESOLVED (2026-08-12, ~4:21am ET, genuine pre-market): `"ALL"` is
+   confirmed live to work.** Re-ran `verify_extended_hours_order.py`
+   against BAOS with a clean (non-rate-limited) request this time --
+   `"ALL"` was ACCEPTED (`{'client_order_id': ..., 'order_id': ...}`) and
+   cleanly cancelled, directly reversing the 2026-08-10 rejection above.
+   `"NIGHT"` was correctly rejected at that same moment with a specific,
+   sensible message ("Overnight Trading is only available during the
+   Overnight Session, which operates from 8:00pm to 4:00am ET") -- not a
+   param error, confirming `"NIGHT"` is a real, correctly-scoped value
+   too (and was itself ACCEPTED the night before, ~8:54pm ET, genuinely
+   inside its own window). Best-guess explanation for the reversal: an
+   account-level extended-hours entitlement was enabled between
+   2026-08-10 and 2026-08-12 (the entitlement-gating hypothesis above),
+   not a code or documentation error on either side -- this was never
+   independently confirmed by checking the account settings directly,
+   just inferred from the error message changing character (2026-08-10:
+   "invalid parameter"; 2026-08-11 night: "FIXGW not ready for night";
+   2026-08-12: accepted outright). Also notable and NOT necessarily
+   good news: `"CORE"` was ALSO accepted during this same pre-market
+   run (after a few rate-limit retries) -- this softens, without fully
+   disproving, the "CORE-scoped order needs a still-live CORE session"
+   diagnosis behind the end-of-day auto-flatten timing fix a few
+   paragraphs up, since this test only exercised order *acceptance*, not
+   *matching/fill* behavior at the 4:00pm close specifically. That fix
+   stays in place as a safety margin regardless.
+
+   **Practical upshot:** set `WEBULL_SUPPORT_TRADING_SESSION=ALL` in the
+   deployment's `.env` to enable pre-market/after-hours order submission,
+   restart the dashboard service, then turn on
+   `RiskConfig.allow_extended_hours_trading` from the dashboard Settings
+   modal. The code default stays `"CORE"` regardless (no auto-flip), so
+   this is an explicit per-deployment opt-in. **Caveat: only verified in
+   `TRADING_MODE=sandbox`** -- re-verify with a live-mode test before
+   assuming a live account carries the same entitlement.
 
 Streaming (`subscribe_quotes`) is confirmed live and working (2026-08-11) --
 see the "Streaming market data" section above and `scripts/verify_streaming.py`.

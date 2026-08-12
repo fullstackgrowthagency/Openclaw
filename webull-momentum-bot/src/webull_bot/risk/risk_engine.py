@@ -82,11 +82,15 @@ class RiskConfig:
     # trading_hours). Deliberately does NOT, by itself, guarantee an
     # extended-hours signal actually reaches the market: WebullBrokerClient
     # still submits every order with a `support_trading_session` value
-    # confirmed live (2026-08-10) to reject "ALL" outright for this
-    # account -- see that module's _order_payload docstring. Flip this on
-    # to let entries THROUGH this gate for live testing; whether the
-    # broker then accepts or rejects the resulting order is a separate,
-    # still-open question.
+    # controlled by Settings.webull_support_trading_session (env var, still
+    # defaults to "CORE" in code) -- see that field's docstring and
+    # brokers/webull/client.py's _order_payload docstring for the full
+    # history. "ALL" is now confirmed live (sandbox, 2026-08-12) to be
+    # accepted by this account, so turning this flag on is only meaningful
+    # once WEBULL_SUPPORT_TRADING_SESSION=ALL is also set in the
+    # deployment's env -- with the code default still "CORE", flipping
+    # only this flag lets entries THROUGH this gate but the broker will
+    # still receive a "CORE"-scoped order underneath.
     allow_extended_hours_trading: bool = False
 
 

@@ -152,14 +152,19 @@ class Settings:
 
     # Webull order `support_trading_session` value (see
     # brokers/webull/client.py's _order_payload docstring for the full
-    # history). Confirmed live on 2026-08-10 that this account/endpoint
-    # rejects "ALL" outright with a 417, despite it being a documented
-    # value on developer.webull.com -- kept as an env-var override rather
-    # than hardcoded so a candidate value (e.g. "ALL" again, after
-    # checking whether the account has an extended-hours trading
-    # entitlement enabled) can be tested live with a config change and a
-    # restart, no code deploy required. Defaults to the only value
-    # confirmed to work.
+    # history). Rejected live on 2026-08-10 (417, "ALL" treated as an
+    # invalid value) but CONFIRMED LIVE TO WORK on 2026-08-12 (sandbox,
+    # genuine pre-market window) -- likely an account-level extended-hours
+    # entitlement that got enabled in between, not a lasting API
+    # restriction. Kept as an env-var override rather than hardcoded so a
+    # deployment can opt into "ALL" (or test "NIGHT") with a config change
+    # and a restart, no code deploy required -- set
+    # WEBULL_SUPPORT_TRADING_SESSION=ALL to enable pre-market/after-hours
+    # order submission, then turn on RiskConfig.allow_extended_hours_trading
+    # from the dashboard. Defaults to "CORE" in code regardless (existing
+    # deployments shouldn't change behavior without an explicit opt-in),
+    # and this was only verified in TRADING_MODE=sandbox -- re-verify
+    # before assuming a live account has the same entitlement.
     webull_support_trading_session: str = field(
         default_factory=lambda: os.environ.get("WEBULL_SUPPORT_TRADING_SESSION", "CORE")
     )

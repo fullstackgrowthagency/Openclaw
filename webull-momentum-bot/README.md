@@ -406,27 +406,29 @@ What's implemented and tested:
   instead (see the "End-of-day auto-flatten" bullet above) -- see
   `docs/ARCHITECTURE.md`'s "Webull integration" section for the full
   history.
-- **Extended-hours (pre-market/after-hours) trading -- infrastructure in
-  place, still gated on live verification.** Two independent things now
-  have to both be true for a pre-market/after-hours entry to actually
-  happen: `RiskConfig.allow_extended_hours_trading` (dashboard-adjustable,
-  **off by default**) must be on to let a signal through the risk gate
-  outside 9:30am-4:00pm ET at all, and `Settings.webull_support_trading_session`
-  (env var `WEBULL_SUPPORT_TRADING_SESSION`, still defaulting to `"CORE"`)
-  must be set to a value Webull actually accepts for the resulting order to
-  survive contact with the broker -- see the bullet above for why `"ALL"`
-  can't just be assumed to work despite being documented. Re-checking
-  Webull's docs on 2026-08-12 still lists `"ALL"` as the value to use, but
-  the SDK's own bundled sample scripts never demonstrate it either (only
-  `"CORE"` and an unexplained `"N"`) -- worth checking the Webull app's
-  account/trading-permissions settings for an extended-hours opt-in before
-  re-testing, since brokers commonly gate this behind a separate
-  entitlement. Run `scripts/verify_extended_hours_order.py SYMBOL` during
-  a real pre-market/after-hours window to find out which value this
-  account actually accepts (it never risks a real fill -- every test order
-  is a resting limit priced well off market). Turn
-  `allow_extended_hours_trading` on from the dashboard Settings modal only
-  after that's confirmed.
+- **Extended-hours (pre-market/after-hours) trading -- `"ALL"` now
+  CONFIRMED LIVE TO WORK (2026-08-12, sandbox), reversing the 2026-08-10
+  finding.** Re-ran `scripts/verify_extended_hours_order.py` at ~4:21am ET
+  (genuine pre-market) with a clean, non-rate-limited request: `"ALL"` was
+  accepted and cleanly cancelled. Best guess: an account-level
+  extended-hours entitlement got enabled between the two tests -- brokers
+  commonly gate this behind a separate opt-in, which would explain the
+  2026-08-10 rejection despite `"ALL"` being documented. Same run also
+  confirmed `"NIGHT"` is a real, correctly-scoped value (rejected outside
+  its own 8:00pm-4:00am ET window with a specific, sensible error, not a
+  param error), and that `"CORE"` is ALSO accepted pre-market -- which
+  softens (doesn't disprove) the theory behind the end-of-core-hours
+  auto-flatten timing fix, since this only tested order *acceptance*, not
+  matching/fill behavior. Two independent things still have to both be
+  true for a pre-market/after-hours entry to actually happen:
+  `RiskConfig.allow_extended_hours_trading` (dashboard-adjustable, **off
+  by default**) must be on to let a signal through the risk gate at all,
+  and `Settings.webull_support_trading_session` (env var
+  `WEBULL_SUPPORT_TRADING_SESSION`, **still defaults to `"CORE"` in code**
+  -- this doesn't flip automatically) must be set to `"ALL"` for the
+  resulting order to actually go out that way. **Important caveat:** this
+  was only verified in `TRADING_MODE=sandbox` -- re-verify before assuming
+  a live account has the same entitlement.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and
