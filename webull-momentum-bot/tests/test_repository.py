@@ -103,6 +103,7 @@ def test_get_performance_summary_empty(session):
     summary = get_performance_summary(session)
     assert summary["total_trades"] == 0
     assert summary["win_rate"] == 0.0
+    assert summary["total_pnl_pct"] == 0.0
 
 
 def test_get_performance_summary_computes_win_rate_and_pnl(session):
@@ -113,6 +114,36 @@ def test_get_performance_summary_computes_win_rate_and_pnl(session):
     assert summary["total_trades"] == 2
     assert summary["win_rate"] == 0.5
     assert summary["total_pnl"] == 50.0
+    # Both trades use _trade's default entry_price=10.0/quantity=100 (cost
+    # basis $1,000 each, $2,000 total) -- total_pnl_pct is capital-deployed-
+    # weighted (Σpnl / Σcost_basis), NOT the same as averaging each trade's
+    # own pnl_pct (which would give (10 + -5) / 2 = 2.5% here too, by
+    # coincidence of equal position sizes -- see the weighted test below for
+    # where the two genuinely diverge).
+    assert summary["total_pnl_pct"] == 2.5
+
+
+def test_get_performance_summary_total_pnl_pct_is_capital_weighted_not_averaged(session):
+    # Real distinction from avg_pnl_pct: total_pnl_pct weights by how much
+    # capital each trade actually deployed, so a big winning trade on a
+    # large position should dominate a small losing trade on a tiny one --
+    # a plain average of pnl_pct would treat them as equally significant.
+    # Trade A: $10,000 deployed (entry 10 * qty 1000), +$1,000 pnl (+10%).
+    # Trade B: $100 deployed (entry 10 * qty 10), -$5 pnl (-5%).
+    record_trade(session, _trade(entry_price=10.0, quantity=1000, pnl=1000.0, pnl_pct=10.0), trading_mode="paper")
+    record_trade(
+        session, _trade(entry_price=10.0, quantity=10, pnl=-5.0, pnl_pct=-5.0, exit_reason=ExitReason.STOP_LOSS),
+        trading_mode="paper",
+    )
+    session.commit()
+    summary = get_performance_summary(session)
+
+    # avg_pnl_pct treats both trades as equally significant: (10 + -5) / 2.
+    assert summary["avg_pnl_pct"] == 2.5
+    # total_pnl_pct weights by capital deployed: 995 / 10100 * 100, heavily
+    # dominated by the large winning trade rather than sitting near 0.
+    assert summary["total_pnl_pct"] == pytest.approx(995.0 / 10100.0 * 100.0)
+    assert summary["total_pnl_pct"] > 9.0
 
 
 # -- scanner events, momentum scores, momentum events -----------------------

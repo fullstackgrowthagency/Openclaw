@@ -782,6 +782,20 @@ What's implemented and tested:
   chunk so one bad batch can't take down every other symbol in the same
   call. See `docs/ARCHITECTURE.md`'s "Streaming subscribe silently
   failed wholesale past 100 symbols" section.
+- **Total P&L as a percentage, added to the Performance panel --
+  2026-08-13, at the user's request.** The panel already showed
+  `avg_pnl_pct`, an EQUAL-WEIGHTED average of each trade's own `pnl_pct`
+  (a $100 trade and a $100,000 trade count the same). `get_performance_summary`
+  (`db/repository.py`) now also returns `total_pnl_pct`: total dollar P&L
+  as a percentage of total capital actually deployed (`Σ pnl / Σ
+  (entry_price * quantity)` across every trade) -- a genuine
+  capital-weighted "return on capital put to work" figure, where a large
+  position's result dominates a small one's, same as it would in
+  reality. The two figures can diverge significantly and both are shown
+  side by side. Guards against a zero-cost-basis division (returns
+  `0.0`). See `docs/ARCHITECTURE.md`'s "Two distinct 'P&L as a
+  percentage' figures on the Performance panel" section and
+  `tests/test_repository.py::test_get_performance_summary_total_pnl_pct_is_capital_weighted_not_averaged`.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

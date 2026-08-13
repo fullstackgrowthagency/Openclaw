@@ -2676,6 +2676,26 @@ Two different data paths, deliberately:
 - **Historical panels** (trade history, performance/win-rate) read from the
   database via `db/repository.py`.
 
+**Two distinct "P&L as a percentage" figures on the Performance panel
+(added 2026-08-13, at the user's request for a total-P&L percentage
+alongside the existing dollar figure)** -- `get_performance_summary`
+(`db/repository.py`) now returns both, and they can diverge significantly:
+- `avg_pnl_pct`: the existing figure, an EQUAL-WEIGHTED average of each
+  trade's own `pnl_pct` -- a $100 trade and a $100,000 trade count the
+  same.
+- `total_pnl_pct` (new): total dollar P&L as a percentage of total
+  capital actually deployed (`Σ pnl / Σ (entry_price * quantity)` across
+  every trade) -- a genuine capital-weighted "return on capital put to
+  work" figure, where a large position's result dominates a small one's,
+  same as it would in reality. Guards against a zero-cost-basis division
+  (returns `0.0`), though that shouldn't occur for any real recorded
+  trade (`entry_price`/`quantity` are always positive). See
+  `tests/test_repository.py::test_get_performance_summary_total_pnl_pct_is_capital_weighted_not_averaged`
+  for a worked example showing the two figures landing far apart (a big
+  winning trade + a tiny losing trade averages to a modest `avg_pnl_pct`
+  but a much larger `total_pnl_pct`, correctly reflecting that most of
+  the capital was on the winning side).
+
 **A third category, easy to miss: broker-derived fields folded into an
 otherwise in-memory panel.** `/api/status`'s `equity`/`buying_power` and
 `/api/positions`'s `current_price`/`unrealized_pnl` are NOT part of

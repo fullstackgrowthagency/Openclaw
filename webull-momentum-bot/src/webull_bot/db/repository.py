@@ -88,13 +88,23 @@ def get_performance_summary(session: Session) -> dict:
     trades = session.query(TradeRecord).all()
     total_trades = len(trades)
     if total_trades == 0:
-        return {"total_trades": 0, "win_rate": 0.0, "total_pnl": 0.0, "avg_pnl_pct": 0.0}
+        return {"total_trades": 0, "win_rate": 0.0, "total_pnl": 0.0, "total_pnl_pct": 0.0, "avg_pnl_pct": 0.0}
 
     wins = sum(1 for t in trades if t.pnl > 0)
+    total_pnl = sum(t.pnl for t in trades)
+    # Total dollar P&L as a % of total capital actually deployed (Σ
+    # entry_price * quantity across every trade) -- a genuine "return on
+    # capital put to work" figure, distinct from avg_pnl_pct below (an
+    # equal-weighted average of each trade's OWN % return, which treats a
+    # $100 trade and a $100,000 trade as equally significant). Guards
+    # against a zero-cost-basis divide, though that shouldn't happen for
+    # any real trade (entry_price/quantity are always positive).
+    total_cost_basis = sum(t.entry_price * t.quantity for t in trades)
     return {
         "total_trades": total_trades,
         "win_rate": wins / total_trades,
-        "total_pnl": sum(t.pnl for t in trades),
+        "total_pnl": total_pnl,
+        "total_pnl_pct": (total_pnl / total_cost_basis * 100.0) if total_cost_basis else 0.0,
         "avg_pnl_pct": sum(t.pnl_pct for t in trades) / total_trades,
     }
 

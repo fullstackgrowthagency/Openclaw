@@ -613,6 +613,7 @@ async function refreshPerformance() {
       <div class="stat"><span class="label">Total Trades</span><span class="value">${p.total_trades}</span></div>
       <div class="stat"><span class="label">Win Rate</span><span class="value">${fmtNum(p.win_rate * 100, 1)}%</span></div>
       <div class="stat"><span class="label">Total P&amp;L</span><span class="value ${pnlClass(p.total_pnl)}">${fmtMoney(p.total_pnl)}</span></div>
+      <div class="stat"><span class="label">Total P&amp;L %</span><span class="value ${pnlClass(p.total_pnl_pct)}">${fmtNum(p.total_pnl_pct)}%</span></div>
       <div class="stat"><span class="label">Avg P&amp;L %</span><span class="value ${pnlClass(p.avg_pnl_pct)}">${fmtNum(p.avg_pnl_pct)}%</span></div>
     `;
   } catch (e) {

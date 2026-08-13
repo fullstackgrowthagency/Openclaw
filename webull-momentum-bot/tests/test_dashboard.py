@@ -343,6 +343,7 @@ def test_trades_and_performance_read_from_database(session_factory, client):
     assert perf["total_trades"] == 1
     assert perf["win_rate"] == 1.0
     assert perf["total_pnl"] == 50.0
+    assert perf["total_pnl_pct"] == 10.0  # 50 / (entry_price=5.0 * quantity=100) * 100
 
 
 def _momentum_score(**overrides) -> MomentumScore:
