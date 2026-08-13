@@ -447,6 +447,27 @@ class TradingLoopConfig:
     # rework is based on, not backtested.
     max_runway_consumed_pct: float = 0.40
 
+    # -- atomic bracket entry retry (2026-08-13, see docs/ARCHITECTURE.md's
+    # "Atomic bracket entry" section) -----------------------------------
+    # How many additional attempts a rejected atomic bracket entry gets
+    # before TradingLoop._submit_entry finally gives up (2 = 3 total
+    # attempts: the original plus 2 retries). A rejection isn't always
+    # permanent -- call_with_retry already retries Webull's own rate-limit
+    # errors internally (see brokers/webull/retry.py), so a
+    # BracketEntryRejected reaching this loop is either a genuine
+    # structural rejection (an unsupported combo for this instrument --
+    # retrying won't help, but 3 attempts is a small, bounded cost) or a
+    # transient failure call_with_retry's own classification didn't catch
+    # (a network blip, a momentary 5xx) -- worth a couple more tries
+    # spaced roughly a tick apart. Each retry re-recomputes stop/target
+    # from the then-current price (reuses _poll_confirmation's own
+    # recompute-and-gate machinery -- see _submit_entry's
+    # BracketEntryRejected handling) rather than blindly resubmitting the
+    # exact same stale request. Explicit instruction still holds once
+    # retries are exhausted: the trade does not go through, no fallback to
+    # an unprotected entry.
+    bracket_entry_max_retries: int = 2
+
 
 class TradingLoop:
     # Pre-entry states only: resistance_level is what the resistance-based
@@ -538,6 +559,15 @@ class TradingLoop:
         # opposed to a real (None, None) result) fall back to
         # _attach_broker_bracket exactly as before this feature existed.
         self._pending_entry_brackets: dict[str, BracketSubmissionResult] = {}
+        # symbol -> number of BracketEntryRejected retries already spent
+        # this arm cycle (see TradingLoopConfig.bracket_entry_max_retries
+        # and _submit_entry's handling). Reset to 0/removed whenever an
+        # entry actually fills (_confirm_entry_filled) or a genuinely
+        # fresh trigger starts a new confirmation window
+        # (_start_confirmation) -- a brand new trigger must never inherit
+        # a stale retry count left over from an earlier, unrelated
+        # rejection episode.
+        self._bracket_entry_retry_counts: dict[str, int] = {}
         # symbol -> PendingConfirmation for a candidate currently CONFIRMING
         # (see enums.CandidateState.CONFIRMING's docstring). Populated by
         # _start_confirmation, consumed by _poll_confirmation/
@@ -1215,6 +1245,12 @@ class TradingLoop:
         _poll_confirmation needs to evaluate the window on later ticks.
         Does NOT submit an order; see enums.CandidateState.CONFIRMING's
         docstring for why."""
+        # A genuinely fresh trigger (this is only ever called from
+        # trigger_engine's real trigger path in _process_candidate_inner,
+        # never from a bracket-entry retry -- see that handling in
+        # _submit_entry) must not inherit a stale retry count left over
+        # from an earlier, unrelated BracketEntryRejected episode.
+        self._bracket_entry_retry_counts.pop(candidate.symbol, None)
         candidate.confirmation_started_at = now
         candidate.confirmation_expires_at = now + timedelta(seconds=self.config.confirmation_window_seconds)
         candidate.entry_block_reason = None
@@ -1480,18 +1516,60 @@ class TradingLoop:
             # Atomic bracket entry (2026-08-13, see docs/ARCHITECTURE.md's
             # "Atomic bracket entry" section) -- the broker supports
             # place_bracket_entry but rejected this specific combo request.
-            # Per explicit instruction: the trade does NOT go through at
-            # all, no fallback to a plain unprotected entry. No order was
-            # ever accepted, so this must not count against this symbol's
-            # daily entry budget, same as the other record_entry_order_failed
-            # call sites in this method.
-            logger.error(
-                "Atomic bracket entry for %s was rejected by the broker -- the trade will NOT go "
-                "through (no fallback to an unprotected plain entry). Reason: %s",
-                candidate.symbol, exc.reason,
-            )
+            # No order was ever accepted, so this must not count against
+            # this symbol's daily entry budget, same as the other
+            # record_entry_order_failed call sites in this method --
+            # applies whether this attempt gets retried below or not.
             self.risk_engine.record_entry_order_failed(candidate.symbol, now)
-            reason = f"{candidate.symbol}: atomic bracket entry rejected by the broker -- trade did not go through ({exc.reason})"
+
+            retry_count = self._bracket_entry_retry_counts.get(candidate.symbol, 0) + 1
+            if retry_count <= self.config.bracket_entry_max_retries:
+                # Retry (added 2026-08-13 at explicit request): re-queue
+                # this SAME confirmed signal for another attempt next tick
+                # by reusing _poll_confirmation's own recompute-and-gate
+                # machinery instead of blindly resubmitting the exact same
+                # stale request -- transition back through ARMED->CONFIRMING
+                # (both legal single hops; TRIGGERED cannot jump straight
+                # to CONFIRMING) with a PendingConfirmation backdated by a
+                # full confirmation_window_seconds, so _poll_confirmation
+                # treats the window as already-elapsed on its very next
+                # tick: it re-runs the reversal/MIS/spread checks (a real
+                # reversal since the original trigger correctly cancels
+                # the retry too, not just a rejection retry), recomputes
+                # stop/target off the then-current price, and re-validates
+                # target-clearance/runway fresh, exactly as a normal
+                # confirmation would.
+                self._bracket_entry_retry_counts[candidate.symbol] = retry_count
+                logger.warning(
+                    "Atomic bracket entry for %s was rejected by the broker (attempt %d/%d) -- "
+                    "retrying next tick rather than giving up. Reason: %s",
+                    candidate.symbol, retry_count, self.config.bracket_entry_max_retries + 1, exc.reason,
+                )
+                transition(candidate, CandidateState.ARMED, now=now, reason=f"bracket entry rejected, retrying: {exc.reason}")
+                transition(candidate, CandidateState.CONFIRMING, now=now, reason="retrying atomic bracket entry")
+                candidate.confirmation_started_at = now - timedelta(seconds=self.config.confirmation_window_seconds)
+                candidate.confirmation_expires_at = now
+                candidate.entry_block_reason = f"retrying after a rejected bracket entry ({retry_count}/{self.config.bracket_entry_max_retries}): {exc.reason}"
+                self._pending_confirmations[candidate.symbol] = PendingConfirmation(
+                    signal=signal, momentum_event=momentum_event,
+                    started_at=now - timedelta(seconds=self.config.confirmation_window_seconds),
+                    reference_price=signal.reference_price, snapshot=snapshot,
+                )
+                return
+
+            # Retries exhausted -- give up for real. Per explicit
+            # instruction: the trade does NOT go through at all, no
+            # fallback to a plain unprotected entry.
+            logger.error(
+                "Atomic bracket entry for %s was rejected by the broker after %d attempt(s) -- giving up; "
+                "the trade will NOT go through (no fallback to an unprotected plain entry). Reason: %s",
+                candidate.symbol, retry_count, exc.reason,
+            )
+            self._bracket_entry_retry_counts.pop(candidate.symbol, None)
+            reason = (
+                f"{candidate.symbol}: atomic bracket entry rejected by the broker after {retry_count} "
+                f"attempt(s) -- trade did not go through ({exc.reason})"
+            )
             self.risk_engine.record_operational_event(RiskEventType.BRACKET_ENTRY_REJECTED, candidate.symbol, reason, now)
             transition(candidate, CandidateState.ARMED, now=now, reason=reason)
             return
@@ -1712,6 +1790,11 @@ class TradingLoop:
         self, candidate: Candidate, signal: Signal, order: Order, now: datetime,
         bracket_result: Optional[BracketSubmissionResult] = None,
     ) -> None:
+        # A successful fill means any earlier BracketEntryRejected retry
+        # count for this symbol is no longer relevant -- see
+        # _submit_entry's handling and _start_confirmation's matching
+        # clear for the "fresh trigger" side of this same contract.
+        self._bracket_entry_retry_counts.pop(candidate.symbol, None)
         # This method is the ONLY place a filled entry order becomes a
         # locally-tracked position (self._positions), and it's called after
         # _poll_pending_entry has already popped candidate.symbol out of

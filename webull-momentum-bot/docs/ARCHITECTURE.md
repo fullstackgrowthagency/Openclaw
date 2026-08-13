@@ -2425,12 +2425,59 @@ user click; this one is the only system-triggered one, since the whole
 point is making sure a trade that did NOT go through is impossible to
 miss.
 
+**Retry on rejection (2026-08-13, added at the user's explicit follow-up
+request -- "can we make it so it will retry if failed").** Not every
+`BracketEntryRejected` is permanent: `call_with_retry` (`brokers/webull/
+retry.py`) already retries Webull's own rate-limit errors internally
+before this exception ever reaches `TradingLoop`, so what actually
+surfaces here is either a genuine structural rejection (an unsupported
+combo for this instrument -- retrying the identical request won't help)
+or some other transient failure `call_with_retry`'s narrower
+rate-limit-only classification didn't catch (a network blip, a momentary
+5xx). Giving it a couple more bounded attempts costs little and can
+recover the second case, so `_submit_entry` now retries up to
+`TradingLoopConfig.bracket_entry_max_retries` (2 -- three total attempts)
+before finally giving up:
+
+- Deliberately reuses `_poll_confirmation`'s own machinery instead of a
+  separate retry mechanism: on rejection with retries remaining, the
+  candidate transitions `TRIGGERED -> ARMED -> CONFIRMING` (two legal
+  single hops -- `TRIGGERED` cannot jump straight to `CONFIRMING`) with a
+  fresh `PendingConfirmation` whose `started_at` is backdated by a full
+  `confirmation_window_seconds`. `_poll_confirmation` then treats the
+  window as already-elapsed the very next tick: it re-runs the
+  reversal/MIS/spread checks (so a real price reversal since the
+  original trigger correctly cancels the retry too, not just a
+  broker-side rejection), recomputes stop/target off the then-current
+  price rather than blindly resubmitting the exact same stale request,
+  and re-validates target-clearance/runway fresh -- everything a normal
+  confirmation does, at essentially zero extra code.
+- `TradingLoop._bracket_entry_retry_counts` (`dict[str, int]`) tracks the
+  attempt count per symbol. Cleared on a successful fill
+  (`_confirm_entry_filled`) and on any genuinely fresh trigger
+  (`_start_confirmation`, which is only ever reached via
+  `trigger_engine`'s real trigger path) -- a brand new, unrelated trigger
+  must never inherit a stale retry count left over from an earlier
+  rejection episode.
+- `record_entry_order_failed` still runs on every failed attempt,
+  retried or not -- `RiskEngine.evaluate()` re-increments the daily/
+  per-ticker trade counters on each retry (it has no notion of "this is
+  the same logical entry as last attempt"), so each failure must roll
+  that back individually, exactly like every other failure path in
+  `_submit_entry`.
+- Once retries are exhausted, the existing explicit-instruction behavior
+  is unchanged: the trade does not go through at all, no fallback to an
+  unprotected entry, `RiskEventType.BRACKET_ENTRY_REJECTED` fires (with
+  the retry count in its reason) and the dashboard pop-up appears.
+
 See `tests/test_webull_broker_client.py` (`place_bracket_entry` payload
 shape and rejection propagation), `tests/test_order_manager.py`
 (`submit_entry_signal`'s capability gate, halving rule, and no-fallback
 contract), and `tests/test_trading_loop.py`
 (`test_confirm_entry_filled_uses_atomic_bracket_result_without_calling_attach_broker_bracket`,
-`test_submit_entry_reverts_to_armed_with_no_fallback_when_bracket_entry_rejected`).
+`test_submit_entry_schedules_a_retry_on_bracket_entry_rejection`,
+`test_submit_entry_retry_recomputes_and_reattempts_on_the_next_tick`,
+`test_submit_entry_gives_up_after_retries_exhausted_with_no_fallback`).
 
 ## Extra position-based confirmation for a TRIGGERED entry (2026-08-11)
 

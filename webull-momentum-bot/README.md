@@ -883,10 +883,24 @@ What's implemented and tested:
   that silently didn't happen is exactly the kind of thing that must not
   be missable). A broker that simply lacks this capability at all (paper
   trading, backtests) isn't a rejection -- falls back to a plain entry
-  exactly as before, unchanged. See `docs/ARCHITECTURE.md`'s "Atomic
-  bracket entry" section and `tests/test_webull_broker_client.py`,
-  `tests/test_order_manager.py`, `tests/test_trading_loop.py` for the new
-  coverage.
+  exactly as before, unchanged. **Follow-up, same day, at explicit
+  request ("can we make it so it will retry if failed"):** a rejection
+  now gets up to 2 retries (3 attempts total,
+  `TradingLoopConfig.bracket_entry_max_retries`) before giving up for
+  real -- not every rejection is permanent (Webull's own rate-limit
+  errors already retry internally via `call_with_retry`, so what reaches
+  this loop is either a genuine structural rejection or some other
+  transient failure worth a couple more tries). Each retry reuses the
+  confirmation pipeline's own recompute-and-gate logic (a backdated
+  `PendingConfirmation` that `_poll_confirmation` treats as
+  already-elapsed next tick) rather than blindly resubmitting the exact
+  same stale request -- price reversal/MIS/spread/target-clearance all
+  get re-checked fresh, so a real reversal since the original trigger
+  correctly cancels the retry too. Once retries are exhausted, the
+  explicit no-fallback behavior above is unchanged. See
+  `docs/ARCHITECTURE.md`'s "Atomic bracket entry" section and
+  `tests/test_webull_broker_client.py`, `tests/test_order_manager.py`,
+  `tests/test_trading_loop.py` for the new coverage.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

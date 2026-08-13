@@ -646,9 +646,63 @@ class _BracketRejectingBroker(_FakeBroker):
         raise RuntimeError("OAUTH_OPENAPI_PARAM_ERR: combo not supported for this instrument")
 
 
-def test_submit_entry_reverts_to_armed_with_no_fallback_when_bracket_entry_rejected():
+def test_submit_entry_schedules_a_retry_on_bracket_entry_rejection():
     broker = _BracketRejectingBroker()
     loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+    transition(candidate, CandidateState.TRIGGERED)
+
+    signal = _confirming_signal(reference_price=5.20, suggested_stop=5.00, suggested_target=5.60)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+
+    loop._submit_entry(candidate, signal, snapshot, _IN_HOURS_NOW)
+
+    # Retries remain (default bracket_entry_max_retries=2) -- queued for
+    # another attempt next tick instead of giving up immediately. No order
+    # was placed and no position was opened yet either way.
+    assert candidate.state == CandidateState.CONFIRMING
+    assert loop._positions == {}
+    assert broker._orders == {}
+    assert loop._bracket_entry_retry_counts["TEST"] == 1
+    assert "TEST" in loop._pending_confirmations
+    # Backdated by a full confirmation window -- _poll_confirmation will
+    # treat this as already-elapsed on the very next tick.
+    pending = loop._pending_confirmations["TEST"]
+    assert pending.started_at == _IN_HOURS_NOW - timedelta(seconds=loop.config.confirmation_window_seconds)
+
+
+def test_submit_entry_retry_recomputes_and_reattempts_on_the_next_tick():
+    broker = _BracketRejectingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.watcher.config.armed_score_threshold = -1.0  # isolate from cold-start MIS, see earlier note
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+    transition(candidate, CandidateState.TRIGGERED)
+
+    signal = _confirming_signal(reference_price=5.20, suggested_stop=5.00, suggested_target=5.60)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._submit_entry(candidate, signal, snapshot, _IN_HOURS_NOW)
+    assert candidate.state == CandidateState.CONFIRMING
+
+    # Next tick: _poll_confirmation sees the backdated window as already
+    # elapsed and re-queues onto _ready_to_enter for another attempt --
+    # exercised directly here (not through the full ranking pass) to keep
+    # this test focused on the retry recompute itself.
+    later = _IN_HOURS_NOW + timedelta(seconds=1)
+    later_snapshot = _snapshot(later, 5.21, 5.21, 610_000, 5.20, 5.22, 5.15)
+    loop._poll_confirmation(candidate, later_snapshot, later)
+
+    assert candidate in loop._ready_to_enter
+    # Recomputed off the new price (5.21), not the original rejected
+    # attempt's price (5.20).
+    assert loop._pending_confirmations["TEST"].signal.reference_price == 5.21
+
+
+def test_submit_entry_gives_up_after_retries_exhausted_with_no_fallback():
+    broker = _BracketRejectingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.config.bracket_entry_max_retries = 0  # first rejection is already final
     from webull_bot.state_machine import transition
     transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
@@ -663,6 +717,7 @@ def test_submit_entry_reverts_to_armed_with_no_fallback_when_bracket_entry_rejec
     assert candidate.state == CandidateState.ARMED
     assert loop._positions == {}
     assert broker._orders == {}
+    assert "TEST" not in loop._bracket_entry_retry_counts
     from webull_bot.enums import RiskEventType
     assert loop.risk_engine.events[-1].event_type == RiskEventType.BRACKET_ENTRY_REJECTED.value
     assert "TEST" in loop.risk_engine.events[-1].reason
