@@ -316,6 +316,12 @@ th {
 .state-discovered, .state-watching { background: #1c2530; color: var(--muted); }
 .state-heating_up { background: #3a2c14; color: var(--amber); }
 .state-armed { background: #3a2c14; color: #f0a020; }
+/* Entry-selectivity rework (2026-08-13): a strategy trigger sits here,
+   holding through the confirmation window, before it can ever become
+   TRIGGERED (an actual submitted order) -- see enums.CandidateState
+   .CONFIRMING's docstring. Distinct purple so it reads as "closer to a
+   trade than ARMED, but not yet a real order" at a glance. */
+.state-confirming { background: #2a1e42; color: #b088f0; }
 .state-triggered { background: #1e2f4a; color: var(--accent); }
 .state-entered, .state-managing { background: #1e3a24; color: var(--green); }
 .state-exited { background: #1c2530; color: var(--muted); }

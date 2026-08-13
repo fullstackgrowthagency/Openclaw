@@ -796,6 +796,66 @@ What's implemented and tested:
   `0.0`). See `docs/ARCHITECTURE.md`'s "Two distinct 'P&L as a
   percentage' figures on the Performance panel" section and
   `tests/test_repository.py::test_get_performance_summary_total_pnl_pct_is_capital_weighted_not_averaged`.
+- **Entry selectivity rework -- 2026-08-13, at the user's explicit request
+  after reporting the bot was losing more trades than it won.** Two root
+  causes confirmed against the actual code before building anything: (1)
+  `TradingLoop` submitted an entry the instant ANY candidate triggered,
+  with no comparison against other candidates competing for the same
+  scarce position slot in the same tick -- first to trigger won, not the
+  best one available; (2) every strategy (confirmed in
+  `strategy/volume_ignition.py`) could fire off a single noisy snapshot,
+  with nothing requiring the move to actually hold before an order went
+  out. Four changes, built together:
+  1. **Confirmation window** -- new `CandidateState.CONFIRMING` between
+     `ARMED` and `TRIGGERED`. A strategy trigger no longer submits an
+     order immediately; it has to hold above its reference price (within
+     `TradingLoopConfig.confirmation_max_pullback_pct`, 0.5% default) for
+     `confirmation_window_seconds` (10s default) with MIS still above the
+     armed threshold, or it's rejected (`RiskEventType
+     .CONFIRMATION_FAILED`) and must re-trigger fresh. Stop/target get
+     recomputed from the actual confirmed price once the window holds
+     clean, not the stale trigger-time price. Mirrored in
+     `backtest/engine.py` too (not just live `TradingLoop`), since a
+     backtest that doesn't wait the same way would stop predicting real
+     behavior.
+  2. **Resistance-runway / target-clearance** (added at the user's
+     explicit request) -- reuses the existing volume-profile resistance
+     infrastructure (see below), no new resistance engine. A confirmed
+     entry is hard-rejected if a known static resistance level sits at or
+     before the fixed target (`RiskEventType.RESISTANCE_BEFORE_TARGET`),
+     or if it's already consumed more than
+     `TradingLoopConfig.max_runway_consumed_pct` (40% default) of the
+     room between the original trigger and that resistance level. No
+     resistance found at all means automatically clear -- no invented
+     arbitrary distance limit standing in for "we don't know."
+  3. **`room_to_target_score`** (added at the user's explicit request) --
+     new MIS component measuring room to the fixed target before a known
+     resistance level. `weights.yaml` bumped to
+     `v2.2-selectivity-rework`: every existing weight scaled by 0.93
+     (preserving relative weighting) to free 7% for this one. Can be
+     `None` (unavailable, not price-context-dependent callers) --
+     `compute_score` renormalizes over the active weights rather than
+     treating a missing component as a 0.
+  4. **Batch ranking when slots are scarce** -- confirmed-and-cleared
+     candidates queue onto a per-tick ready list instead of submitting
+     immediately; once every candidate has had a chance to confirm this
+     tick, the best-scoring ones (by current MIS) win the available
+     position slots, not whichever confirmed first. Anyone who loses out
+     isn't discarded -- they stay `CONFIRMING` and get re-ranked again
+     next tick.
+  Deliberately scoped down from a much larger proposed spec (full
+  resistance strength-scoring/clustering, per-strategy setup/trigger/
+  confirmation splitting across all 8 strategies, MIS persistence/decay
+  detection, opportunity ranking via a full Entry Quality Score, shadow-
+  mode rollout) -- this targets the two confirmed root causes plus the two
+  pieces explicitly requested on top, not the whole thing at once. A
+  backup branch (`backup/pre-selectivity-rework-2026-08-13`) preserves the
+  exact commit before this rework, pushed to the remote, in case it needs
+  reverting. See `docs/ARCHITECTURE.md`'s "Entry selectivity rework"
+  section for the full design (including what was deliberately left out)
+  and `tests/test_trading_loop.py`, `tests/test_state_machine.py`,
+  `tests/test_volume_profile.py`, `tests/test_momentum_score.py` for the
+  new coverage.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

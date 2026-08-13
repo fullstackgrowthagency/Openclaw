@@ -126,3 +126,97 @@ def high_volume_node_levels(
     significant = [node for node in nodes if node.volume >= threshold]
     ranked = sorted(significant, key=lambda node: node.volume, reverse=True)
     return [node.price for node in ranked[:top_n]]
+
+
+# -- target clearance / resistance runway (entry-selectivity rework, --------
+# 2026-08-13, see docs/ARCHITECTURE.md's "Entry selectivity rework" section)
+#
+# Deliberately built on top of the SAME `static_resistance_levels` this
+# module already produces (the HVN-filtered "significant" levels), not a
+# new standalone strength-scored resistance engine: those levels already
+# distinguish a real cluster from background noise (min_volume_pct_of_max
+# above), so a second scoring pass on top of that would just be re-deriving
+# the same judgment a different way. Kept lean on purpose.
+
+
+def next_significant_resistance(levels: Sequence[float], above_price: float) -> Optional[float]:
+    """The nearest static resistance level strictly above `above_price`, or
+    None if no such level exists in `levels`. None here means "no known
+    resistance blocks this" -- not "we don't know": both this function and
+    its caller inherit static_resistance_levels' existing fail-soft
+    contract (a failed/missing get_raw_bars lookup just means an empty
+    list, treated the same as "genuinely no levels found" -- see
+    scanner/broad_scanner.py's docstring for why that's an accepted
+    simplification here rather than a separate valid/invalid distinction)."""
+    above = [level for level in levels if level > above_price]
+    return min(above) if above else None
+
+
+@dataclass(frozen=True)
+class TargetClearance:
+    target_price: float
+    next_resistance: Optional[float]
+    target_clear: bool          # False only when a known resistance level sits at/before the target
+    room_to_target_score: float  # 0-100: 100 = no resistance in the way at all, 0 = resistance blocks the target
+
+
+def evaluate_target_clearance(
+    current_price: float, target_price: float, static_resistance_levels: Sequence[float],
+) -> TargetClearance:
+    """The hard gate: can the fixed target actually be reached before a
+    known resistance level gets in the way? `current_price` is whatever
+    price the caller is evaluating from (the confirmed entry price at
+    trigger-confirmation time, or the live price for a pre-trigger MIS
+    scoring pass -- see momentum_ignition_score.py). No resistance found
+    above current_price -> automatically clear (open air), matching the
+    "don't invent an arbitrary distance limit when there's genuinely
+    nothing there" principle this was built around."""
+    resistance = next_significant_resistance(static_resistance_levels, current_price)
+    if resistance is None:
+        return TargetClearance(target_price, None, target_clear=True, room_to_target_score=100.0)
+    if resistance <= target_price:
+        return TargetClearance(target_price, resistance, target_clear=False, room_to_target_score=0.0)
+    extra_room = resistance - target_price
+    required_move = target_price - current_price
+    clearance_ratio = (extra_room / required_move) if required_move > 0 else 1.0
+    room_to_target_score = 50.0 + 50.0 * min(clearance_ratio, 1.0)
+    return TargetClearance(target_price, resistance, target_clear=True, room_to_target_score=room_to_target_score)
+
+
+def compute_runway_consumed_pct(
+    trigger_price: float, entry_price: float, resistance: Optional[float],
+) -> Optional[float]:
+    """How much of the trigger->resistance runway the confirmed entry price
+    already used up (0.0 = entered right at the trigger, 1.0 = entered
+    exactly at resistance). Only meaningful once a real trigger_price
+    exists (see this function's TradingLoop._poll_confirmation call site) --
+    unlike room_to_target_score above, this is NOT computed as a continuous
+    per-tick MIS component, since there's no real "trigger price" to
+    measure from before a strategy has actually triggered; inventing one
+    (e.g. reusing the running high) would produce a number that doesn't
+    mean what "runway consumed" is supposed to mean. None whenever there's
+    no resistance to measure against (unconstrained) or the trigger itself
+    was already at/past the resistance level (shouldn't happen -- target
+    clearance would already have rejected that case)."""
+    if resistance is None or resistance <= trigger_price:
+        return None
+    return (entry_price - trigger_price) / (resistance - trigger_price)
+
+
+def resistance_runway_score(consumed_pct: Optional[float]) -> Optional[float]:
+    """0-100 informational score from runway_consumed_pct -- see
+    docs/ARCHITECTURE.md for the starting thresholds (0-10% excellent,
+    10-20% good, 20-30% acceptable, 30-40% weak, >40% treated as a hard
+    reject by TradingLoopConfig.max_runway_consumed_pct, not just a low
+    score here)."""
+    if consumed_pct is None:
+        return None
+    if consumed_pct <= 0.10:
+        return 100.0
+    if consumed_pct <= 0.20:
+        return 80.0
+    if consumed_pct <= 0.30:
+        return 60.0
+    if consumed_pct <= 0.40:
+        return 30.0
+    return 0.0

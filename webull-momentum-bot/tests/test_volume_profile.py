@@ -2,9 +2,13 @@ from datetime import datetime, timedelta
 
 from webull_bot.metrics.volume_profile import (
     VolumeNode,
+    compute_runway_consumed_pct,
     compute_volume_profile,
+    evaluate_target_clearance,
     filter_bars_by_lookback,
     high_volume_node_levels,
+    next_significant_resistance,
+    resistance_runway_score,
 )
 
 
@@ -96,3 +100,74 @@ def test_filter_bars_by_lookback_keeps_bar_exactly_at_cutoff():
     bars = [_bar(1, 2, 100, time=cutoff_time.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+0000")]
     kept = filter_bars_by_lookback(bars, lookback_days=20, now=now)
     assert len(kept) == 1
+
+
+# -- target clearance / resistance runway (entry-selectivity rework, 2026-08-13) --
+
+def test_next_significant_resistance_finds_the_nearest_level_above():
+    assert next_significant_resistance([9.0, 10.5, 12.0], above_price=10.0) == 10.5
+
+
+def test_next_significant_resistance_none_when_nothing_above():
+    assert next_significant_resistance([9.0, 9.5], above_price=10.0) is None
+
+
+def test_next_significant_resistance_empty_levels_is_none():
+    assert next_significant_resistance([], above_price=10.0) is None
+
+
+def test_evaluate_target_clearance_clear_with_no_resistance():
+    clearance = evaluate_target_clearance(10.0, 11.0, [])
+    assert clearance.target_clear is True
+    assert clearance.next_resistance is None
+    assert clearance.room_to_target_score == 100.0
+
+
+def test_evaluate_target_clearance_rejects_resistance_at_or_before_target():
+    clearance = evaluate_target_clearance(10.0, 11.0, [10.8])
+    assert clearance.target_clear is False
+    assert clearance.next_resistance == 10.8
+    assert clearance.room_to_target_score == 0.0
+
+
+def test_evaluate_target_clearance_scores_wide_room_higher_than_tight_room():
+    tight = evaluate_target_clearance(10.0, 11.0, [11.05])   # barely clears
+    wide = evaluate_target_clearance(10.0, 11.0, [15.0])     # comfortably clears
+    assert tight.target_clear is True
+    assert wide.target_clear is True
+    assert wide.room_to_target_score > tight.room_to_target_score
+    assert 50.0 <= tight.room_to_target_score <= 100.0
+    assert 50.0 <= wide.room_to_target_score <= 100.0
+
+
+def test_evaluate_target_clearance_excludes_levels_at_or_below_current_price():
+    # A level at/below current_price is the one just broken through, not a
+    # future blocker -- next_significant_resistance only considers levels
+    # STRICTLY above current_price.
+    clearance = evaluate_target_clearance(10.0, 11.0, [9.5, 10.0])
+    assert clearance.target_clear is True
+    assert clearance.next_resistance is None
+
+
+def test_compute_runway_consumed_pct_at_the_trigger_is_zero():
+    assert compute_runway_consumed_pct(trigger_price=10.0, entry_price=10.0, resistance=11.0) == 0.0
+
+
+def test_compute_runway_consumed_pct_halfway_to_resistance():
+    assert compute_runway_consumed_pct(trigger_price=10.0, entry_price=10.5, resistance=11.0) == 0.5
+
+
+def test_compute_runway_consumed_pct_none_without_resistance():
+    assert compute_runway_consumed_pct(trigger_price=10.0, entry_price=10.5, resistance=None) is None
+
+
+def test_resistance_runway_score_excellent_at_low_consumption():
+    assert resistance_runway_score(0.05) == 100.0
+
+
+def test_resistance_runway_score_zero_past_the_reject_threshold():
+    assert resistance_runway_score(0.45) == 0.0
+
+
+def test_resistance_runway_score_none_passthrough():
+    assert resistance_runway_score(None) is None

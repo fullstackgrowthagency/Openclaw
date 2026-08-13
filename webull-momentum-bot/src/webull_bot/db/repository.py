@@ -197,7 +197,13 @@ def get_momentum_score_component_summary(
 
     components = []
     for name, weight in config.weights.items():
-        values = [r.components[name] for r in rows if name in r.components]
+        # room_to_target_score (v2.2, 2026-08-13) can be persisted as None --
+        # it's the one component allowed to be unavailable rather than a
+        # real 0-100 value (see MomentumScoreComponents.room_to_target_score's
+        # docstring) -- so a row missing it entirely is excluded from this
+        # average the same way a row from a different weights_version is,
+        # not treated as a 0 that would silently drag the average down.
+        values = [r.components[name] for r in rows if name in r.components and r.components[name] is not None]
         if not values:
             continue
         avg_raw_score = sum(values) / len(values)

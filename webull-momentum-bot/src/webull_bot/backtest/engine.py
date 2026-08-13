@@ -21,6 +21,7 @@ NOT modeled yet (tracked as follow-up work, not silently ignored):
 """
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -29,7 +30,8 @@ from ..config import Settings, get_settings
 from ..enums import CandidateState, ExitReason, OrderStatus, SignalAction
 from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.strategy import Strategy
-from ..models import Candidate, FloatData, MarketSnapshot, Trade
+from ..metrics.volume_profile import compute_runway_consumed_pct, evaluate_target_clearance
+from ..models import Candidate, FloatData, MarketSnapshot, Signal, Trade
 from ..position.position_manager import PositionManagementConfig, PositionManager
 from ..risk.risk_engine import RiskConfig, RiskEngine
 from ..scanner.candidate_watcher import CandidateWatcher, WatcherConfig
@@ -43,6 +45,22 @@ class BacktestConfig:
     starting_equity: float = 25_000.0
     fill_slippage_bps: float = 5.0
     fee_per_share: float = 0.0
+    # Entry-selectivity rework (2026-08-13, see docs/ARCHITECTURE.md and
+    # runtime/trading_loop.py's matching fields): mirrored here so a
+    # backtest actually predicts live behavior instead of silently reverting
+    # to the old immediate-entry-on-trigger logic -- this module's docstring
+    # is explicit that fidelity to the live code paths is the whole point.
+    confirmation_window_seconds: float = 10.0
+    confirmation_max_pullback_pct: float = 0.5
+    max_runway_consumed_pct: float = 0.40
+
+
+@dataclass
+class _PendingConfirmation:
+    signal: Signal
+    started_at: datetime
+    reference_price: float
+    snapshot: MarketSnapshot
 
 
 @dataclass
@@ -85,11 +103,19 @@ class BacktestEngine:
         self.broker.connect()
         self.risk_engine = RiskEngine(risk_config)
         self.order_manager = OrderManager(self.broker, self.risk_engine, settings or get_settings())
-        self.watcher = CandidateWatcher(mis_config, watcher_config)
+        # Same live-closure pattern as main.py's build_trading_loop -- feeds
+        # CandidateWatcher's room_to_target_score MIS component the exact
+        # fixed target this engine's own entries use.
+        self.watcher = CandidateWatcher(
+            mis_config, watcher_config,
+            reward_risk_ratio_fn=lambda: self.risk_engine.config.min_risk_reward_ratio,
+            stop_loss_pct_fn=lambda: self.risk_engine.config.stop_loss_pct,
+        )
         self.trigger_engine = TriggerEngine(strategies)
         self.position_manager = PositionManager(position_config)
         self.candidates: dict[str, Candidate] = {}
         self.trades: list[Trade] = []
+        self._pending_confirmations: dict[str, _PendingConfirmation] = {}
 
     def run(
         self, symbol_bars: dict[str, list[MarketSnapshot]], float_data: Optional[dict[str, FloatData]] = None
@@ -127,6 +153,10 @@ class BacktestEngine:
         if candidate.state in (CandidateState.REJECTED,):
             return
 
+        if candidate.state == CandidateState.CONFIRMING:
+            self._poll_confirmation(candidate, snapshot)
+            return
+
         self.watcher.update(candidate, snapshot)
         signal = self.trigger_engine.on_snapshot(candidate, snapshot)
         # Roll this bar's high into resistance for the *next* bar only after
@@ -135,6 +165,104 @@ class BacktestEngine:
         if signal is None:
             return
 
+        # trigger_engine.on_snapshot already moved `candidate` to CONFIRMING
+        # -- stash it for _poll_confirmation on a later bar rather than
+        # submitting immediately. Mirrors runtime/trading_loop.py's
+        # _start_confirmation -- see this module's docstring for why a
+        # backtest has to mirror the same entry-selectivity behavior live
+        # trading uses (2026-08-13 rework, see docs/ARCHITECTURE.md), not a
+        # simplified stand-in that would make backtest results diverge from
+        # what actually happens live.
+        self._pending_confirmations[candidate.symbol] = _PendingConfirmation(
+            signal=signal, started_at=snapshot.timestamp, reference_price=signal.reference_price, snapshot=snapshot,
+        )
+
+    def _poll_confirmation(self, candidate: Candidate, snapshot: MarketSnapshot) -> None:
+        """Simplified backtest counterpart to
+        runtime/trading_loop.py's TradingLoop._poll_confirmation -- same
+        hold-through-a-window-then-recompute-and-gate logic, minus
+        cross-candidate batch ranking: bars are processed one at a time
+        across a merged chronological timeline (see run()), not in
+        scarce-slot-contending same-tick batches the way TradingLoop's
+        single poll tick can be, so there's nothing meaningful to rank
+        against here. A candidate that clears confirmation submits
+        immediately; RiskEngine.evaluate's own max_simultaneous_positions
+        gate still applies exactly as it would live."""
+        pending = self._pending_confirmations.get(candidate.symbol)
+        if pending is None:
+            transition(candidate, CandidateState.ARMED, now=snapshot.timestamp, reason="no pending confirmation found for CONFIRMING candidate")
+            return
+
+        self.watcher.update(candidate, snapshot)
+
+        elapsed_seconds = (snapshot.timestamp - pending.started_at).total_seconds()
+        reversed_past_tolerance = snapshot.last_price < pending.reference_price * (
+            1 - self.config.confirmation_max_pullback_pct / 100.0
+        )
+        mis_faded = (
+            candidate.latest_score is not None
+            and candidate.latest_score.score < self.watcher.config.armed_score_threshold
+        )
+        if reversed_past_tolerance or mis_faded:
+            self._pending_confirmations.pop(candidate.symbol, None)
+            reason = "price reversed during confirmation" if reversed_past_tolerance else "MIS faded during confirmation"
+            transition(candidate, CandidateState.ARMED, now=snapshot.timestamp, reason=reason)
+            return
+
+        if elapsed_seconds < self.config.confirmation_window_seconds:
+            return  # still waiting, nothing has failed yet
+
+        original = pending.signal
+        confirmed_entry = snapshot.last_price
+        stop_pct = (
+            (original.reference_price - original.suggested_stop) / original.reference_price
+            if original.suggested_stop else None
+        )
+        target_pct = (
+            (original.suggested_target - original.reference_price) / original.reference_price
+            if original.suggested_target else None
+        )
+        confirmed_stop = confirmed_entry * (1 - stop_pct) if stop_pct is not None else original.suggested_stop
+        confirmed_target = confirmed_entry * (1 + target_pct) if target_pct is not None else original.suggested_target
+
+        target_clearance = None
+        if confirmed_target is not None:
+            target_clearance = evaluate_target_clearance(confirmed_entry, confirmed_target, candidate.static_resistance_levels)
+            candidate.next_resistance_price = target_clearance.next_resistance
+            candidate.target_clear = target_clearance.target_clear
+
+        runway_consumed = None
+        if target_clearance is not None and target_clearance.next_resistance is not None:
+            runway_consumed = compute_runway_consumed_pct(
+                pending.reference_price, confirmed_entry, target_clearance.next_resistance,
+            )
+        candidate.runway_consumed_pct = runway_consumed
+
+        if target_clearance is not None and not target_clearance.target_clear:
+            self._pending_confirmations.pop(candidate.symbol, None)
+            transition(candidate, CandidateState.ARMED, now=snapshot.timestamp, reason="target sits behind known resistance")
+            return
+
+        if runway_consumed is not None and runway_consumed > self.config.max_runway_consumed_pct:
+            self._pending_confirmations.pop(candidate.symbol, None)
+            transition(
+                candidate, CandidateState.ARMED, now=snapshot.timestamp,
+                reason="confirmed entry too far into the trigger-resistance runway",
+            )
+            return
+
+        self._pending_confirmations.pop(candidate.symbol, None)
+        confirmed_signal = Signal(
+            symbol=original.symbol, action=original.action, generated_at=snapshot.timestamp,
+            strategy_name=original.strategy_name, strategy_version=original.strategy_version,
+            reference_price=confirmed_entry, suggested_stop=confirmed_stop, suggested_target=confirmed_target,
+            score_at_signal=candidate.latest_score.score if candidate.latest_score else original.score_at_signal,
+            metadata=original.metadata,
+        )
+        transition(candidate, CandidateState.TRIGGERED, now=snapshot.timestamp, reason="confirmed")
+        self._submit_entry(candidate, confirmed_signal, snapshot)
+
+    def _submit_entry(self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot) -> None:
         try:
             # open_positions=self.broker.get_positions(), not omitted --
             # unlike the live TradingLoop path, this is actually correct

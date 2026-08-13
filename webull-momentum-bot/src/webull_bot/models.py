@@ -147,6 +147,18 @@ class MomentumScoreComponents:
     float_turnover_score: float             # today's cumulative float turnover (metrics.float_turnover) -- "how much of this stock has already changed hands today"
     short_term_relative_volume_score: float  # windowed RVOL (metrics.relative_volume_5m) -- more responsive to a fresh surge than the whole-session relative_volume
     dollar_volume_acceleration_score: float  # metrics.dollar_volume_accel_1m_3m -- distinct from volume_acceleration_score since it also reflects price movement between windows, not just share count
+    # v2.2 addition (2026-08-13, entry-selectivity rework -- see
+    # docs/ARCHITECTURE.md): how much room exists between the fixed +stop*R
+    # target and the next known static resistance level
+    # (metrics/volume_profile.py's evaluate_target_clearance). Optional,
+    # unlike every component above: only None when the caller didn't pass
+    # current-price/resistance context into compute_score (e.g. an older
+    # direct call site, or a test exercising the other components in
+    # isolation) -- compute_score excludes a None component from the
+    # weighted average and renormalizes over the remaining active weights
+    # rather than scoring it as a 0, so an unscoreable component never
+    # silently drags the whole MIS down.
+    room_to_target_score: Optional[float] = None
 
 
 @dataclass
@@ -250,6 +262,36 @@ class Candidate:
     # CandidateWatcher consumes this exactly once (only when its own
     # per-symbol history is still empty) and never touches it again.
     seed_snapshots: list[MarketSnapshot] = field(default_factory=list)
+
+    # -- entry-selectivity rework (2026-08-13, see docs/ARCHITECTURE.md) ------
+    # Dashboard-visible diagnostics for the CONFIRMING window and the
+    # target-clearance gate -- all set/cleared by TradingLoop._poll_confirmation,
+    # not CandidateWatcher, since they only have meaning once a real trigger
+    # (and therefore a real trigger/entry price) exists. None whenever the
+    # candidate isn't currently CONFIRMING or hasn't been through it yet this
+    # arm cycle.
+    confirmation_started_at: Optional[datetime] = None
+    confirmation_expires_at: Optional[datetime] = None
+    # Next static resistance level (candidate.static_resistance_levels) found
+    # strictly above the confirmed entry price, if any -- None means either
+    # no such level exists (open air) or confirmation hasn't run yet; see
+    # target_clear below to distinguish "checked, none found" from "not
+    # checked yet".
+    next_resistance_price: Optional[float] = None
+    # True once the target-clearance check has actually run and found no
+    # blocking resistance between the confirmed entry and its target; None
+    # before that check has run at all (see RESISTANCE_BEFORE_TARGET).
+    target_clear: Optional[bool] = None
+    # How much of the original trigger->resistance runway is already used up
+    # by the confirmed entry price (0.0 = entered right at the trigger, 1.0+
+    # = already consumed the whole gap to resistance) -- None when there's no
+    # resistance to measure against (unconstrained) or not yet computed.
+    runway_consumed_pct: Optional[float] = None
+    # Human-readable reason the most recent CONFIRMING attempt failed or was
+    # rejected (CONFIRMATION_FAILED / RESISTANCE_BEFORE_TARGET) -- surfaced
+    # on the dashboard so "why didn't this obviously-hot candidate trade" has
+    # a real answer instead of silence. Cleared on the next successful arm.
+    entry_block_reason: Optional[str] = None
 
 
 @dataclass

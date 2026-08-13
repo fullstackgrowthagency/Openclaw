@@ -20,7 +20,12 @@ _ALLOWED_TRANSITIONS: dict[CandidateState, set[CandidateState]] = {
     CandidateState.DISCOVERED: {CandidateState.WATCHING, CandidateState.REJECTED},
     CandidateState.WATCHING: {CandidateState.HEATING_UP, CandidateState.REJECTED, CandidateState.COOLDOWN},
     CandidateState.HEATING_UP: {CandidateState.ARMED, CandidateState.WATCHING, CandidateState.REJECTED},
-    CandidateState.ARMED: {CandidateState.TRIGGERED, CandidateState.HEATING_UP, CandidateState.REJECTED, CandidateState.COOLDOWN},
+    CandidateState.ARMED: {CandidateState.CONFIRMING, CandidateState.HEATING_UP, CandidateState.REJECTED, CandidateState.COOLDOWN},
+    # A strategy's trigger fired but hasn't held through the confirmation
+    # window yet (TradingLoop._poll_confirmation) -- see enums.CandidateState
+    # .CONFIRMING's docstring. Reverts to ARMED on failure/timeout, same as
+    # TRIGGERED reverting to ARMED on a rejected/failed order below.
+    CandidateState.CONFIRMING: {CandidateState.TRIGGERED, CandidateState.ARMED, CandidateState.REJECTED},
     CandidateState.TRIGGERED: {CandidateState.ENTERED, CandidateState.ARMED, CandidateState.REJECTED},
     CandidateState.ENTERED: {CandidateState.MANAGING},
     CandidateState.MANAGING: {CandidateState.EXITED},
@@ -36,6 +41,7 @@ _ALWAYS_CAN_REJECT = {
     CandidateState.WATCHING,
     CandidateState.HEATING_UP,
     CandidateState.ARMED,
+    CandidateState.CONFIRMING,
     CandidateState.TRIGGERED,
 }
 

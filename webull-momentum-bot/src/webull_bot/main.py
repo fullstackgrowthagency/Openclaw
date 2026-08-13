@@ -179,8 +179,7 @@ def build_trading_loop(
     else:
         universe_provider = StaticUniverseProvider(_PAPER_MODE_PLACEHOLDER_WATCHLIST)
 
-    watcher = CandidateWatcher()
-    # Constructed before the strategies below so each one can be handed a
+    # Constructed before watcher/strategies below so each one can be handed a
     # live-reading closure over its config -- see reward_risk_ratio_fn.
     risk_engine = RiskEngine()
 
@@ -200,6 +199,12 @@ def build_trading_loop(
     # technical level instead and keep their own strategy-local buffer % --
     # see each one's own config for why.
     stop_loss_pct_fn = lambda: risk_engine.config.stop_loss_pct  # noqa: E731
+
+    # Handed the same two closures as the strategies below so its
+    # room_to_target_score MIS component (scoring/momentum_ignition_score.py)
+    # targets the exact same fixed +stop*R level every strategy itself
+    # targets -- see CandidateWatcher.__init__'s docstring.
+    watcher = CandidateWatcher(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn)
 
     # Ordered most-selective/confirmed first, most-permissive last -- the
     # first strategy to return a Signal for a given tick wins (see

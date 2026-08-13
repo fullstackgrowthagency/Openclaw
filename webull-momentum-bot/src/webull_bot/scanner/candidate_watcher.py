@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Callable
 
 from ..enums import CandidateState, TradeBlockReason
 from ..metrics.rolling import MAX_HISTORY_MINUTES, compute_metrics
@@ -53,9 +54,26 @@ class WatcherConfig:
 
 
 class CandidateWatcher:
-    def __init__(self, mis_config: MISConfig | None = None, config: WatcherConfig | None = None):
+    def __init__(
+        self,
+        mis_config: MISConfig | None = None,
+        config: WatcherConfig | None = None,
+        *,
+        # Live-reading closures over RiskEngine.config, same pattern as every
+        # strategy in main.py's build_trading_loop -- feeds room_to_target_score
+        # (see scoring/momentum_ignition_score.py) the same fixed target
+        # every strategy itself targets (entry * (1 + stop_loss_pct/100 *
+        # min_risk_reward_ratio)), so a Settings-panel change to either value
+        # is reflected here too, not just in strategies' own signals. None
+        # (the default) simply leaves room_to_target_score uncomputed --
+        # existing behavior, see compute_score's docstring on that component.
+        reward_risk_ratio_fn: Callable[[], float] | None = None,
+        stop_loss_pct_fn: Callable[[], float] | None = None,
+    ):
         self.mis_config = mis_config or MISConfig.load()
         self.config = config or WatcherConfig()
+        self._reward_risk_ratio_fn = reward_risk_ratio_fn
+        self._stop_loss_pct_fn = stop_loss_pct_fn
         self._history: dict[str, list[MarketSnapshot]] = defaultdict(list)
 
     def _push_history(
@@ -113,7 +131,15 @@ class CandidateWatcher:
             typical_volume_5m=typical_5m,
         )
         candidate.latest_metrics = metrics
-        candidate.latest_score = compute_score(metrics, candidate.float_data, self.mis_config)
+        target_pct = None
+        if self._stop_loss_pct_fn is not None and self._reward_risk_ratio_fn is not None:
+            target_pct = (self._stop_loss_pct_fn() / 100.0) * self._reward_risk_ratio_fn()
+        candidate.latest_score = compute_score(
+            metrics, candidate.float_data, self.mis_config,
+            current_price=snapshot.last_price,
+            target_pct=target_pct,
+            static_resistance_levels=candidate.static_resistance_levels,
+        )
 
         # Recomputed from scratch every tick (not merged with the previous
         # value) so a resolved condition clears itself the moment it's no

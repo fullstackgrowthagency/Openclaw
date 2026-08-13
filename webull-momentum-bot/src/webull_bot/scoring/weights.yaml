@@ -15,7 +15,7 @@
 #
 # Bump `version` any time you change a weight or threshold so MomentumScore
 # records stay traceable to the formula that produced them.
-version: "v2.1-popularity-weighted"
+version: "v2.2-selectivity-rework"
 
 # v2 (2026-08-09): added float_turnover_score/short_term_relative_volume_score/
 # dollar_volume_acceleration_score -- metrics/rolling.py already computed
@@ -38,18 +38,33 @@ version: "v2.1-popularity-weighted"
 # raised (price itself moving fast is a real popularity tell, not just
 # volume), and breakout_proximity_score trimmed further (least
 # popularity-relevant of the structural factors).
+#
+# v2.2 (2026-08-13, entry-selectivity rework -- see docs/ARCHITECTURE.md):
+# added room_to_target_score (how much room exists between the fixed
+# +stop*R target and the next known static resistance level -- see
+# metrics/volume_profile.py's evaluate_target_clearance and
+# scoring/momentum_ignition_score.py's compute_components). Real motivation:
+# the bot was losing more trades than it won, and a good chunk of losers
+# were setups where the target itself sat behind a known resistance level
+# -- MIS alone has no way to see that, since it only measures how much a
+# name is currently moving, not whether there's actual room left to move
+# INTO. Every existing weight below is simply the old v2.1 value scaled by
+# 0.93 (preserves every component's *relative* weighting exactly -- nothing
+# below was judged less important than anything else, this just makes room
+# for the new one), with the freed 7% going to room_to_target_score.
 weights:
-  float_score: 0.06                         # structural (float size)
-  float_velocity_score: 0.12                # popularity: 5m float turnover rate -- trimmed from 0.13
-  float_turnover_score: 0.10                # today's cumulative float turnover -- trimmed from 0.13
-  relative_volume_score: 0.12               # popularity: whole-session RVOL -- trimmed from 0.13
-  short_term_relative_volume_score: 0.15    # windowed (5m) RVOL, the freshest "hot right now" signal -- raised from 0.13
-  volume_acceleration_score: 0.09
-  dollar_volume_acceleration_score: 0.09
-  price_acceleration_score: 0.10            # raised from 0.06 -- fast price movement is itself a popularity signal
-  breakout_proximity_score: 0.05            # trimmed from 0.06 -- least popularity-relevant structural factor
-  trend_quality_score: 0.05
-  liquidity_score: 0.07
+  float_score: 0.0558                         # structural (float size) -- 0.06 * 0.93
+  float_velocity_score: 0.1116                # popularity: 5m float turnover rate -- 0.12 * 0.93
+  float_turnover_score: 0.0930                # today's cumulative float turnover -- 0.10 * 0.93
+  relative_volume_score: 0.1116                # popularity: whole-session RVOL -- 0.12 * 0.93
+  short_term_relative_volume_score: 0.1395     # windowed (5m) RVOL, the freshest "hot right now" signal -- 0.15 * 0.93
+  volume_acceleration_score: 0.0837            # 0.09 * 0.93
+  dollar_volume_acceleration_score: 0.0837     # 0.09 * 0.93
+  price_acceleration_score: 0.0930             # fast price movement is itself a popularity signal -- 0.10 * 0.93
+  breakout_proximity_score: 0.0465             # least popularity-relevant structural factor -- 0.05 * 0.93
+  trend_quality_score: 0.0465                  # 0.05 * 0.93
+  liquidity_score: 0.0651                      # 0.07 * 0.93
+  room_to_target_score: 0.07                   # v2.2: new -- see comment above
 
 # Thresholds used to normalize raw metrics into 0-100 sub-scores, and to
 # drive DISCOVERED -> WATCHING -> HEATING_UP -> ARMED transitions. All

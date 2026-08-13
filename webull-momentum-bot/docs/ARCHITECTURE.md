@@ -427,14 +427,210 @@ autonomous discovery.
 ## State machine
 
 ```
-DISCOVERED -> WATCHING -> HEATING_UP -> ARMED -> TRIGGERED -> ENTERED -> MANAGING -> EXITED -> COOLDOWN
-                  \           \           \          \
-                   -----------------> REJECTED (terminal, from most states)
+DISCOVERED -> WATCHING -> HEATING_UP -> ARMED -> CONFIRMING -> TRIGGERED -> ENTERED -> MANAGING -> EXITED -> COOLDOWN
+                  \           \           \          \             \
+                   ------------------------------> REJECTED (terminal, from most states)
 ```
 
 A high Momentum Ignition Score can only push a candidate towards ARMED. It
 never creates an order by itself -- see `state_machine.py` and
-`scanner/candidate_watcher.py`.
+`scanner/candidate_watcher.py`. `CONFIRMING` was added 2026-08-13 (see
+"Entry selectivity rework" below): a strategy's trigger no longer submits
+an order immediately -- see that section for why.
+
+## Entry selectivity rework (2026-08-13)
+
+**Motivation, in the user's own words:** "It's not picking the best
+potential trade from the list to enter. Its taking all trades that trigger
+first not the best potential trade. It also needs a rework because some
+trades were not necissarly good trades and were not moving the right
+direction and ended up being bad trades. We need to identify more winning
+trades and make sure those are the ones that get entered. Right now we are
+loosing more trades then we are winning."
+
+Two root causes were confirmed against the actual code before any of this
+was built (not just theorized):
+
+1. **First-to-trigger, not best-to-trigger.** `TradingLoop
+   ._process_all_candidates` iterated candidates in a fixed list and
+   called `_submit_entry` the instant any one of them produced a signal --
+   no comparison across candidates competing for the same tick. If two
+   names triggered the same tick and only one position slot was open,
+   whichever got iterated first won it, regardless of which was actually
+   the better setup.
+2. **Entries could fire off a single noisy snapshot.** e.g.
+   `strategy/volume_ignition.py` returned `ENTER_LONG` off exactly one
+   tick: volume/float velocity crossing a threshold, positive
+   `price_velocity_1m`, and price above VWAP *at that instant* -- nothing
+   required the move to hold for even a second before an order went out.
+   A one-tick blip that reversed immediately after was indistinguishable
+   from a real breakout to this code. This generalizes to all 8 strategies
+   -- none of them required the trigger condition to persist.
+
+A fuller spec (resistance strength-scoring/clustering, per-strategy
+setup/trigger/confirmation splitting, MIS persistence/decay detection,
+price-volume efficiency, high retention, freshness, opportunity ranking,
+shadow-mode rollout) was considered and explicitly scoped down: this
+implementation targets the two confirmed root causes plus the two pieces
+the user asked to add on top (resistance-runway/target-clearance, MIS
+reweighting), without the added surface area of rewriting all 8 strategy
+files individually or building a second, parallel resistance-strength
+engine next to the one that already exists
+(`metrics/volume_profile.py`).
+
+### 1. Confirmation window (fixes root cause 2)
+
+New `CandidateState.CONFIRMING`, sitting between `ARMED` and `TRIGGERED`.
+`TriggerEngine.on_snapshot` still fires exactly the same way (unchanged
+per-strategy logic, unchanged first-match-wins across the 8 strategies) --
+the only change is it now transitions the candidate to `CONFIRMING`
+instead of `TRIGGERED`, and `TradingLoop` stashes the `Signal` (in
+`self._pending_confirmations`, a `PendingConfirmation` per symbol) instead
+of submitting an order immediately (`_start_confirmation`).
+
+Every tick while `CONFIRMING`, `TradingLoop._poll_confirmation` runs:
+
+- **Keeps failing the whole window**: price pulls back more than
+  `TradingLoopConfig.confirmation_max_pullback_pct` (0.5% default) below
+  the trigger reference price, current MIS drops back below
+  `WatcherConfig.armed_score_threshold`, or the spread widens back past
+  `max_spread_pct` -> `RiskEventType.CONFIRMATION_FAILED`, revert to
+  `ARMED`. The candidate must re-trigger completely fresh; the clock is
+  never resumed.
+- **Holds clean for `confirmation_window_seconds`** (10s default, a
+  starting value not backtested -- short enough that a genuine fast
+  breakout on a low-float name isn't badly chased, long enough to filter
+  an instant reversal): stop/target are **recomputed from the actual
+  confirmed price**, not the stale trigger-time price -- preserving each
+  strategy's own risk/reward *shape* (its stop distance and target
+  distance as a % of ITS OWN reference price) rather than recomputing
+  generically off `RiskConfig`, so the three strategies that anchor their
+  stop to a technical level (VWAP Reclaim, Breakout Pullback, Ignition
+  Pullback) keep their own logic's intent even though the actual
+  recompute step here is generic, not per-strategy.
+
+`WebullBrokerClient`/`PaperBrokerClient` aside, this is identical in
+`backtest/engine.py` (`BacktestEngine._poll_confirmation`), minus the
+cross-candidate ranking step below -- a backtest processes one merged
+chronological timeline of snapshots, not scarce-slot-contending same-tick
+batches, so there's nothing meaningful to rank against there. This
+module's own docstring is explicit that a backtest must mirror the real
+live code paths, not a simplified stand-in, or its results stop predicting
+what actually happens live -- exactly the failure mode this whole rework
+exists to fix, so the backtest engine had to change too, not just
+`TradingLoop`.
+
+### 2. Resistance-runway / target-clearance (fixes part of root cause 2, added at the user's explicit request)
+
+Once confirmation succeeds, before ever queuing for submission,
+`_poll_confirmation` runs a hard gate reusing the SAME
+`static_resistance_levels` volume-profile infrastructure described below
+(`metrics/volume_profile.py`) -- deliberately not a new, separate
+resistance-strength-scoring engine:
+
+- `next_significant_resistance(levels, above_price)`: the nearest static
+  level strictly above a price, or `None` if there isn't one. Excludes the
+  breakout level itself automatically (it's always <= the confirmed entry
+  price, so it never qualifies as "above").
+- `evaluate_target_clearance(entry, target, levels)`: computes
+  `target = entry * (1 + stop_loss_pct/100 * min_risk_reward_ratio)` (the
+  same fixed target every strategy already computes -- untouched) and
+  checks whether a known resistance level sits at or before it. **No
+  resistance found above the entry price means automatically clear** --
+  there is no invented arbitrary distance limit standing in for "we don't
+  know," matching this codebase's existing fail-soft convention for
+  `static_resistance_levels` (a failed/missing `get_raw_bars` lookup is
+  already treated as "no levels," not a separate valid/invalid state -- see
+  `scanner/broad_scanner.py`'s docstring). A resistance level found at or
+  before the target is a hard reject
+  (`RiskEventType.RESISTANCE_BEFORE_TARGET`), independent of how high MIS
+  is.
+- `compute_runway_consumed_pct(trigger_price, entry_price, resistance)`:
+  how much of the trigger->resistance room the confirmed entry price
+  already used up. `> TradingLoopConfig.max_runway_consumed_pct` (0.40
+  default) is also a hard reject, same event type. Deliberately **not** a
+  continuous per-tick MIS component (see below) -- there's no real
+  "trigger price" to measure runway from before a strategy has actually
+  triggered, and inventing one (e.g. reusing the running high) would
+  produce a number that doesn't mean what "runway consumed" is supposed to
+  mean.
+
+The stop, the fixed target formula, and the 2% spread rule are all
+untouched -- resistance only ever decides whether a trade is **allowed**,
+never what its stop/target actually are (per the user's explicit
+instruction to leave those three alone).
+
+### 3. `room_to_target_score`: new MIS component + reweighting (added at the user's explicit request)
+
+`MomentumScoreComponents` gained one new field,
+`room_to_target_score: Optional[float] = None` -- how much room exists
+between the fixed target and the next known resistance level, using the
+same `evaluate_target_clearance` above, computed every tick (not just at
+confirmation time, unlike runway above, since it only needs the current
+price, not a trigger price). `CandidateWatcher` was handed the same
+`reward_risk_ratio_fn`/`stop_loss_pct_fn` live closures over
+`RiskEngine.config` that strategies already get (see "Entry strategies"
+below), so this always reflects whatever the Settings panel currently has
+configured, exactly like every strategy's own target.
+
+`weights.yaml` bumped to `v2.2-selectivity-rework`: every one of the
+existing 11 weights was multiplied by `0.93` (preserving each one's
+*relative* weight exactly -- nothing was judged less important than
+anything else), freeing 7% for `room_to_target_score`. `compute_score`
+(`scoring/momentum_ignition_score.py`) skips any `None` component when
+averaging and **renormalizes over the remaining active weights** rather
+than treating a missing component as a 0 -- `room_to_target_score` is
+`None` (not a fabricated number) whenever a caller doesn't pass
+`current_price`/`target_pct` context, e.g. any pre-existing call site that
+hasn't been updated. See
+`tests/test_momentum_score.py::test_compute_score_renormalizes_missing_component_instead_of_treating_it_as_zero`.
+
+### 4. Batch ranking when slots are scarce (fixes root cause 1)
+
+`TradingLoop._process_all_candidates` no longer submits an entry the
+instant a candidate finishes confirming. Instead, `_poll_confirmation`
+queues successfully-confirmed-and-cleared candidates onto
+`self._ready_to_enter` (reset every pass), and after the full per-candidate
+loop finishes, `_submit_ranked_entries` runs once:
+
+1. Computes `available_slots = max_simultaneous_positions - len(open
+   positions)` (unlimited if `max_simultaneous_positions` is 0).
+2. Ranks every ready candidate by current MIS (`latest_score.score`)
+   descending.
+3. Submits the top `available_slots` (existing `_submit_entry`, existing
+   `RiskEngine.evaluate` gate chain, both completely unchanged).
+4. Anyone left over is **not discarded** -- they simply stay `CONFIRMING`.
+   `_poll_confirmation` re-queues them onto `_ready_to_enter` again next
+   tick (recomputing their entry price fresh each time) until either they
+   win a slot or `confirmation_ready_max_wait_seconds` (60s default, on
+   top of the confirmation window itself) runs out and they give up,
+   reverting to `ARMED`.
+
+This directly targets the reported symptom: with a limited number of
+simultaneous position slots, the single best-scoring opportunity currently
+available wins the slot, not whichever candidate happened to finish
+confirming first in iteration order.
+
+### Revert point
+
+The commit immediately before this rework started is preserved as
+`backup/pre-selectivity-rework-2026-08-13` (pushed to the remote). To
+fully revert: `git reset --hard backup/pre-selectivity-rework-2026-08-13`
+on `claude/webull-momentum-trading-bot-qzkn6n` (force-with-lease push
+required since it rewrites history).
+
+### What deliberately was NOT built
+
+Scoped out of this pass, consistent with "target the two confirmed root
+causes, not the full spec": per-strategy setup-quality scoring
+(`SETUP_QUALIFIED` state, `evaluate_setup`/`check_trigger`/
+`check_confirmation` split across all 8 strategy files), resistance
+strength/clustering/multi-source scoring beyond the existing volume-profile
+levels, MIS persistence/momentum-decay detection, price-volume efficiency,
+high retention, freshness scoring, a full Entry Quality Score formula, and
+shadow-mode/paper/live phased rollout. Revisit if win rate is still poor
+after this lands -- see "What deliberately was NOT built" is itself a
+signal of what to reach for next, not evidence those ideas were wrong.
 
 ## Resistance tracking gotcha (read before touching candidate_watcher.py)
 

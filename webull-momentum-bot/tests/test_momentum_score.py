@@ -152,3 +152,69 @@ def test_current_activity_outweighs_structural_factors_in_default_weights():
     quiet_score = compute_score(structurally_attractive_but_quiet, float_data, config).score
     popular_score = compute_score(actively_popular_right_now, float_data, config).score
     assert popular_score > quiet_score
+
+
+# -- room_to_target_score / entry-selectivity rework (2026-08-13) -----------
+
+def test_room_to_target_score_is_none_without_price_context():
+    # Without current_price/target_pct, compute_score can't evaluate target
+    # clearance at all -- must stay None (unavailable), never a fabricated
+    # 0, and must not be included in the weighted average (see
+    # compute_score's renormalization).
+    config = MISConfig.load()
+    score = compute_score(_metrics(), _float_data(5_000_000), config)
+    assert score.components.room_to_target_score is None
+
+
+def test_room_to_target_score_is_100_with_no_known_resistance():
+    config = MISConfig.load()
+    score = compute_score(
+        _metrics(), _float_data(5_000_000), config,
+        current_price=10.0, target_pct=0.10, static_resistance_levels=[],
+    )
+    assert score.components.room_to_target_score == 100.0
+
+
+def test_room_to_target_score_is_0_when_resistance_sits_at_or_before_target():
+    config = MISConfig.load()
+    # target = 10 * 1.10 = 11.0; a resistance level at 10.5 sits before it.
+    score = compute_score(
+        _metrics(), _float_data(5_000_000), config,
+        current_price=10.0, target_pct=0.10, static_resistance_levels=[10.5],
+    )
+    assert score.components.room_to_target_score == 0.0
+
+
+def test_open_room_to_target_scores_higher_than_tight_room():
+    config = MISConfig.load()
+    metrics = _metrics()
+    float_data = _float_data(5_000_000)
+    tight_room = compute_score(
+        metrics, float_data, config, current_price=10.0, target_pct=0.10, static_resistance_levels=[11.05],
+    )
+    wide_open = compute_score(
+        metrics, float_data, config, current_price=10.0, target_pct=0.10, static_resistance_levels=[],
+    )
+    assert wide_open.components.room_to_target_score > tight_room.components.room_to_target_score
+    assert wide_open.score > tight_room.score
+
+
+def test_compute_score_renormalizes_missing_component_instead_of_treating_it_as_zero():
+    # A candidate scored WITHOUT price context (room_to_target_score=None)
+    # must not be silently penalized as though that component scored 0 --
+    # it's excluded from the average entirely and the remaining weights
+    # renormalized over the active total instead.
+    config = MISConfig.load()
+    metrics = _metrics()
+    float_data = _float_data(5_000_000)
+    without_context = compute_score(metrics, float_data, config)
+
+    # What the score WOULD be under the bug this renormalization avoids:
+    # treating the missing component as a 0 contribution while still
+    # dividing by the full weight total (1.0) rather than the active one.
+    components = without_context.components
+    naive_if_treated_as_zero = sum(
+        getattr(components, key) * weight for key, weight in config.weights.items()
+        if getattr(components, key) is not None
+    )
+    assert without_context.score > naive_if_treated_as_zero

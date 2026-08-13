@@ -48,6 +48,15 @@ def _build_bars() -> list[MarketSnapshot]:
         _snapshot(t0 + timedelta(minutes=1), 5.10, 5.10, 4.95, 250_000, 5.09, 5.11, 5.05),
         _snapshot(t0 + timedelta(minutes=2), 5.20, 5.20, 4.95, 600_000, 5.19, 5.21, 5.15),
         _snapshot(t0 + timedelta(minutes=3), 5.60, 5.60, 4.95, 650_000, 5.59, 5.61, 5.50),
+        # Entry-selectivity rework (2026-08-13): the entry itself now only
+        # actually submits once BacktestEngine._poll_confirmation's window
+        # elapses, which lands on this bar rather than the one above (1
+        # minute is comfortably longer than the default 10s
+        # confirmation_window_seconds), and the target gets recomputed off
+        # THIS bar's price, not the original trigger price. This extra bar
+        # gives the fill room to still reach that recomputed target within
+        # the same run.
+        _snapshot(t0 + timedelta(minutes=4), 6.20, 6.20, 4.95, 700_000, 6.19, 6.21, 5.90),
     ]
     return bars
 

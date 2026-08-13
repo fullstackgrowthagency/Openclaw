@@ -129,6 +129,7 @@ from ..execution.order_manager import OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
 from ..market_hours import is_within_closing_buffer, is_within_core_trading_hours
+from ..metrics.volume_profile import compute_runway_consumed_pct, evaluate_target_clearance
 from ..models import Candidate, MarketSnapshot, MomentumEvent, MomentumScore, Order, Position, Signal, Trade
 from ..position.position_manager import PositionManager
 from ..risk.risk_engine import RiskEngine
@@ -138,6 +139,25 @@ from ..scanner.trigger_engine import TriggerEngine
 from ..state_machine import new_candidate, transition
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PendingConfirmation:
+    """Tracks a strategy trigger through TradingLoop's confirmation window --
+    see enums.CandidateState.CONFIRMING's docstring and _poll_confirmation.
+    `signal` starts as the ORIGINAL Signal the strategy produced at trigger
+    time; _poll_confirmation replaces it with a recomputed one (reference_price/
+    suggested_stop/suggested_target recentered on the actual confirmed price)
+    once the window elapses cleanly -- see that method for why the stale
+    trigger-time price is never used directly for order submission.
+    `snapshot` is refreshed every tick (whatever _poll_confirmation last saw)
+    so _submit_ranked_entries always has a fresh one to hand to _submit_entry
+    regardless of how many ticks a confirmed-but-unslotted candidate waits."""
+    signal: Signal
+    momentum_event: Optional[MomentumEvent]
+    started_at: datetime
+    reference_price: float
+    snapshot: MarketSnapshot
 
 
 @dataclass
@@ -390,6 +410,43 @@ class TradingLoopConfig:
     # OTHER open position, not just the one requested).
     manual_close_entry_pause_seconds: float = 20.0
 
+    # -- entry-selectivity rework (2026-08-13, see docs/ARCHITECTURE.md) ------
+    # Real motivation: the bot was losing more trades than it won, and the
+    # user identified two concrete causes -- (1) a trigger fired off a
+    # single snapshot, with no check the move actually held even a second,
+    # and (2) when multiple candidates wanted a scarce position slot at
+    # once, whichever triggered first in iteration order won it, not the
+    # best one available.
+    #
+    # How long a CONFIRMING candidate must keep holding above its trigger
+    # reference price before its signal is even considered for submission --
+    # see enums.CandidateState.CONFIRMING's docstring for the single-tick-
+    # noise problem this closes. 10s is a starting value, not backtested --
+    # short enough that a genuine fast breakout on a low-float name isn't
+    # badly chased, long enough to filter an instant reversal.
+    confirmation_window_seconds: float = 10.0
+    # How far price is allowed to pull back below the trigger reference
+    # price during the confirmation window before it's treated as a
+    # reversal (RiskEventType.CONFIRMATION_FAILED), not ordinary tick-to-
+    # tick noise.
+    confirmation_max_pullback_pct: float = 0.5
+    # Extra time a candidate that ALREADY passed confirmation is allowed to
+    # keep waiting for a position slot to open up (see
+    # _submit_ranked_entries) before giving up and reverting to ARMED --
+    # avoids holding a stale confirmed price open indefinitely if slots
+    # never free up. Total time a candidate can spend CONFIRMING before
+    # being given up on is therefore confirmation_window_seconds + this.
+    confirmation_ready_max_wait_seconds: float = 60.0
+    # Hard reject threshold for how much of the original trigger->resistance
+    # runway the confirmed entry price has already consumed (see
+    # metrics/volume_profile.py's compute_runway_consumed_pct/
+    # resistance_runway_score) -- 0.40 means a confirmed entry that already
+    # used up 40%+ of the room between the trigger and the next known
+    # resistance level is rejected as too extended, independent of target
+    # clearance (see _poll_confirmation). Starting value from the spec this
+    # rework is based on, not backtested.
+    max_runway_consumed_pct: float = 0.40
+
 
 class TradingLoop:
     # Pre-entry states only: resistance_level is what the resistance-based
@@ -405,8 +462,10 @@ class TradingLoop:
     # excludes DISCOVERED (transient -- a candidate leaves it on its very
     # first tick, before there's ever anything to subscribe) and TRIGGERED
     # (_poll_pending_entry manages a pending order, not a live price).
+    # CONFIRMING needs a live price every tick just as much as ARMED does --
+    # see _poll_confirmation, which is what actually reads it.
     _STREAMING_ELIGIBLE_STATES = (
-        CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
+        CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED, CandidateState.CONFIRMING,
         CandidateState.ENTERED, CandidateState.MANAGING,
     )
 
@@ -467,6 +526,21 @@ class TradingLoop:
         self._candidates_lock = threading.Lock()
         self._entry_signals: dict[str, Signal] = {}       # symbol -> signal that triggered a pending entry
         self._pending_entry_orders: dict[str, Order] = {}  # symbol -> submitted-but-not-yet-filled entry order
+        # symbol -> PendingConfirmation for a candidate currently CONFIRMING
+        # (see enums.CandidateState.CONFIRMING's docstring). Populated by
+        # _start_confirmation, consumed by _poll_confirmation/
+        # _submit_ranked_entries.
+        self._pending_confirmations: dict[str, PendingConfirmation] = {}
+        # Candidates that finished their confirmation window and cleared
+        # target-clearance/runway this tick -- reset at the start of every
+        # _process_all_candidates pass and consumed once, at the end of
+        # that same pass, by _submit_ranked_entries. See that method's
+        # docstring for why ranking happens once per tick across every
+        # ready candidate instead of submitting each one the instant it
+        # individually clears, and PendingConfirmation's docstring for why
+        # a candidate that doesn't get a slot this tick isn't lost -- it's
+        # simply re-added here again next tick by _poll_confirmation.
+        self._ready_to_enter: list[Candidate] = []
         # symbols whose TRIGGERED entry has already had its one
         # get_positions()-based verification check (see
         # _maybe_verify_entry_via_positions) -- prevents that check from
@@ -1041,6 +1115,10 @@ class TradingLoop:
             except Exception:
                 logger.exception("momentum_event_tracker.on_snapshot failed for %s.", candidate.symbol)
 
+        if candidate.state == CandidateState.CONFIRMING:
+            self._poll_confirmation(candidate, snapshot, now)
+            return
+
         if candidate.state == CandidateState.TRIGGERED:
             self._poll_pending_entry(candidate, now)
             return
@@ -1060,7 +1138,11 @@ class TradingLoop:
         if signal is None:
             return
         momentum_event = self._register_momentum_event(candidate, signal, now)
-        self._submit_entry(candidate, signal, snapshot, now, momentum_event=momentum_event)
+        # trigger_engine.on_snapshot already transitioned this candidate to
+        # CONFIRMING as a side effect -- this just stashes what
+        # _poll_confirmation needs, it does NOT submit an order (see
+        # enums.CandidateState.CONFIRMING's docstring).
+        self._start_confirmation(candidate, signal, snapshot, now, momentum_event=momentum_event)
 
     def _notify_score(self, candidate: Candidate) -> None:
         if self.on_score_computed is not None and candidate.latest_score is not None:
@@ -1111,6 +1193,207 @@ class TradingLoop:
                 self.on_order_update(order)
             except Exception:
                 logger.exception("on_order_update callback raised for order %s.", order.client_order_id)
+
+    def _start_confirmation(
+        self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot, now: datetime,
+        momentum_event: Optional[MomentumEvent] = None,
+    ) -> None:
+        """trigger_engine.on_snapshot already moved `candidate` to CONFIRMING
+        as a side effect before calling here -- this just records what
+        _poll_confirmation needs to evaluate the window on later ticks.
+        Does NOT submit an order; see enums.CandidateState.CONFIRMING's
+        docstring for why."""
+        candidate.confirmation_started_at = now
+        candidate.confirmation_expires_at = now + timedelta(seconds=self.config.confirmation_window_seconds)
+        candidate.entry_block_reason = None
+        self._pending_confirmations[candidate.symbol] = PendingConfirmation(
+            signal=signal, momentum_event=momentum_event, started_at=now,
+            reference_price=signal.reference_price, snapshot=snapshot,
+        )
+
+    def _poll_confirmation(self, candidate: Candidate, snapshot: MarketSnapshot, now: datetime) -> None:
+        """Runs every tick while `candidate` is CONFIRMING -- see
+        enums.CandidateState.CONFIRMING's docstring for why this state
+        exists at all. Keeps candidate.latest_metrics/latest_score fresh via
+        watcher.update (needed for the MIS-still-qualifies check below);
+        this can never move candidate.state out from under this method,
+        since CandidateWatcher.update()'s transition logic has no branch
+        that matches CONFIRMING.
+
+        Three ways this ends:
+        1. FAILS before the window elapses -- price reversed past
+           confirmation_max_pullback_pct, MIS fell back below the armed
+           threshold, or the spread widened back out -- RiskEventType
+           .CONFIRMATION_FAILED, revert to ARMED, must re-trigger fresh
+           (not resume this same clock).
+        2. Window elapses clean -- recompute stop/target from the ACTUAL
+           current price, not signal.reference_price (which by now is
+           confirmation_window_seconds stale), preserving the ORIGINAL
+           strategy's risk/reward shape rather than recomputing generically.
+           Then run the target-clearance/resistance-runway hard gates; a
+           failure here reverts to ARMED with RiskEventType
+           .RESISTANCE_BEFORE_TARGET. Passing queues the candidate onto
+           self._ready_to_enter for this tick's batch-ranking pass
+           (_submit_ranked_entries) instead of submitting immediately --
+           see that method for why.
+        3. Already cleared confirmation on an earlier tick but never won a
+           slot -- keeps re-queuing onto self._ready_to_enter (recomputed
+           fresh off the current price every tick) until either it wins a
+           slot or confirmation_ready_max_wait_seconds' extra grace period
+           runs out, at which point it gives up and reverts to ARMED.
+        """
+        pending = self._pending_confirmations.get(candidate.symbol)
+        if pending is None:
+            # Shouldn't happen, but don't get stuck in CONFIRMING forever --
+            # same safety-net pattern as _poll_pending_entry.
+            transition(candidate, CandidateState.ARMED, now=now, reason="no pending confirmation found for CONFIRMING candidate")
+            return
+        pending.snapshot = snapshot
+
+        self.watcher.update(candidate, snapshot)
+        self._notify_score(candidate)
+
+        elapsed_seconds = (now - pending.started_at).total_seconds()
+        total_timeout = self.config.confirmation_window_seconds + self.config.confirmation_ready_max_wait_seconds
+
+        reversed_past_tolerance = snapshot.last_price < pending.reference_price * (
+            1 - self.config.confirmation_max_pullback_pct / 100.0
+        )
+        mis_faded = (
+            candidate.latest_score is not None
+            and candidate.latest_score.score < self.watcher.config.armed_score_threshold
+        )
+        spread_too_wide = (
+            candidate.latest_metrics is not None
+            and candidate.latest_metrics.spread_pct > self.watcher.config.max_spread_pct
+        )
+        if reversed_past_tolerance or mis_faded or spread_too_wide:
+            failure = "price reversed" if reversed_past_tolerance else "MIS faded" if mis_faded else "spread widened"
+            reason = (
+                f"{candidate.symbol} failed confirmation ({failure}, {elapsed_seconds:.0f}s into a "
+                f"{self.config.confirmation_window_seconds:.0f}s window)"
+            )
+            candidate.entry_block_reason = reason
+            self._pending_confirmations.pop(candidate.symbol, None)
+            self.risk_engine.record_operational_event(RiskEventType.CONFIRMATION_FAILED, candidate.symbol, reason, now)
+            transition(candidate, CandidateState.ARMED, now=now, reason=reason)
+            return
+
+        if elapsed_seconds > total_timeout:
+            reason = (
+                f"{candidate.symbol} confirmed but never won a position slot within {total_timeout:.0f}s -- "
+                "giving up and reverting to ARMED"
+            )
+            candidate.entry_block_reason = reason
+            self._pending_confirmations.pop(candidate.symbol, None)
+            transition(candidate, CandidateState.ARMED, now=now, reason=reason)
+            return
+
+        if elapsed_seconds < self.config.confirmation_window_seconds:
+            return  # still waiting, nothing has failed yet
+
+        original = pending.signal
+        confirmed_entry = snapshot.last_price
+        stop_pct = (
+            (original.reference_price - original.suggested_stop) / original.reference_price
+            if original.suggested_stop else None
+        )
+        target_pct = (
+            (original.suggested_target - original.reference_price) / original.reference_price
+            if original.suggested_target else None
+        )
+        confirmed_stop = confirmed_entry * (1 - stop_pct) if stop_pct is not None else original.suggested_stop
+        confirmed_target = confirmed_entry * (1 + target_pct) if target_pct is not None else original.suggested_target
+
+        target_clearance = None
+        if confirmed_target is not None:
+            target_clearance = evaluate_target_clearance(confirmed_entry, confirmed_target, candidate.static_resistance_levels)
+            candidate.next_resistance_price = target_clearance.next_resistance
+            candidate.target_clear = target_clearance.target_clear
+
+        runway_consumed = None
+        if target_clearance is not None and target_clearance.next_resistance is not None:
+            runway_consumed = compute_runway_consumed_pct(
+                pending.reference_price, confirmed_entry, target_clearance.next_resistance,
+            )
+        candidate.runway_consumed_pct = runway_consumed
+
+        if target_clearance is not None and not target_clearance.target_clear:
+            reason = (
+                f"{candidate.symbol}: target {confirmed_target:.4f} sits behind known resistance "
+                f"{target_clearance.next_resistance:.4f} -- rejecting entry"
+            )
+            candidate.entry_block_reason = reason
+            self._pending_confirmations.pop(candidate.symbol, None)
+            self.risk_engine.record_operational_event(RiskEventType.RESISTANCE_BEFORE_TARGET, candidate.symbol, reason, now)
+            transition(candidate, CandidateState.ARMED, now=now, reason=reason)
+            return
+
+        if runway_consumed is not None and runway_consumed > self.config.max_runway_consumed_pct:
+            reason = (
+                f"{candidate.symbol}: confirmed entry already consumed {runway_consumed:.0%} of the "
+                f"trigger-to-resistance runway (max {self.config.max_runway_consumed_pct:.0%}) -- rejecting entry"
+            )
+            candidate.entry_block_reason = reason
+            self._pending_confirmations.pop(candidate.symbol, None)
+            self.risk_engine.record_operational_event(RiskEventType.RESISTANCE_BEFORE_TARGET, candidate.symbol, reason, now)
+            transition(candidate, CandidateState.ARMED, now=now, reason=reason)
+            return
+
+        # Confirmed and clear -- queue for this tick's batch-ranking pass
+        # instead of submitting immediately, so a simultaneously-confirming
+        # BETTER candidate this same tick can win a scarce slot instead of
+        # losing purely to iteration order (see _submit_ranked_entries).
+        pending.signal = Signal(
+            symbol=original.symbol,
+            action=original.action,
+            generated_at=now,
+            strategy_name=original.strategy_name,
+            strategy_version=original.strategy_version,
+            reference_price=confirmed_entry,
+            suggested_stop=confirmed_stop,
+            suggested_target=confirmed_target,
+            score_at_signal=candidate.latest_score.score if candidate.latest_score else original.score_at_signal,
+            metadata=original.metadata,
+        )
+        if candidate not in self._ready_to_enter:
+            self._ready_to_enter.append(candidate)
+
+    def _submit_ranked_entries(self, now: datetime) -> None:
+        """Runs once per _process_all_candidates pass, after every candidate
+        has already been processed this tick -- see self._ready_to_enter's
+        docstring. Real motivation (2026-08-13, user-reported): the bot was
+        taking whichever candidate happened to trigger/confirm FIRST in
+        iteration order, not the best one available, whenever multiple
+        candidates wanted a scarce position slot at the same time.
+
+        Ranks by current MIS (candidate.latest_score.score) descending and
+        submits the best min(available_slots, len(ready)) of them. The rest
+        are simply left CONFIRMING, not discarded -- _poll_confirmation
+        re-queues them onto self._ready_to_enter again next tick (with a
+        freshly recomputed entry price), so a candidate that loses out this
+        tick naturally gets re-ranked against whatever's ready next tick
+        instead of having to re-earn confirmation from scratch."""
+        if not self._ready_to_enter:
+            return
+
+        max_positions = self.risk_engine.config.max_simultaneous_positions
+        available_slots = (
+            max(0, max_positions - len(self._positions)) if max_positions else len(self._ready_to_enter)
+        )
+        if available_slots <= 0:
+            return
+
+        ranked = sorted(
+            self._ready_to_enter, key=lambda c: c.latest_score.score if c.latest_score else 0.0, reverse=True,
+        )
+        for candidate in ranked[:available_slots]:
+            pending = self._pending_confirmations.pop(candidate.symbol, None)
+            if pending is None:
+                continue  # shouldn't happen -- defensive only
+            transition(candidate, CandidateState.TRIGGERED, now=now, reason="confirmed and ranked for entry")
+            self._submit_entry(candidate, pending.signal, pending.snapshot, now, momentum_event=pending.momentum_event)
+            self._flush_state_transitions(candidate)
 
     def _submit_entry(
         self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot, now: datetime,
@@ -1182,8 +1465,8 @@ class TradingLoop:
             transition(candidate, CandidateState.ARMED, now=now, reason=f"risk engine rejected entry: {exc.decision.reason}")
             return
         except Exception:
-            # trigger_engine.on_snapshot already transitioned this candidate
-            # to TRIGGERED as a side effect before calling here -- if
+            # The caller (_submit_ranked_entries) already transitioned this
+            # candidate to TRIGGERED right before calling here -- if
             # order_manager.submit_signal raises anything other than the
             # expected OrderRejected (a real broker/network error, a bug),
             # that leaves the candidate stuck in TRIGGERED with no order
@@ -2470,7 +2753,7 @@ class TradingLoop:
                 candidate = new_candidate(symbol, now=now)
                 for state in (
                     CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
-                    CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING,
+                    CandidateState.CONFIRMING, CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING,
                 ):
                     transition(candidate, state, now=now)
                 with self._candidates_lock:
@@ -2531,6 +2814,8 @@ class TradingLoop:
         # the next one.
         self._tick_positions_cache = None
         self._tick_open_orders_cache = None
+        # Reset every pass -- see this attribute's docstring in __init__.
+        self._ready_to_enter = []
 
         # Runs here (main thread) rather than acted on immediately by
         # whatever thread called engage_kill_switch_and_flatten -- keeps
@@ -2710,6 +2995,15 @@ class TradingLoop:
                 self._process_candidate(candidate, now, batch_snapshots.get(candidate.symbol))
             except Exception:
                 logger.exception("Unhandled error processing candidate %s; continuing loop.", candidate.symbol)
+
+        # After every candidate this tick has had a chance to finish
+        # confirmation and queue onto self._ready_to_enter -- see
+        # _submit_ranked_entries' docstring for why ranking/submission
+        # happens once here rather than inline per-candidate above.
+        try:
+            self._submit_ranked_entries(now)
+        except Exception:
+            logger.exception("Unhandled error submitting ranked entries this cycle.")
 
     def _universe_rescan_loop(self, stop_flag: Optional[Callable[[], bool]]) -> None:
         """Runs on a background daemon thread from run_forever(): repeatedly

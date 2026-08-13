@@ -12,6 +12,16 @@ class CandidateState(str, Enum):
     WATCHING = "watching"
     HEATING_UP = "heating_up"
     ARMED = "armed"
+    # A strategy's trigger condition fired, but no order has been submitted
+    # yet -- added 2026-08-13 as part of the entry-selectivity rework (see
+    # docs/ARCHITECTURE.md's "Entry selectivity rework" section): the
+    # previous behavior submitted an order the instant a strategy returned
+    # a Signal off a single snapshot, which meant a one-tick noise spike
+    # was indistinguishable from a real breakout. CONFIRMING holds the
+    # candidate here for TradingLoopConfig.confirmation_window_seconds,
+    # requiring price to keep holding above the trigger reference before
+    # ever reaching TRIGGERED (order submitted).
+    CONFIRMING = "confirming"
     TRIGGERED = "triggered"
     ENTERED = "entered"
     MANAGING = "managing"
@@ -143,6 +153,22 @@ class RiskEventType(str, Enum):
     # before the stuck order is cancelled and dropped from tracking so a
     # fresh check_exit/exit attempt can run the very next tick.
     PENDING_EXIT_ORDER_STUCK = "pending_exit_order_stuck"
+    # Entry-selectivity rework (2026-08-13, see docs/ARCHITECTURE.md):
+    # raised by TradingLoop._poll_confirmation, not RiskEngine.evaluate,
+    # when a CONFIRMING candidate fails to hold through
+    # TradingLoopConfig.confirmation_window_seconds -- price reversed past
+    # the allowed pullback, MIS fell back below the armed threshold, or
+    # the spread widened back out. The candidate reverts to ARMED and must
+    # re-trigger fresh rather than resuming a stale confirmation clock.
+    CONFIRMATION_FAILED = "confirmation_failed"
+    # Raised by TradingLoop._poll_confirmation when a confirmed trigger's
+    # recomputed target (from the ACTUAL confirmed entry price, not the
+    # stale trigger price -- see that method's docstring) would sit past a
+    # known static resistance level (candidate.static_resistance_levels)
+    # before ever reaching it. This is a hard reject, independent of how
+    # high MIS is: no amount of momentum matters if the fixed +stop*R
+    # target has a real ceiling in the way first.
+    RESISTANCE_BEFORE_TARGET = "resistance_before_target"
 
 
 class MomentumOutcome(str, Enum):

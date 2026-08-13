@@ -82,6 +82,16 @@ def _build_bars() -> list[MarketSnapshot]:
         _snapshot(t0 + timedelta(minutes=1), 5.10, 5.10, 250_000, 5.09, 5.11, 5.05),
         _snapshot(t0 + timedelta(minutes=2), 5.20, 5.20, 600_000, 5.19, 5.21, 5.15),
         _snapshot(t0 + timedelta(minutes=3), 5.60, 5.60, 650_000, 5.59, 5.61, 5.50),
+        # Entry-selectivity rework (2026-08-13): the entry itself now only
+        # actually submits once CONFIRMING's window elapses -- see
+        # TradingLoop._poll_confirmation -- which lands on this bar rather
+        # than the one above (1 minute is comfortably longer than the
+        # default 10s confirmation_window_seconds), and the target gets
+        # recomputed off THIS bar's price, not the original trigger price.
+        # This extra bar gives the fill room to still reach that recomputed
+        # target within the same run, so tests relying on a partial exit
+        # (SCALE_OUT) actually happening keep working.
+        _snapshot(t0 + timedelta(minutes=4), 6.20, 6.20, 700_000, 6.19, 6.21, 5.90),
     ]
 
 
@@ -378,6 +388,182 @@ def _armed_candidate_setup(broker):
     return loop, candidate
 
 
+# -- confirmation window / entry-selectivity rework (2026-08-13) -----------
+# See enums.CandidateState.CONFIRMING's docstring and
+# TradingLoop._poll_confirmation's docstring for the full design: a
+# strategy trigger no longer submits an order immediately -- it has to hold
+# through a confirmation window first, and when multiple candidates want a
+# scarce position slot at once, the best-scoring one wins, not whichever
+# triggered first.
+
+def _confirming_signal(reference_price=5.20, suggested_stop=5.00, suggested_target=5.60):
+    from webull_bot.enums import SignalAction
+    from webull_bot.models import Signal
+
+    return Signal(
+        symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=_IN_HOURS_NOW,
+        strategy_name="momentum_breakout", strategy_version="v1",
+        reference_price=reference_price, suggested_stop=suggested_stop, suggested_target=suggested_target,
+    )
+
+
+def test_start_confirmation_stashes_pending_and_does_not_submit_an_order():
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    signal = _confirming_signal()
+    loop._start_confirmation(candidate, signal, snapshot, _IN_HOURS_NOW)
+
+    assert "TEST" in loop._pending_confirmations
+    assert candidate.confirmation_started_at == _IN_HOURS_NOW
+    assert broker._orders == {}  # no order submitted yet
+
+
+def test_poll_confirmation_takes_no_action_while_still_within_the_window():
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    # Isolate timing/reversal behavior from the separate MIS-fade check --
+    # a fresh test candidate's cold-start MIS (near-zero velocity/
+    # acceleration history) has nothing to do with what this test covers.
+    loop.watcher.config.armed_score_threshold = -1.0
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._start_confirmation(candidate, _confirming_signal(), snapshot, _IN_HOURS_NOW)
+
+    later = _IN_HOURS_NOW + timedelta(seconds=2)  # well within the 10s default window
+    later_snapshot = _snapshot(later, 5.21, 5.21, 610_000, 5.20, 5.22, 5.15)
+    loop._poll_confirmation(candidate, later_snapshot, later)
+
+    assert candidate.state == CandidateState.CONFIRMING
+    assert candidate not in loop._ready_to_enter
+    assert "TEST" in loop._pending_confirmations
+
+
+def test_poll_confirmation_fails_and_reverts_to_armed_on_a_price_reversal():
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._start_confirmation(candidate, _confirming_signal(reference_price=5.20), snapshot, _IN_HOURS_NOW)
+
+    # Well past confirmation_max_pullback_pct's default 0.5% below 5.20.
+    later = _IN_HOURS_NOW + timedelta(seconds=2)
+    reversal_snapshot = _snapshot(later, 5.05, 5.20, 610_000, 5.04, 5.06, 5.10)
+    loop._poll_confirmation(candidate, reversal_snapshot, later)
+
+    assert candidate.state == CandidateState.ARMED
+    assert "TEST" not in loop._pending_confirmations
+    assert candidate.entry_block_reason is not None
+    from webull_bot.enums import RiskEventType
+    assert loop.risk_engine.events[-1].event_type == RiskEventType.CONFIRMATION_FAILED.value
+
+
+def test_poll_confirmation_succeeds_after_the_window_and_queues_for_ranking():
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.watcher.config.armed_score_threshold = -1.0  # isolate from cold-start MIS, see note above
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._start_confirmation(candidate, _confirming_signal(), snapshot, _IN_HOURS_NOW)
+
+    after_window = _IN_HOURS_NOW + timedelta(seconds=11)  # past the 10s default window
+    holding_snapshot = _snapshot(after_window, 5.30, 5.30, 620_000, 5.29, 5.31, 5.15)
+    loop._poll_confirmation(candidate, holding_snapshot, after_window)
+
+    # Queued for this tick's batch-ranking pass, not submitted directly --
+    # state stays CONFIRMING until _submit_ranked_entries actually picks it.
+    assert candidate.state == CandidateState.CONFIRMING
+    assert candidate in loop._ready_to_enter
+    assert broker._orders == {}
+    # Recomputed off the actual confirmed price (5.30), not the stale
+    # trigger-time reference price (5.20) -- see _poll_confirmation's
+    # docstring.
+    assert loop._pending_confirmations["TEST"].signal.reference_price == 5.30
+
+
+def test_poll_confirmation_rejects_when_resistance_sits_before_the_recomputed_target():
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.watcher.config.armed_score_threshold = -1.0  # isolate from cold-start MIS, see note above
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+    candidate.static_resistance_levels = [5.40]  # sits before entry(5.30) * 1.10-ish target
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._start_confirmation(
+        candidate, _confirming_signal(reference_price=5.20, suggested_stop=5.00, suggested_target=5.72), snapshot, _IN_HOURS_NOW,
+    )
+
+    after_window = _IN_HOURS_NOW + timedelta(seconds=11)
+    holding_snapshot = _snapshot(after_window, 5.30, 5.30, 620_000, 5.29, 5.31, 5.15)
+    loop._poll_confirmation(candidate, holding_snapshot, after_window)
+
+    assert candidate.state == CandidateState.ARMED
+    assert candidate not in loop._ready_to_enter
+    assert candidate.target_clear is False
+    from webull_bot.enums import RiskEventType
+    assert loop.risk_engine.events[-1].event_type == RiskEventType.RESISTANCE_BEFORE_TARGET.value
+
+
+def test_submit_ranked_entries_picks_the_higher_score_when_a_slot_is_scarce():
+    broker = _FakeBroker()
+    loop, candidate_a = _armed_candidate_setup(broker)
+    loop.risk_engine.config.max_simultaneous_positions = 1
+
+    from webull_bot.state_machine import new_candidate, transition as _transition
+    candidate_b = new_candidate("OTHR")
+    _transition(candidate_b, CandidateState.WATCHING)
+    _transition(candidate_b, CandidateState.HEATING_UP)
+    _transition(candidate_b, CandidateState.ARMED)
+    _transition(candidate_b, CandidateState.CONFIRMING)
+    _transition(candidate_a, CandidateState.CONFIRMING)
+    loop.candidates["OTHR"] = candidate_b
+
+    from webull_bot.models import MomentumScore, MomentumScoreComponents
+    def _score(value):
+        components = MomentumScoreComponents(*([0.0] * 11))
+        return MomentumScore(symbol="X", timestamp=_IN_HOURS_NOW, score=value, components=components, weights_version="test")
+
+    candidate_a.latest_score = _score(60.0)
+    candidate_b.latest_score = _score(90.0)  # higher -- should win the one slot
+
+    snapshot_a = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    snapshot_b = MarketSnapshot(
+        symbol="OTHR", timestamp=_IN_HOURS_NOW, last_price=3.00, bid=2.99, ask=3.01, bid_size=500, ask_size=500,
+        cumulative_volume=600_000, vwap=2.95, high_of_day=3.00, low_of_day=2.90, open_price=2.95,
+    )
+    loop._pending_confirmations["TEST"] = _pending_confirmation(broker, candidate_a, _confirming_signal(), snapshot_a)
+    loop._pending_confirmations["OTHR"] = _pending_confirmation(
+        broker, candidate_b,
+        _confirming_signal(reference_price=3.00, suggested_stop=2.85, suggested_target=3.30), snapshot_b,
+    )
+    loop._ready_to_enter = [candidate_a, candidate_b]
+
+    loop._submit_ranked_entries(_IN_HOURS_NOW)
+
+    assert candidate_b.state in (CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING)
+    assert "OTHR" not in loop._pending_confirmations
+    assert candidate_a.state == CandidateState.CONFIRMING  # lost the slot, left waiting
+    assert "TEST" in loop._pending_confirmations
+
+
+def _pending_confirmation(broker, candidate, signal, snapshot):
+    from webull_bot.runtime.trading_loop import PendingConfirmation
+    return PendingConfirmation(
+        signal=signal, momentum_event=None, started_at=_IN_HOURS_NOW,
+        reference_price=signal.reference_price, snapshot=snapshot,
+    )
+
+
 def test_entry_stays_triggered_while_order_pending_then_enters_on_fill():
     broker = _FakeBroker(fills_after_polls=2)
     loop, candidate = _armed_candidate_setup(broker)
@@ -391,6 +577,7 @@ def test_entry_stays_triggered_while_order_pending_then_enters_on_fill():
     # In the real pipeline, trigger_engine.on_snapshot transitions ARMED ->
     # TRIGGERED as a side effect before _submit_entry is ever called -- do
     # the same here so this focused test matches that real precondition.
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
 
     signal = Signal(
@@ -500,6 +687,7 @@ def test_confirm_entry_filled_still_tracks_position_when_broker_get_positions_ra
     from webull_bot.state_machine import transition
 
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     signal = Signal(
         symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
@@ -523,6 +711,7 @@ def _trigger_and_build_signal(candidate, snapshot):
     from webull_bot.models import Signal
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     return Signal(
         symbol=candidate.symbol, action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
@@ -710,6 +899,7 @@ def test_exit_stays_managing_while_pending_then_finalizes_on_fill():
     from webull_bot.state_machine import transition
     from webull_bot.enums import CandidateState
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -744,6 +934,7 @@ def test_poll_pending_exit_does_nothing_while_still_within_the_timeout():
     from webull_bot.state_machine import transition
     from webull_bot.enums import CandidateState
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -785,6 +976,7 @@ def test_poll_pending_exit_cancels_and_drops_a_stuck_order_past_the_timeout():
     from webull_bot.state_machine import transition
     from webull_bot.enums import CandidateState
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -828,6 +1020,7 @@ def test_poll_pending_exit_drops_a_stuck_order_even_when_cancel_itself_fails():
     from webull_bot.state_machine import transition
     from webull_bot.enums import CandidateState
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -867,6 +1060,7 @@ def test_manage_position_survives_an_unexpected_broker_exception_on_stop_loss():
 
     broker = _BrokenSellBroker()
     loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -899,6 +1093,7 @@ def test_cooldown_expires_back_to_watching():
     transition(candidate, CandidateState.WATCHING, now=now - timedelta(seconds=1000))
     transition(candidate, CandidateState.HEATING_UP, now=now - timedelta(seconds=1000))
     transition(candidate, CandidateState.ARMED, now=now - timedelta(seconds=1000))
+    transition(candidate, CandidateState.CONFIRMING, now=now - timedelta(seconds=1000))
     transition(candidate, CandidateState.TRIGGERED, now=now - timedelta(seconds=1000))
     transition(candidate, CandidateState.ENTERED, now=now - timedelta(seconds=1000))
     transition(candidate, CandidateState.MANAGING, now=now - timedelta(seconds=1000))
@@ -929,12 +1124,15 @@ def test_state_transitions_are_flushed_in_order_via_callback():
     path = [(t[1], t[2]) for t in transitions]
     # Hitting target only partially exits (SCALE_OUT) and stays MANAGING --
     # see docs/ARCHITECTURE.md's "Position management" section -- so this
-    # 4-bar run never reaches EXITED/COOLDOWN.
+    # run never reaches EXITED/COOLDOWN. ARMED -> CONFIRMING -> TRIGGERED
+    # (not a direct ARMED -> TRIGGERED jump) since the entry-selectivity
+    # rework (2026-08-13, see docs/ARCHITECTURE.md).
     assert path == [
         (CandidateState.DISCOVERED, CandidateState.WATCHING),
         (CandidateState.WATCHING, CandidateState.HEATING_UP),
         (CandidateState.HEATING_UP, CandidateState.ARMED),
-        (CandidateState.ARMED, CandidateState.TRIGGERED),
+        (CandidateState.ARMED, CandidateState.CONFIRMING),
+        (CandidateState.CONFIRMING, CandidateState.TRIGGERED),
         (CandidateState.TRIGGERED, CandidateState.ENTERED),
         (CandidateState.ENTERED, CandidateState.MANAGING),
     ]
@@ -1252,7 +1450,7 @@ def test_rescan_universe_skips_resistance_refresh_for_entered_candidate():
     loop = _build_loop(broker)
     candidate = new_candidate("TEST")
     for state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
-                  CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
+                  CandidateState.CONFIRMING, CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
         transition(candidate, state)
     loop.candidates["TEST"] = candidate
 
@@ -1298,7 +1496,7 @@ def _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0, q
     ))
     candidate = new_candidate(symbol)
     for state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
-                  CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
+                  CandidateState.CONFIRMING, CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
         transition(candidate, state)
     loop.candidates[symbol] = candidate
     position = Position(
@@ -1634,6 +1832,7 @@ def test_kill_switch_flatten_leaves_pending_when_broker_does_not_fill_synchronou
     # so it genuinely stays pending until tick 2's poll.
     broker = _FakeBroker(fills_after_polls=2)
     loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -1671,7 +1870,7 @@ def test_kill_switch_flatten_skips_symbol_on_snapshot_failure_without_crashing()
 
     broken_candidate = new_candidate("NOSNAPSHOT")
     for state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
-                  CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
+                  CandidateState.CONFIRMING, CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
         transition(broken_candidate, state)
     loop.candidates["NOSNAPSHOT"] = broken_candidate
     nosnapshot_position = Position(
@@ -1775,6 +1974,7 @@ def test_kill_switch_flatten_does_not_double_submit_while_a_close_is_still_pendi
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -1805,6 +2005,7 @@ def test_kill_switch_flatten_still_cancels_a_resting_bracket_not_just_pending_ex
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -2037,7 +2238,7 @@ def test_reconcile_leaves_an_already_managing_candidate_alone():
     ))
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition as _transition
-    for state in (CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
+    for state in (CandidateState.CONFIRMING, CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
         _transition(candidate, state)
 
     loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
@@ -2064,6 +2265,7 @@ def test_reconcile_rebuilds_a_candidate_stuck_in_a_non_terminal_state():
     ))
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition as _transition_stuck
+    _transition_stuck(candidate, CandidateState.CONFIRMING)
     _transition_stuck(candidate, CandidateState.TRIGGERED)
     loop._persisted_transition_counts["TEST"] = 3
 
@@ -2146,6 +2348,7 @@ def test_reconcile_drops_a_position_no_longer_at_the_broker():
 
     broker = _FakeBroker()  # no positions -- simulates the broker-side close
     loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -2178,6 +2381,7 @@ def test_reconcile_records_a_trade_for_an_externally_closed_position_using_a_rea
     loop, candidate = _armed_candidate_setup(broker)
     trades = []
     loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -2217,6 +2421,7 @@ def test_reconcile_records_a_trade_for_an_externally_closed_position_falling_bac
     loop, candidate = _armed_candidate_setup(broker)
     trades = []
     loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -2252,6 +2457,7 @@ def test_reconcile_external_close_falls_back_to_the_streaming_cache_not_entry_pr
     loop, candidate = _armed_candidate_setup(broker)
     trades = []
     loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -2288,6 +2494,7 @@ def test_reconcile_external_close_falls_back_to_entry_price_when_streaming_cache
     loop, candidate = _armed_candidate_setup(broker)
     trades = []
     loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -2329,6 +2536,7 @@ def test_reconcile_does_not_drop_a_position_missing_from_a_single_pass():
 
     broker = _FakeBroker()  # no positions this pass -- simulates one degraded/incomplete response
     loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -2350,6 +2558,7 @@ def test_reconcile_miss_streak_resets_once_the_broker_reports_the_symbol_again()
 
     broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -2395,6 +2604,7 @@ def test_reconcile_does_not_drop_a_position_with_a_pending_exit_in_flight():
 
     broker = _FakeBroker()  # broker-side quantity already at 0 for this symbol
     loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -2950,6 +3160,7 @@ def test_confirm_entry_filled_attaches_broker_bracket_when_supported():
     broker = _RestingBroker(fills_after_polls=1)
     loop, candidate = _armed_candidate_setup(broker)
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     signal = Signal(
         symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
@@ -2973,6 +3184,7 @@ def test_poll_broker_bracket_skips_individual_calls_when_still_resting_per_batch
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3002,6 +3214,7 @@ def test_poll_broker_bracket_falls_back_to_individual_call_for_a_leg_missing_fro
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3039,6 +3252,7 @@ def test_poll_broker_bracket_falls_back_entirely_without_list_open_orders_suppor
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3083,6 +3297,7 @@ def test_poll_broker_bracket_finalizes_full_exit_on_stop_fill():
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3117,6 +3332,7 @@ def test_poll_broker_bracket_finalizes_partial_exit_on_target_fill_and_reprotect
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3370,6 +3586,7 @@ def test_manage_position_finalizes_via_broker_bracket_without_submitting_its_own
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3407,6 +3624,7 @@ def test_manage_position_cancels_resting_orders_before_a_vwap_failure_exit():
     ))
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3446,6 +3664,7 @@ def test_manage_position_backs_off_after_a_failed_exit_submission():
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3493,6 +3712,7 @@ def test_manage_position_exit_backoff_caps_and_resets_on_success():
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3526,6 +3746,7 @@ def test_close_all_positions_now_cancels_resting_orders_before_flattening():
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3571,6 +3792,7 @@ def test_reconcile_cancels_resting_orders_when_dropping_an_externally_closed_pos
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3833,6 +4055,7 @@ def test_confirm_entry_filled_subscribes_to_streaming():
     broker = _StreamingBroker(fills_after_polls=1)
     loop, candidate = _armed_candidate_setup(broker)
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     signal = Signal(
         symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
@@ -3850,6 +4073,7 @@ def test_process_candidate_prefers_a_fresh_streamed_snapshot_for_a_managing_posi
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3876,6 +4100,7 @@ def test_process_all_candidates_excludes_a_fresh_streaming_symbol_from_the_rest_
     loop, candidate = _armed_candidate_setup(broker)
     from webull_bot.state_machine import transition
 
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)
@@ -3965,6 +4190,7 @@ def test_process_candidate_does_not_use_streaming_for_a_triggered_candidate():
     broker = _StreamingBroker(fills_after_polls=5)
     loop, candidate = _armed_candidate_setup(broker)
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     signal = Signal(
         symbol="TEST", action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
@@ -3992,6 +4218,7 @@ def test_process_all_candidates_retries_a_previously_failed_subscribe():
 
     broker = _StreamingBroker(fail_subscribe_times=1)
     loop, candidate = _armed_candidate_setup(broker)
+    transition(candidate, CandidateState.CONFIRMING)
     transition(candidate, CandidateState.TRIGGERED)
     transition(candidate, CandidateState.ENTERED)
     transition(candidate, CandidateState.MANAGING)

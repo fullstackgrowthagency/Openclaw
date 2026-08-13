@@ -16,10 +16,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import yaml
 
+from ..metrics.volume_profile import evaluate_target_clearance
 from ..models import FloatData, MomentumMetrics, MomentumScore, MomentumScoreComponents
 
 _DEFAULT_WEIGHTS_PATH = Path(__file__).parent / "weights.yaml"
@@ -56,6 +57,10 @@ def compute_components(
     metrics: MomentumMetrics,
     float_data: Optional[FloatData],
     config: MISConfig,
+    *,
+    current_price: Optional[float] = None,
+    target_pct: Optional[float] = None,
+    static_resistance_levels: Optional[Sequence[float]] = None,
 ) -> MomentumScoreComponents:
     th = config.thresholds
 
@@ -115,6 +120,19 @@ def compute_components(
     dollar_volume_score = _scale(metrics.dollar_volume, th["min_dollar_volume"] * 0.25, th["min_dollar_volume"] * 4)
     liquidity_score = (spread_score + dollar_volume_score) / 2
 
+    # v2.2 addition: room to the fixed +stop*R target before a known static
+    # resistance level gets in the way (metrics/volume_profile.py's
+    # evaluate_target_clearance) -- see MomentumScoreComponents.room_to_target_score's
+    # docstring for why this stays None (excluded from the weighted average,
+    # not scored as 0) rather than defaulting to a real number when the
+    # caller doesn't have price/resistance context to give it.
+    room_to_target_score = None
+    if current_price is not None and target_pct is not None:
+        target_price = current_price * (1 + target_pct)
+        room_to_target_score = evaluate_target_clearance(
+            current_price, target_price, static_resistance_levels or [],
+        ).room_to_target_score
+
     return MomentumScoreComponents(
         float_score=float_score,
         float_velocity_score=float_velocity_score,
@@ -127,6 +145,7 @@ def compute_components(
         float_turnover_score=float_turnover_score,
         short_term_relative_volume_score=short_term_relative_volume_score,
         dollar_volume_acceleration_score=dollar_volume_acceleration_score,
+        room_to_target_score=room_to_target_score,
     )
 
 
@@ -134,14 +153,34 @@ def compute_score(
     metrics: MomentumMetrics,
     float_data: Optional[FloatData],
     config: Optional[MISConfig] = None,
+    *,
+    current_price: Optional[float] = None,
+    target_pct: Optional[float] = None,
+    static_resistance_levels: Optional[Sequence[float]] = None,
 ) -> MomentumScore:
     config = config or MISConfig.load()
-    components = compute_components(metrics, float_data, config)
-    weighted_sum = sum(getattr(components, key) * weight for key, weight in config.weights.items())
+    components = compute_components(
+        metrics, float_data, config,
+        current_price=current_price, target_pct=target_pct, static_resistance_levels=static_resistance_levels,
+    )
+    # Skip any component the caller didn't give enough context to compute
+    # (currently only room_to_target_score can be None -- see its docstring)
+    # and renormalize over the remaining active weights, rather than
+    # treating a missing component as a 0 that would silently drag every
+    # candidate's score down whenever current_price/target_pct aren't passed.
+    weighted_sum = 0.0
+    active_weight = 0.0
+    for key, weight in config.weights.items():
+        value = getattr(components, key)
+        if value is None:
+            continue
+        weighted_sum += value * weight
+        active_weight += weight
+    score = weighted_sum / active_weight if active_weight else 0.0
     return MomentumScore(
         symbol=metrics.symbol,
         timestamp=metrics.timestamp,
-        score=_clamp(weighted_sum),
+        score=_clamp(score),
         components=components,
         weights_version=config.version,
     )
