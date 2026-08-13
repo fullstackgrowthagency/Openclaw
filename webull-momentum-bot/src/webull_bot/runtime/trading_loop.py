@@ -125,7 +125,7 @@ from typing import Callable, Iterable, Optional
 from ..brokers.webull.retry import CallPriority
 from ..collection.event_recorder import MomentumEventTracker
 from ..enums import CandidateState, ExitReason, OrderSide, OrderStatus, RiskEventType, SignalAction
-from ..execution.order_manager import OrderManager, OrderRejected
+from ..execution.order_manager import BracketEntryRejected, BracketSubmissionResult, OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
 from ..market_hours import is_within_closing_buffer, is_within_core_trading_hours
@@ -526,6 +526,18 @@ class TradingLoop:
         self._candidates_lock = threading.Lock()
         self._entry_signals: dict[str, Signal] = {}       # symbol -> signal that triggered a pending entry
         self._pending_entry_orders: dict[str, Order] = {}  # symbol -> submitted-but-not-yet-filled entry order
+        # symbol -> the stop/target Order objects an atomic bracket entry
+        # (OrderManager.submit_entry_signal) already placed alongside this
+        # pending entry, if any -- see enums.RiskEventType
+        # .BRACKET_ENTRY_REJECTED's docstring and _confirm_entry_filled's
+        # docstring for why this needs to survive until the entry leg's
+        # fill is confirmed (only then does _confirm_entry_filled have a
+        # real Position to attach broker_stop_order_id/broker_target_order_id
+        # to). Popped alongside _entry_signals at every one of that dict's
+        # own pop sites; entries never present in this dict at all (as
+        # opposed to a real (None, None) result) fall back to
+        # _attach_broker_bracket exactly as before this feature existed.
+        self._pending_entry_brackets: dict[str, BracketSubmissionResult] = {}
         # symbol -> PendingConfirmation for a candidate currently CONFIRMING
         # (see enums.CandidateState.CONFIRMING's docstring). Populated by
         # _start_confirmation, consumed by _poll_confirmation/
@@ -1454,44 +1466,64 @@ class TradingLoop:
 
         try:
             # open_positions=list(self._positions.values()), NOT
-            # self.broker.get_positions() -- see submit_signal's docstring:
-            # only this process's own locally-tracked positions carry a
-            # real stop_price, which RiskEngine.evaluate's max_total_risk_pct
-            # gate needs to compute actual assumed risk.
-            order = self.order_manager.submit_signal(
+            # self.broker.get_positions() -- see submit_entry_signal's
+            # docstring: only this process's own locally-tracked positions
+            # carry a real stop_price, which RiskEngine.evaluate's
+            # max_total_risk_pct gate needs to compute actual assumed risk.
+            bracket_result = self.order_manager.submit_entry_signal(
                 signal, snapshot=snapshot, open_positions=list(self._positions.values()), now=now,
             )
         except OrderRejected as exc:
             transition(candidate, CandidateState.ARMED, now=now, reason=f"risk engine rejected entry: {exc.decision.reason}")
             return
+        except BracketEntryRejected as exc:
+            # Atomic bracket entry (2026-08-13, see docs/ARCHITECTURE.md's
+            # "Atomic bracket entry" section) -- the broker supports
+            # place_bracket_entry but rejected this specific combo request.
+            # Per explicit instruction: the trade does NOT go through at
+            # all, no fallback to a plain unprotected entry. No order was
+            # ever accepted, so this must not count against this symbol's
+            # daily entry budget, same as the other record_entry_order_failed
+            # call sites in this method.
+            logger.error(
+                "Atomic bracket entry for %s was rejected by the broker -- the trade will NOT go "
+                "through (no fallback to an unprotected plain entry). Reason: %s",
+                candidate.symbol, exc.reason,
+            )
+            self.risk_engine.record_entry_order_failed(candidate.symbol, now)
+            reason = f"{candidate.symbol}: atomic bracket entry rejected by the broker -- trade did not go through ({exc.reason})"
+            self.risk_engine.record_operational_event(RiskEventType.BRACKET_ENTRY_REJECTED, candidate.symbol, reason, now)
+            transition(candidate, CandidateState.ARMED, now=now, reason=reason)
+            return
         except Exception:
             # The caller (_submit_ranked_entries) already transitioned this
             # candidate to TRIGGERED right before calling here -- if
-            # order_manager.submit_signal raises anything other than the
-            # expected OrderRejected (a real broker/network error, a bug),
-            # that leaves the candidate stuck in TRIGGERED with no order
-            # ever recorded in _pending_entry_orders, since we never got
-            # past this call. Without this handler, that exception
-            # propagates up to _process_all_candidates' generic catch-all,
-            # which just logs "Unhandled error processing candidate" and
-            # moves on -- the candidate then sits in TRIGGERED until
-            # _poll_pending_entry's "no pending order found for TRIGGERED
-            # candidate" safety net eventually notices and reverts it,
-            # which can take a while if compounded by other transient
-            # failures (e.g. get_snapshot also failing for this symbol on
-            # subsequent cycles). Confirmed as a real production case: a
-            # candidate sat TRIGGERED for over a minute with zero orders
-            # ever submitted before that fallback finally caught it. Log
-            # the real traceback here (the generic catch-all above logs a
-            # much less specific message) and revert immediately instead of
-            # relying on that fallback to eventually clean it up.
+            # order_manager.submit_entry_signal raises anything other than
+            # the expected OrderRejected/BracketEntryRejected (a real
+            # broker/network error, a bug), that leaves the candidate stuck
+            # in TRIGGERED with no order ever recorded in
+            # _pending_entry_orders, since we never got past this call.
+            # Without this handler, that exception propagates up to
+            # _process_all_candidates' generic catch-all, which just logs
+            # "Unhandled error processing candidate" and moves on -- the
+            # candidate then sits in TRIGGERED until _poll_pending_entry's
+            # "no pending order found for TRIGGERED candidate" safety net
+            # eventually notices and reverts it, which can take a while if
+            # compounded by other transient failures (e.g. get_snapshot
+            # also failing for this symbol on subsequent cycles). Confirmed
+            # as a real production case: a candidate sat TRIGGERED for over
+            # a minute with zero orders ever submitted before that fallback
+            # finally caught it. Log the real traceback here (the generic
+            # catch-all above logs a much less specific message) and revert
+            # immediately instead of relying on that fallback to eventually
+            # clean it up.
             logger.exception(
                 "Unexpected error submitting entry order for %s; reverting to ARMED.", candidate.symbol
             )
             # risk_engine.evaluate() already ran (and approved/incremented
-            # the counters) inside order_manager.submit_signal BEFORE the
-            # broker call that just failed -- roll that back too, same as
-            # the other two record_entry_order_failed call sites, or an
+            # the counters) inside order_manager.submit_entry_signal BEFORE
+            # the broker call that just failed -- roll that back too, same
+            # as the other two record_entry_order_failed call sites, or an
             # unexpected broker exception becomes yet another way to
             # silently exhaust this symbol's daily entry budget with zero
             # real positions ever opened.
@@ -1503,13 +1535,26 @@ class TradingLoop:
             # object and will persist the change on its next on_snapshot()
             # call for this symbol (see _register_momentum_event).
             momentum_event.was_traded = True
+        order = bracket_result.entry_order
         self._notify_order_update(order)
+        if bracket_result.stop_order is not None:
+            self._notify_order_update(bracket_result.stop_order)
+        if bracket_result.target_order is not None:
+            self._notify_order_update(bracket_result.target_order)
 
         if order.status == OrderStatus.FILLED:
-            self._confirm_entry_filled(candidate, signal, order, now)
+            self._confirm_entry_filled(candidate, signal, order, now, bracket_result=bracket_result)
         elif order.status in (OrderStatus.SUBMITTED, OrderStatus.ACCEPTED, OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED):
             self._entry_signals[candidate.symbol] = signal
             self._pending_entry_orders[candidate.symbol] = order
+            # Only stashed when an atomic bracket was actually placed
+            # (stop_order is None otherwise, e.g. paper/backtest) -- see
+            # this dict's own docstring in __init__ for why an absent
+            # entry here means _confirm_entry_filled falls back to
+            # _attach_broker_bracket exactly as before this feature
+            # existed, not "atomic bracket with zero legs."
+            if bracket_result.stop_order is not None:
+                self._pending_entry_brackets[candidate.symbol] = bracket_result
             # Defensive reset -- should already be clear (see
             # _poll_pending_entry/_maybe_verify_entry_via_positions, which
             # both discard it whenever a pending entry resolves either way),
@@ -1546,12 +1591,14 @@ class TradingLoop:
                 signal = self._entry_signals.pop(candidate.symbol)
                 self._pending_entry_orders.pop(candidate.symbol, None)
                 self._pending_entry_position_checked.discard(candidate.symbol)
-                self._confirm_entry_filled(candidate, signal, status_order, now)
+                bracket_result = self._pending_entry_brackets.pop(candidate.symbol, None)
+                self._confirm_entry_filled(candidate, signal, status_order, now, bracket_result=bracket_result)
                 return
             elif status_order.status in (OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED):
                 self._entry_signals.pop(candidate.symbol, None)
                 self._pending_entry_orders.pop(candidate.symbol, None)
                 self._pending_entry_position_checked.discard(candidate.symbol)
+                self._pending_entry_brackets.pop(candidate.symbol, None)
                 # Same rollback as _submit_entry's immediate-failure branch --
                 # this order was risk-approved and briefly pending, but never
                 # actually filled, so it must not count against this symbol's
@@ -1643,6 +1690,7 @@ class TradingLoop:
         signal = self._entry_signals.pop(candidate.symbol, None)
         self._pending_entry_orders.pop(candidate.symbol, None)
         self._pending_entry_position_checked.discard(candidate.symbol)
+        bracket_result = self._pending_entry_brackets.pop(candidate.symbol, None)
         if signal is None:
             # Shouldn't happen (mirrors _poll_pending_entry's own "no
             # pending order" guard for the analogous gap), but don't
@@ -1658,9 +1706,12 @@ class TradingLoop:
             created_at=pending.created_at, updated_at=now, strategy_name=pending.strategy_name,
         )
         self._notify_order_update(filled_order)
-        self._confirm_entry_filled(candidate, signal, filled_order, now)
+        self._confirm_entry_filled(candidate, signal, filled_order, now, bracket_result=bracket_result)
 
-    def _confirm_entry_filled(self, candidate: Candidate, signal: Signal, order: Order, now: datetime) -> None:
+    def _confirm_entry_filled(
+        self, candidate: Candidate, signal: Signal, order: Order, now: datetime,
+        bracket_result: Optional[BracketSubmissionResult] = None,
+    ) -> None:
         # This method is the ONLY place a filled entry order becomes a
         # locally-tracked position (self._positions), and it's called after
         # _poll_pending_entry has already popped candidate.symbol out of
@@ -1714,7 +1765,38 @@ class TradingLoop:
             strategy_name=signal.strategy_name,
         )
         self._positions[candidate.symbol] = position
-        self._attach_broker_bracket(candidate, position, now)
+        # Atomic bracket entry (2026-08-13, see docs/ARCHITECTURE.md's
+        # "Atomic bracket entry" section): if OrderManager.submit_entry_signal
+        # already placed the stop/target as part of the SAME broker call as
+        # this entry (bracket_result.stop_order is not None), that resting
+        # bracket already exists -- record it directly instead of calling
+        # _attach_broker_bracket, which would place a SECOND, duplicate
+        # bracket on top of the one already resting at the broker. Only
+        # falls through to _attach_broker_bracket when no atomic bracket
+        # was attempted at all (bracket_result is None or its stop_order is
+        # None -- PaperBrokerClient/backtests, or a signal with no
+        # suggested_stop/suggested_target), preserving that path's existing
+        # behavior exactly.
+        #
+        # Known residual gap, not fully closed by this: the bracket's
+        # resting quantity was sized off decision.max_shares at submission
+        # time, before this fill was confirmed -- if the broker's actual
+        # fill quantity above ends up different (a genuine partial fill on
+        # a MARKET order), the resting bracket and the locally-tracked
+        # position.quantity could briefly disagree. _sync_broker_protective_orders'
+        # existing every-tick reconciliation is what would eventually
+        # correct this, same defense-in-depth this loop already relies on
+        # for other broker-response uncertainties.
+        if bracket_result is not None and bracket_result.stop_order is not None:
+            position.broker_stop_order_id = bracket_result.stop_order.broker_order_id
+            position.broker_target_order_id = (
+                bracket_result.target_order.broker_order_id if bracket_result.target_order is not None else None
+            )
+            position.broker_stop_price_synced = position.stop_price
+            position.broker_stop_is_trailing = False
+            position.unprotected_alert_logged = False
+        else:
+            self._attach_broker_bracket(candidate, position, now)
         self._ensure_streaming_subscribed([candidate.symbol])
         transition(candidate, CandidateState.ENTERED, now=now, reason="entry order filled")
         transition(candidate, CandidateState.MANAGING, now=now, reason="managing open position")

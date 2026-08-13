@@ -1360,12 +1360,18 @@ class WebullBrokerClient(BrokerClient):
         at the broker automatically. Confirmed live 2026-08-11 (see
         scripts/verify_bracket_orders.py) that Webull accepts attaching
         this combo_type=OCO pair to an ALREADY-OPEN position with no
-        MASTER (entry) leg -- the only shape Webull's own docs show an
-        example of is a MASTER-anchored combo submitted atomically with
-        the entry, which this deliberately avoids (see
-        TradingLoop._attach_broker_bracket's docstring for why: touching
-        the entry-fill pipeline itself carries far more risk than a second
-        call right after fill confirmation).
+        MASTER (entry) leg needed -- exactly the shape still needed for
+        every call site of this method today: re-protecting a position
+        after a partial exit and re-syncing the resting stop as breakeven/
+        trailing math moves it (see TradingLoop._attach_broker_bracket),
+        both of which necessarily happen well after the entry already
+        filled, so there's no entry order left to bundle a MASTER leg
+        with. NOT used for the very first bracket at fresh-entry time
+        anymore, though -- see place_bracket_entry below, added 2026-08-13,
+        for that MASTER-anchored atomic shape, which this method's
+        docstring used to describe as deliberately avoided (a decision
+        since reversed at the account owner's explicit instruction; see
+        that method's docstring for why).
 
         order_v3.place_order accepts a *list* of order dicts sharing one
         client_combo_order_id as a combo -- a lone dict with
@@ -1418,6 +1424,111 @@ class WebullBrokerClient(BrokerClient):
             order.status = OrderStatus.SUBMITTED
             order.updated_at = now
         return stop_order, target_order
+
+    def place_bracket_entry(
+        self, entry_order: Order, stop_order: Order, target_order: Optional[Order],
+    ) -> tuple[Order, Order, Optional[Order]]:
+        """Places the entry order together with its protective stop (and,
+        quantity permitting, its take-profit target) as ONE atomic
+        MASTER+STOP_LOSS(+STOP_PROFIT) combo -- the "Buy-to-Open TP/SL"
+        shape from Webull's own OpenAPI docs. Added 2026-08-13 (see
+        docs/ARCHITECTURE.md's "Atomic bracket entry" section) to close the
+        unprotected window that existed between a fresh entry's fill and
+        place_oco_bracket's separate, after-the-fact call above: that
+        method's own docstring explains the PRIOR reasoning for keeping
+        entry and bracket as two separate calls (touching the entry-fill
+        pipeline was judged riskier than a short software-managed window)
+        -- this reverses that call, at the account owner's explicit
+        instruction, because the "short window" wasn't actually bounded
+        (see TradingLoop._attach_broker_bracket's docstring: a failed
+        attach retries forever with no ceiling) and outside core hours it
+        wasn't short at all (the broker-side bracket is never even
+        attempted then). Submitting all legs in the SAME request means
+        there is no interval, ever, where a filled position during core
+        hours exists without a resting broker-side bracket already placed
+        against it.
+
+        target_order may be None -- mirrors
+        TradingLoop._attach_broker_bracket's own halving rule (the
+        take-profit leg is a partial exit, sells half the position, so an
+        entry too small to split into a whole-share partial exit gets a
+        MASTER+STOP_LOSS combo with no take-profit leg at all, rather than
+        a target leg for zero shares). Webull's combo_type table allows
+        0-1 STOP_PROFIT legs per combo.
+
+        No try/except here, deliberately: a rejection must propagate to
+        the caller as a hard failure. Per explicit instruction (2026-08-13):
+        if this call fails, the trade must NOT go through at all -- no
+        fallback to a plain, unprotected entry. See
+        OrderManager.submit_entry_signal and
+        TradingLoop._submit_entry's BracketEntryRejected handling, which is
+        exactly what this raising (instead of swallowing, unlike
+        _attach_broker_bracket's own best-effort contract) exists to feed.
+
+        Same "response body's success shape is UNVERIFIED beyond
+        raise_for_status" caveat as place_order/place_oco_bracket applies
+        here too -- a 2xx response means Webull accepted the combo request
+        for processing, not that every individual leg is independently
+        confirmed. A leg that silently failed despite an overall 2xx would
+        still be caught by this loop's existing defense-in-depth
+        (_sync_broker_protective_orders' every-tick "no resting order yet"
+        retry, and normal fill-confirmation polling for the entry leg
+        itself)."""
+        if self.is_live and not self.settings.is_live_trading_authorized():
+            raise RuntimeError("Live trading authorization lost; refusing to place order.")
+
+        combo_id = str(uuid.uuid4())
+        entry_payload = self._order_payload(entry_order)
+        entry_payload["combo_type"] = "MASTER"
+        entry_payload["client_combo_order_id"] = combo_id
+
+        stop_payload = self._order_payload(stop_order)
+        stop_payload["combo_type"] = "STOP_LOSS"
+        stop_payload["client_combo_order_id"] = combo_id
+
+        payloads = [entry_payload, stop_payload]
+        target_payload = None
+        if target_order is not None:
+            target_payload = self._order_payload(target_order)
+            target_payload["combo_type"] = "STOP_PROFIT"
+            target_payload["client_combo_order_id"] = combo_id
+            payloads.append(target_payload)
+
+        # CRITICAL priority + exclusive(): same rationale as place_order/
+        # place_oco_bracket above -- this is the single highest-stakes call
+        # this client makes (it's now BOTH the entry and its protection at
+        # once), so it must never compete with concurrent discovery/
+        # reconcile/other-order traffic for the same rate-limit slots.
+        with webull_limiter.exclusive():
+            response = call_with_retry(
+                lambda: self._require_trade_client().order_v3.place_order(self.account_id, payloads),
+                priority=CallPriority.CRITICAL,
+            )
+        response.raise_for_status()
+
+        now = datetime.utcnow()
+        for order, payload in ((entry_order, entry_payload), (stop_order, stop_payload)):
+            # Same convention as place_order/place_oco_bracket: Webull's
+            # cancel/detail calls key off the client-generated
+            # client_order_id, so broker_order_id is set to that same
+            # value rather than parsing anything out of the response body.
+            order.client_order_id = payload["client_order_id"]
+            order.broker_order_id = payload["client_order_id"]
+            # SUBMITTED, not FILLED -- same as place_order: a 2xx means
+            # accepted for processing. The entry leg still needs normal
+            # fill-confirmation polling exactly as before
+            # (_poll_pending_entry/_maybe_verify_entry_via_positions);
+            # this call only changes WHEN the bracket gets placed, not how
+            # the entry's own fill gets confirmed.
+            order.status = OrderStatus.SUBMITTED
+            order.updated_at = now
+        if target_order is not None:
+            target_order.client_order_id = target_payload["client_order_id"]
+            target_order.broker_order_id = target_payload["client_order_id"]
+            target_order.status = OrderStatus.SUBMITTED
+            target_order.updated_at = now
+
+        return entry_order, stop_order, target_order
 
     def cancel_order(self, broker_order_id: str) -> None:
         # CRITICAL priority: always either protecting a position (cancelling

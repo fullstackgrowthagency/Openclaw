@@ -169,6 +169,17 @@ class RiskEventType(str, Enum):
     # high MIS is: no amount of momentum matters if the fixed +stop*R
     # target has a real ceiling in the way first.
     RESISTANCE_BEFORE_TARGET = "resistance_before_target"
+    # Atomic bracket entry (2026-08-13, see docs/ARCHITECTURE.md) -- the
+    # entry, stop-loss, and take-profit orders are now submitted together
+    # as one MASTER+STOP_LOSS+STOP_PROFIT combo (see
+    # WebullBrokerClient.place_bracket_entry) so a position is never
+    # broker-managed-less even for an instant during core hours. Raised
+    # by TradingLoop._submit_entry when the broker rejects that combo
+    # request -- per explicit instruction, this is a hard failure: the
+    # trade does NOT go through at all (no fallback to a plain,
+    # unprotected entry), the candidate reverts to ARMED, and this event
+    # is what tells a human why nothing was opened.
+    BRACKET_ENTRY_REJECTED = "bracket_entry_rejected"
 
 
 class MomentumOutcome(str, Enum):

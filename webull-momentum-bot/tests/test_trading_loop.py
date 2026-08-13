@@ -564,6 +564,110 @@ def _pending_confirmation(broker, candidate, signal, snapshot):
     )
 
 
+# -- atomic bracket entry (2026-08-13, see docs/ARCHITECTURE.md's "Atomic
+# bracket entry" section) -- entry+stop+target now submit as one broker
+# call when the broker supports it, closing the window where a filled
+# position during core hours rode on software-only management until a
+# separate post-fill bracket-attach call succeeded.
+
+def test_confirm_entry_filled_uses_atomic_bracket_result_without_calling_attach_broker_bracket():
+    from webull_bot.execution.order_manager import BracketSubmissionResult
+
+    # _FakeBroker has no place_oco_bracket/place_resting_bracket at all --
+    # if _confirm_entry_filled incorrectly fell through to
+    # _attach_broker_bracket instead of using bracket_result directly,
+    # OrderManager.place_resting_bracket would return None (no resting-order
+    # capability) and position.broker_stop_order_id would stay unset. Seeing
+    # it set to the bracket_result's own id is proof the atomic path -- not
+    # the fallback -- is what actually ran.
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+    transition(candidate, CandidateState.TRIGGERED)
+
+    signal = _confirming_signal(reference_price=5.20, suggested_stop=5.00, suggested_target=5.60)
+    order = Order(
+        symbol="TEST", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=100,
+        status=OrderStatus.FILLED, client_order_id="entry-id", broker_order_id="entry-id",
+        created_at=_IN_HOURS_NOW, updated_at=_IN_HOURS_NOW, strategy_name="test",
+    )
+    stop_order = Order(
+        symbol="TEST", side=OrderSide.SELL, order_type=OrderType.STOP, quantity=100, stop_price=5.00,
+        status=OrderStatus.SUBMITTED, broker_order_id="stop-id",
+    )
+    target_order = Order(
+        symbol="TEST", side=OrderSide.SELL, order_type=OrderType.LIMIT, quantity=50, limit_price=5.60,
+        status=OrderStatus.SUBMITTED, broker_order_id="target-id",
+    )
+    bracket_result = BracketSubmissionResult(entry_order=order, stop_order=stop_order, target_order=target_order)
+
+    loop._confirm_entry_filled(candidate, signal, order, _IN_HOURS_NOW, bracket_result=bracket_result)
+
+    position = loop._positions["TEST"]
+    assert position.broker_stop_order_id == "stop-id"
+    assert position.broker_target_order_id == "target-id"
+    assert candidate.state == CandidateState.MANAGING
+
+
+def test_confirm_entry_filled_falls_back_to_attach_broker_bracket_without_atomic_result():
+    # bracket_result absent entirely (None, the default -- e.g. paper/
+    # backtest, or a broker with no place_bracket_entry capability) must
+    # preserve the exact pre-existing behavior: _attach_broker_bracket
+    # still gets called, and since _FakeBroker has no resting-order
+    # capability either, it correctly no-ops (leaves broker_stop_order_id
+    # unset) exactly as it always has.
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+    transition(candidate, CandidateState.TRIGGERED)
+
+    signal = _confirming_signal(reference_price=5.20, suggested_stop=5.00, suggested_target=5.60)
+    order = Order(
+        symbol="TEST", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=100,
+        status=OrderStatus.FILLED, client_order_id="entry-id", broker_order_id="entry-id",
+        created_at=_IN_HOURS_NOW, updated_at=_IN_HOURS_NOW, strategy_name="test",
+    )
+
+    loop._confirm_entry_filled(candidate, signal, order, _IN_HOURS_NOW, bracket_result=None)
+
+    position = loop._positions["TEST"]
+    assert position.broker_stop_order_id is None
+    assert candidate.state == CandidateState.MANAGING
+
+
+@dataclass
+class _BracketRejectingBroker(_FakeBroker):
+    """A broker that supports atomic bracket entries but always refuses
+    this specific combo request -- simulates a real Webull rejection
+    (unsupported instrument, param error, etc.)."""
+    def place_bracket_entry(self, entry_order, stop_order, target_order):
+        raise RuntimeError("OAUTH_OPENAPI_PARAM_ERR: combo not supported for this instrument")
+
+
+def test_submit_entry_reverts_to_armed_with_no_fallback_when_bracket_entry_rejected():
+    broker = _BracketRejectingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+    transition(candidate, CandidateState.CONFIRMING)
+    transition(candidate, CandidateState.TRIGGERED)
+
+    signal = _confirming_signal(reference_price=5.20, suggested_stop=5.00, suggested_target=5.60)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+
+    loop._submit_entry(candidate, signal, snapshot, _IN_HOURS_NOW)
+
+    # Per explicit instruction: the trade does NOT go through at all -- no
+    # fallback to an unprotected plain entry, no position ever opened.
+    assert candidate.state == CandidateState.ARMED
+    assert loop._positions == {}
+    assert broker._orders == {}
+    from webull_bot.enums import RiskEventType
+    assert loop.risk_engine.events[-1].event_type == RiskEventType.BRACKET_ENTRY_REJECTED.value
+    assert "TEST" in loop.risk_engine.events[-1].reason
+
+
 def test_entry_stays_triggered_while_order_pending_then_enters_on_fill():
     broker = _FakeBroker(fills_after_polls=2)
     loop, candidate = _armed_candidate_setup(broker)

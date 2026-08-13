@@ -856,6 +856,37 @@ What's implemented and tested:
   and `tests/test_trading_loop.py`, `tests/test_state_machine.py`,
   `tests/test_volume_profile.py`, `tests/test_momentum_score.py` for the
   new coverage.
+- **Atomic bracket entry -- 2026-08-13, at the user's explicit request,
+  reversing a prior deliberate architectural decision.** Entry and stop/
+  target used to be two separate broker calls: place the entry, wait for
+  it to fill, then separately attach a resting stop+target bracket. That
+  left a real unprotected window during core hours -- not a bounded few
+  hundred milliseconds, but literally unbounded on failure
+  (`_attach_broker_bracket` retries forever with no circuit breaker) and,
+  outside core hours, the ENTIRE holding duration (the broker-side bracket
+  is never even attempted there). User's own words after reviewing
+  Webull's OpenAPI spec: "No Trade should be software managed during core
+  hours... When a purchase is made it should include the stop loss and
+  take profit order in it so its all executed at one." Now it is:
+  `WebullBrokerClient.place_bracket_entry` submits the entry, stop-loss,
+  and take-profit (half the entry quantity, mirroring the existing
+  partial-exit design) as ONE atomic `MASTER`+`STOP_LOSS`+`STOP_PROFIT`
+  combo, in the exact shape Webull's own docs show. Explicit instruction
+  on the failure case, followed exactly: if the broker rejects that combo
+  request, **the trade does not go through at all** -- no fallback to an
+  unprotected plain entry. `OrderManager.submit_entry_signal` raises
+  `BracketEntryRejected`, `TradingLoop._submit_entry` reverts the
+  candidate to ARMED with no order and no position ever created, and a
+  new `RiskEventType.BRACKET_ENTRY_REJECTED` event pops up automatically
+  on the dashboard (not just another Risk Events row -- a real modal, the
+  only system-triggered one among this dashboard's modals, since a trade
+  that silently didn't happen is exactly the kind of thing that must not
+  be missable). A broker that simply lacks this capability at all (paper
+  trading, backtests) isn't a rejection -- falls back to a plain entry
+  exactly as before, unchanged. See `docs/ARCHITECTURE.md`'s "Atomic
+  bracket entry" section and `tests/test_webull_broker_client.py`,
+  `tests/test_order_manager.py`, `tests/test_trading_loop.py` for the new
+  coverage.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

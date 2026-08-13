@@ -10,6 +10,7 @@ architecture is being bypassed -- don't do it.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -25,6 +26,37 @@ class OrderRejected(Exception):
     def __init__(self, decision: RiskDecision):
         self.decision = decision
         super().__init__(decision.reason)
+
+
+class BracketEntryRejected(Exception):
+    """Raised by submit_entry_signal when the broker supports atomic
+    bracket entries (WebullBrokerClient.place_bracket_entry) but rejects
+    this particular combo request -- distinct from OrderRejected (a
+    RiskEngine sizing/exposure decision, made before any broker call) and
+    from a generic broker/network Exception, so TradingLoop can tell "the
+    broker refused to bracket this entry" apart from "something else went
+    wrong" and surface a specific, actionable reason. Per explicit
+    instruction (2026-08-13, see docs/ARCHITECTURE.md's "Atomic bracket
+    entry" section): when this is raised, the trade must NOT go through at
+    all -- no fallback to an unprotected plain entry."""
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+@dataclass
+class BracketSubmissionResult:
+    """Return shape for submit_entry_signal -- entry_order is always set
+    (the same contract submit_signal's callers already expect); stop_order/
+    target_order are None when no atomic bracket was attempted (the broker
+    lacks place_bracket_entry, e.g. PaperBrokerClient/backtests, or the
+    signal itself has no suggested_stop/suggested_target), non-None when it
+    was. TradingLoop uses that distinction to decide whether
+    _confirm_entry_filled still needs its own separate _attach_broker_bracket
+    call (see that method's docstring)."""
+    entry_order: Order
+    stop_order: Optional[Order] = None
+    target_order: Optional[Order] = None
 
 
 class OrderManager:
@@ -207,6 +239,115 @@ class OrderManager:
             strategy_name=signal.strategy_name,
         )
         return self.broker.place_order(order)
+
+    def submit_entry_signal(
+        self,
+        signal: Signal,
+        *,
+        snapshot: MarketSnapshot,
+        open_positions: list[Position],
+        now: Optional[datetime] = None,
+    ) -> BracketSubmissionResult:
+        """Entry-only counterpart to submit_signal, added 2026-08-13 (see
+        docs/ARCHITECTURE.md's "Atomic bracket entry" section) as a
+        SEPARATE method rather than a branch inside submit_signal: an
+        entry -- unlike an exit, and unlike submit_signal's existing plain-
+        entry path -- may place its stop/target as part of the SAME broker
+        call as the entry itself (see WebullBrokerClient.place_bracket_entry),
+        and the caller needs those resulting Order objects back to populate
+        the freshly-opened Position's broker_stop_order_id/
+        broker_target_order_id directly, without TradingLoop
+        ._attach_broker_bracket placing a second, duplicate bracket on top
+        of one already resting at the broker. submit_signal itself is
+        deliberately left untouched -- BacktestEngine and anything else
+        that only wants a plain entry order keep working exactly as before.
+
+        Runs the exact same RiskEngine.evaluate sizing/exposure gate as
+        submit_signal's entry branch (raises OrderRejected on disapproval,
+        identically). If the connected broker doesn't implement
+        place_bracket_entry (PaperBrokerClient/backtests -- checked via
+        getattr, same pattern as OrderManager's resting-order helpers) or
+        the signal itself has no suggested_stop/suggested_target, falls
+        back to a plain, unbracketed entry order -- same shape submit_signal
+        would have placed. That is NOT the same thing as a rejection: a
+        broker/signal that never had the capability to begin with hasn't
+        refused anything.
+
+        A broker that DOES support atomic bracket entries and rejects this
+        specific combo request raises BracketEntryRejected instead -- per
+        explicit instruction, callers (TradingLoop._submit_entry) must NOT
+        fall back to a plain unprotected entry on that failure; the trade
+        must not go through at all."""
+        effective_now = now or datetime.utcnow()
+        decision = self.risk_engine.evaluate(
+            signal,
+            account_equity=self.broker.get_account_equity(),
+            account_buying_power=self.broker.get_buying_power(),
+            open_positions=open_positions,
+            snapshot=snapshot,
+            now=now,
+        )
+        if not decision.approved or not decision.max_shares:
+            raise OrderRejected(decision)
+
+        entry_side = self._side_for_action(signal.action)
+        order_type, limit_price = self._order_type_and_limit_price(entry_side, snapshot, effective_now)
+        entry_order = Order(
+            symbol=signal.symbol,
+            side=entry_side,
+            order_type=order_type,
+            limit_price=limit_price,
+            quantity=decision.max_shares,
+            status=OrderStatus.PENDING,
+            client_order_id=str(uuid.uuid4()),
+            created_at=signal.generated_at,
+            updated_at=signal.generated_at,
+            strategy_name=signal.strategy_name,
+        )
+
+        place_bracket_entry = getattr(self.broker, "place_bracket_entry", None)
+        if place_bracket_entry is None or signal.suggested_stop is None or signal.suggested_target is None:
+            return BracketSubmissionResult(entry_order=self.broker.place_order(entry_order))
+
+        exit_side = OrderSide.SELL if entry_side == OrderSide.BUY else OrderSide.BUY_TO_COVER
+        stop_order = Order(
+            symbol=signal.symbol,
+            side=exit_side,
+            order_type=OrderType.STOP,
+            quantity=decision.max_shares,
+            stop_price=signal.suggested_stop,
+            status=OrderStatus.PENDING,
+            client_order_id=str(uuid.uuid4()),
+            created_at=signal.generated_at,
+            updated_at=signal.generated_at,
+            strategy_name=signal.strategy_name,
+        )
+        # Mirrors TradingLoop._attach_broker_bracket's own halving rule
+        # exactly: the take-profit leg is a partial exit (sell half, keep
+        # half riding the stop/trailing-stop -- see PositionManager's
+        # SCALE_OUT design), so a target leg is only included at all if
+        # half the entry quantity rounds to at least one whole share.
+        target_quantity = int(decision.max_shares // 2)
+        target_order = None
+        if target_quantity >= 1:
+            target_order = Order(
+                symbol=signal.symbol,
+                side=exit_side,
+                order_type=OrderType.LIMIT,
+                quantity=target_quantity,
+                limit_price=signal.suggested_target,
+                status=OrderStatus.PENDING,
+                client_order_id=str(uuid.uuid4()),
+                created_at=signal.generated_at,
+                updated_at=signal.generated_at,
+                strategy_name=signal.strategy_name,
+            )
+
+        try:
+            entry_result, stop_result, target_result = place_bracket_entry(entry_order, stop_order, target_order)
+        except Exception as exc:
+            raise BracketEntryRejected(str(exc)) from exc
+        return BracketSubmissionResult(entry_order=entry_result, stop_order=stop_result, target_order=target_result)
 
     def cancel(self, broker_order_id: str) -> None:
         self.broker.cancel_order(broker_order_id)

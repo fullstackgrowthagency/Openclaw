@@ -220,6 +220,25 @@
   </div>
 </div>
 
+<!-- Entry-selectivity rework (2026-08-13): pops up automatically the
+     moment a fresh RiskEventType.BRACKET_ENTRY_REJECTED event is seen on
+     the polled /api/risk-events feed -- see refreshRiskEvents/
+     maybeShowBracketRejectedPopup in app.js. Distinct from the other
+     modals above (all opened by a user click): this one is system-
+     triggered, since the whole point is making sure a trade that did NOT
+     go through is impossible to miss, not just a row in the Risk Events
+     table underneath it. -->
+<div class="info-modal-overlay" id="bracket-rejected-modal-overlay">
+  <div class="info-modal-card" role="alertdialog" aria-modal="true">
+    <div class="info-modal-header">
+      <h3 style="color: var(--red);">Trade Did Not Go Through</h3>
+      <button class="info-modal-close" id="bracket-rejected-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <p id="bracket-rejected-modal-body"></p>
+    <p class="hint">No order was placed and no position was opened -- the broker rejected the atomic entry+stop+target bracket, and this bot does not fall back to an unprotected entry. See docs/ARCHITECTURE.md's "Atomic bracket entry" section.</p>
+  </div>
+</div>
+
 <script src="/app.js"></script>
 </body>
 </html>

@@ -600,9 +600,64 @@ async function refreshRiskEvents() {
           <td class="muted">${e.reason}</td>
         </tr>`).join("")
       : emptyRow(4, "No risk events");
+    maybeShowBracketRejectedPopup(rows);
   } catch (e) {
     body.innerHTML = emptyRow(4, `Failed to load: ${e.message}`);
   }
+}
+
+// Entry-selectivity rework (2026-08-13): a BRACKET_ENTRY_REJECTED event
+// means a trade did NOT go through (the broker rejected the atomic
+// entry+stop+target combo, and this bot deliberately does not fall back
+// to an unprotected entry) -- important enough to pop up automatically,
+// not just show as one more row in the Risk Events table. `rows` is
+// newest-first (see GET /api/risk-events). null on the very first call
+// means "not initialized yet" -- deliberately distinct from "" (which
+// would compare as older than every real ISO timestamp and pop up every
+// historical rejection already in the DB the moment the dashboard loads).
+let lastSeenBracketRejectionTimestamp = null;
+
+function maybeShowBracketRejectedPopup(rows) {
+  const rejections = rows.filter(e => e.event_type === "bracket_entry_rejected");
+  if (lastSeenBracketRejectionTimestamp === null) {
+    lastSeenBracketRejectionTimestamp = rejections.length ? rejections[0].timestamp : "";
+    return;
+  }
+  const fresh = rejections.filter(e => e.timestamp > lastSeenBracketRejectionTimestamp);
+  if (!fresh.length) return;
+  lastSeenBracketRejectionTimestamp = rejections[0].timestamp;
+  // Newest first in `fresh` -- show the most recent one; if several fired
+  // between polls, the Risk Events table underneath still has the rest.
+  showBracketRejectedPopup(fresh[0]);
+}
+
+let bracketRejectedOverlay = null;
+let bracketRejectedBody = null;
+
+function showBracketRejectedPopup(event) {
+  if (!bracketRejectedOverlay) return;  // initBracketRejectedModal hasn't run yet or the markup is missing
+  bracketRejectedBody.textContent = `${event.symbol || "Unknown symbol"}: ${event.reason}`;
+  bracketRejectedOverlay.classList.add("open");
+}
+
+function initBracketRejectedModal() {
+  const overlay = document.getElementById("bracket-rejected-modal-overlay");
+  const closeBtn = document.getElementById("bracket-rejected-modal-close");
+  if (!overlay) return;
+  bracketRejectedOverlay = overlay;
+  bracketRejectedBody = document.getElementById("bracket-rejected-modal-body");
+
+  function close() {
+    overlay.classList.remove("open");
+  }
+
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
 }
 
 async function refreshPerformance() {
@@ -848,6 +903,7 @@ async function refreshAll() {
 initInfoModal();
 initSettingsModal();
 initKillSwitchModal();
+initBracketRejectedModal();
 initPositionsTable();
 initScoreHistoryForm();
 initCandidateSelection();

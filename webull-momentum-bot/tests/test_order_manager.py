@@ -31,7 +31,7 @@ import pytest
 
 from webull_bot.config import get_settings
 from webull_bot.enums import OrderSide, OrderStatus, OrderType, SignalAction
-from webull_bot.execution.order_manager import OrderManager, OrderRejected
+from webull_bot.execution.order_manager import BracketEntryRejected, OrderManager, OrderRejected
 from webull_bot.interfaces.broker import BrokerClient
 from webull_bot.models import Fill, MarketSnapshot, Order, Position, Signal
 from webull_bot.risk.risk_engine import RiskConfig, RiskEngine
@@ -385,3 +385,134 @@ def test_submit_signal_exit_uses_marketable_limit_outside_core_hours():
     assert placed.order_type == OrderType.LIMIT
     # SELL is the exit side for a long position -- prices below the bid.
     assert placed.limit_price == round(9.98 * (1 - om.EXTENDED_HOURS_LIMIT_BUFFER_PCT / 100.0), 2)
+
+
+# -- atomic bracket entry (submit_entry_signal, 2026-08-13) ------------------
+# See docs/ARCHITECTURE.md's "Atomic bracket entry" section: entries now
+# submit their stop/target as part of the SAME broker call as the entry
+# itself (when the broker supports it), so a position is never
+# broker-managed-less even for an instant during core hours. submit_signal
+# itself is deliberately untouched (still used by BacktestEngine/exits) --
+# submit_entry_signal is a separate, new method.
+
+@dataclass
+class _BracketEntryBroker(_NoRestingOrdersBroker):
+    """Adds place_bracket_entry -- the capability OrderManager detects via
+    getattr -- so this stands in for WebullBrokerClient without needing
+    real network/SDK access. `reject` lets a test simulate the broker
+    refusing the combo request."""
+    _brackets: list = field(default_factory=list)
+    reject: bool = False
+
+    def place_bracket_entry(self, entry_order, stop_order, target_order):
+        if self.reject:
+            raise RuntimeError("OAUTH_OPENAPI_PARAM_ERR: combo not supported for this instrument")
+        entry_order.broker_order_id = "entry-leg-id"
+        entry_order.status = OrderStatus.SUBMITTED
+        stop_order.broker_order_id = "stop-leg-id"
+        stop_order.status = OrderStatus.SUBMITTED
+        if target_order is not None:
+            target_order.broker_order_id = "target-leg-id"
+            target_order.status = OrderStatus.SUBMITTED
+        self._brackets.append((entry_order, stop_order, target_order))
+        return entry_order, stop_order, target_order
+
+
+def test_submit_entry_signal_raises_order_rejected_before_any_broker_call():
+    broker = _EntryOnlyBroker()  # get_positions raises -- must never be reached
+    risk_engine = RiskEngine(RiskConfig(max_total_risk_pct=10.0))
+    om = OrderManager(broker, risk_engine, get_settings())
+    existing_position = Position(
+        symbol="EFGH", side=OrderSide.BUY, quantity=1_000, avg_entry_price=5.0,
+        stop_price=1.0, target_price=None, trailing_stop_pct=None,
+        opened_at=datetime(2026, 8, 11, 14, 0, 0), strategy_name="test",
+    )
+    with pytest.raises(OrderRejected):
+        om.submit_entry_signal(
+            _entry_signal(), snapshot=_entry_snapshot(), open_positions=[existing_position],
+            now=datetime(2026, 8, 11, 15, 0, 0),
+        )
+
+
+def test_submit_entry_signal_falls_back_to_plain_entry_without_broker_capability():
+    # No place_bracket_entry on this broker at all -- lacking the capability
+    # is NOT a rejection, just falls back to a plain unbracketed entry.
+    broker = _NoRestingOrdersBroker()
+    om = _order_manager(broker)
+    result = om.submit_entry_signal(
+        _entry_signal(suggested_target=11.0), snapshot=_entry_snapshot(), open_positions=[],
+        now=datetime(2026, 8, 11, 15, 0, 0),
+    )
+    assert result.stop_order is None
+    assert result.target_order is None
+    assert result.entry_order.status == OrderStatus.SUBMITTED
+    assert broker._orders == [result.entry_order]
+
+
+def test_submit_entry_signal_falls_back_when_signal_has_no_suggested_target():
+    # Broker DOES support atomic brackets, but the signal itself has no
+    # suggested_target (default _entry_signal()) -- still falls back, same
+    # non-rejection reasoning as the capability-gate test above.
+    broker = _BracketEntryBroker()
+    om = _order_manager(broker)
+    result = om.submit_entry_signal(
+        _entry_signal(), snapshot=_entry_snapshot(), open_positions=[],
+        now=datetime(2026, 8, 11, 15, 0, 0),
+    )
+    assert result.stop_order is None
+    assert result.target_order is None
+    assert broker._brackets == []
+
+
+def test_submit_entry_signal_uses_atomic_bracket_when_supported():
+    broker = _BracketEntryBroker()
+    risk_engine = RiskEngine(RiskConfig(max_position_size_pct=100.0))
+    om = OrderManager(broker, risk_engine, get_settings())
+    result = om.submit_entry_signal(
+        _entry_signal(suggested_target=11.0), snapshot=_entry_snapshot(), open_positions=[],
+        now=datetime(2026, 8, 11, 15, 0, 0),
+    )
+    assert result.entry_order.status == OrderStatus.SUBMITTED
+    assert result.stop_order is not None
+    assert result.stop_order.side == OrderSide.SELL
+    assert result.stop_order.order_type == OrderType.STOP
+    assert result.stop_order.stop_price == 9.7
+    # Stop protects the FULL entry quantity.
+    assert result.stop_order.quantity == result.entry_order.quantity
+    assert result.target_order is not None
+    assert result.target_order.side == OrderSide.SELL
+    assert result.target_order.order_type == OrderType.LIMIT
+    assert result.target_order.limit_price == 11.0
+    # Target leg is a partial exit -- HALF the entry quantity (mirrors
+    # TradingLoop._attach_broker_bracket's own halving rule).
+    assert result.target_order.quantity == int(result.entry_order.quantity // 2)
+    assert len(broker._brackets) == 1
+
+
+def test_submit_entry_signal_omits_target_leg_when_quantity_too_small_to_split():
+    broker = _BracketEntryBroker()
+    # A tiny position size ceiling forces decision.max_shares down to 1
+    # share, whose half (0) is too small to give the target leg any real
+    # quantity at all.
+    risk_engine = RiskEngine(RiskConfig(max_position_size_pct=0.05))
+    om = OrderManager(broker, risk_engine, get_settings())
+    result = om.submit_entry_signal(
+        _entry_signal(suggested_target=11.0), snapshot=_entry_snapshot(), open_positions=[],
+        now=datetime(2026, 8, 11, 15, 0, 0),
+    )
+    assert result.entry_order.quantity == 1
+    assert result.stop_order is not None  # stop still protects the full (1-share) position
+    assert result.target_order is None
+
+
+def test_submit_entry_signal_raises_bracket_entry_rejected_on_broker_rejection():
+    broker = _BracketEntryBroker(reject=True)
+    om = _order_manager(broker)
+    with pytest.raises(BracketEntryRejected, match="combo not supported"):
+        om.submit_entry_signal(
+            _entry_signal(suggested_target=11.0), snapshot=_entry_snapshot(), open_positions=[],
+            now=datetime(2026, 8, 11, 15, 0, 0),
+        )
+    # No fallback attempted -- place_order (the plain entry path) was never
+    # called on this broker at all.
+    assert broker._orders == []

@@ -2323,6 +2323,115 @@ about the retry behavior itself -- `_attach_broker_bracket` keeps trying
 forever either way, alerted or not -- it only makes an otherwise-silent
 failure visible to a human.
 
+## Atomic bracket entry (2026-08-13)
+
+**Reverses the prior decision documented just above** (the "MASTER-anchored
+combo submitted atomically with the entry... deliberately avoids" reasoning
+in `place_oco_bracket`'s original docstring), at the account owner's
+explicit instruction after reviewing Webull's own "Place Order" OpenAPI
+spec: "No Trade should be software managed during core hours... When a
+purchase is made it should include the stop loss and take profit order in
+it so its all executed at one."
+
+**Why the prior "short window" argument didn't hold up:** the entry-then-
+attach design assumed the gap between a confirmed fill and
+`_attach_broker_bracket`'s follow-up call was brief. In practice it wasn't
+bounded at all -- `_attach_broker_bracket` retries forever with no
+circuit breaker on failure (see the section above), and outside core
+hours it's never even attempted, so a position held outside core hours
+rode on pure software management for its *entire* holding duration, not a
+transient race. Submitting the entry, stop-loss, and take-profit as ONE
+atomic request removes the gap structurally instead of shrinking it.
+
+**The mechanism** -- Webull's `MASTER`+`STOP_LOSS`(+`STOP_PROFIT`) combo
+(the "Buy-to-Open TP/SL" shape in their OpenAPI docs): three order legs
+sharing one `client_combo_order_id` in a single `order_v3.place_order`
+call, `combo_type` distinguishing which is which.
+
+- `WebullBrokerClient.place_bracket_entry(entry_order, stop_order,
+  target_order)` (`brokers/webull/client.py`) -- builds and submits all
+  three payloads (target may be `None`; Webull's combo_type table allows
+  0-1 `STOP_PROFIT` legs). No try/except inside it: a rejection propagates
+  as a real exception, matching the explicit "if this fails, the trade
+  does not go through" instruction.
+- `OrderManager.submit_entry_signal` (`execution/order_manager.py`) --
+  entry-only, added as a SEPARATE method rather than a branch inside the
+  existing `submit_signal` (which stays untouched -- still used for exits
+  and by `BacktestEngine`, which has no atomic-bracket concept since
+  `PaperBrokerClient` fills every order synchronously with nothing to rest
+  against). Runs the exact same `RiskEngine.evaluate` sizing gate as
+  before. Uses `getattr(self.broker, "place_bracket_entry", None)` to
+  detect the capability (same pattern as the existing resting-order
+  helpers) -- a broker that lacks it (or a signal with no
+  `suggested_stop`/`suggested_target`) falls back to a plain,
+  unbracketed entry exactly as before this feature existed. That's NOT a
+  rejection -- lacking the capability at all is different from a broker
+  that has it and refuses this specific request, which raises
+  `BracketEntryRejected` instead, deliberately not swallowed anywhere in
+  this call chain.
+- `TradingLoop._submit_entry` catches `BracketEntryRejected` specifically
+  (before the generic catch-all): logs the reason, calls
+  `record_entry_order_failed` (no order was ever accepted, so this must
+  not burn the symbol's daily entry budget, same as every other failure
+  path here), raises a new `RiskEventType.BRACKET_ENTRY_REJECTED` event,
+  and reverts the candidate to `ARMED`. No order, no position, no
+  fallback -- exactly the explicit instruction.
+- The take-profit leg is sized at HALF the entry quantity, mirroring
+  `_attach_broker_bracket`'s own existing halving rule (target hit is a
+  partial exit -- see "Position management" -- not a full close); the
+  stop-loss leg always covers the full quantity. An entry too small to
+  split into a whole-share partial exit gets a two-leg `MASTER`+`STOP_LOSS`
+  combo with no take-profit leg at all, same as the existing
+  `_attach_broker_bracket` behavior for that edge case.
+
+**Threading the result through fill confirmation.** The three Order
+objects `place_bracket_entry` returns have to survive until the entry
+leg's fill is actually confirmed (`_confirm_entry_filled`, reached via
+three different paths -- a synchronous fill, `_poll_pending_entry`'s async
+polling, or `_maybe_verify_entry_via_positions`' self-heal check) so the
+freshly-built `Position` can be given `broker_stop_order_id`/
+`broker_target_order_id` directly instead of `_attach_broker_bracket`
+placing a SECOND, duplicate bracket on top of the one already resting at
+the broker. `TradingLoop._pending_entry_brackets` (a new
+`dict[str, BracketSubmissionResult]`) carries this across ticks, popped
+alongside the existing `_entry_signals` at every one of that dict's own
+pop sites. `_confirm_entry_filled` now takes an optional `bracket_result`
+parameter: when its `stop_order` is present, the position's broker fields
+are set directly and `_attach_broker_bracket` is skipped entirely; when
+absent (paper/backtest, or no capability), `_attach_broker_bracket` runs
+exactly as it always has -- this is what keeps `_attach_broker_bracket`
+itself, and its later-lifecycle uses (re-protecting after a partial exit,
+re-syncing the resting stop as breakeven/trailing math moves it), fully
+intact. Only the VERY FIRST bracket at fresh-entry time changed.
+
+**Known residual gap.** The bracket's resting quantity is sized off
+`decision.max_shares` at submission time, before the fill is confirmed --
+if the broker's actual fill quantity ends up different (a genuine partial
+fill on a MARKET order), the resting bracket and the locally-tracked
+`position.quantity` could briefly disagree until
+`_sync_broker_protective_orders`' existing every-tick reconciliation
+catches it, same defense-in-depth this loop already relies on for other
+broker-response uncertainties (a combo's 2xx response, like `place_order`'s
+own, doesn't confirm each leg individually -- see `place_bracket_entry`'s
+docstring).
+
+**Dashboard visibility.** A `BRACKET_ENTRY_REJECTED` event pops up
+automatically (not just another row in the Risk Events table) --
+`dashboard/static/index.html`'s `bracket-rejected-modal-overlay`,
+triggered from `refreshRiskEvents`/`maybeShowBracketRejectedPopup` in
+`app.js` the moment a fresh rejection is seen on the polled
+`/api/risk-events` feed. Every other modal in this dashboard opens on a
+user click; this one is the only system-triggered one, since the whole
+point is making sure a trade that did NOT go through is impossible to
+miss.
+
+See `tests/test_webull_broker_client.py` (`place_bracket_entry` payload
+shape and rejection propagation), `tests/test_order_manager.py`
+(`submit_entry_signal`'s capability gate, halving rule, and no-fallback
+contract), and `tests/test_trading_loop.py`
+(`test_confirm_entry_filled_uses_atomic_bracket_result_without_calling_attach_broker_bracket`,
+`test_submit_entry_reverts_to_armed_with_no_fallback_when_bracket_entry_rejected`).
+
 ## Extra position-based confirmation for a TRIGGERED entry (2026-08-11)
 
 A `TRIGGERED` candidate (entry order submitted, not yet confirmed filled)

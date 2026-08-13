@@ -708,6 +708,116 @@ def test_place_oco_bracket_refuses_when_live_trading_not_authorized():
         client.place_oco_bracket(stop_order, target_order)
 
 
+# -- atomic bracket entry (place_bracket_entry, 2026-08-13) ------------------
+
+def test_place_bracket_entry_sends_all_three_legs_as_one_combo():
+    client = _sandbox_client()
+    captured = {}
+
+    class _FakeOrderV3:
+        def place_order(self, account_id, order_dicts):
+            captured["account_id"] = account_id
+            captured["order_dicts"] = order_dicts
+            return _FakeResponse([{"status": "accepted"}])
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._trade_client = _FakeTradeClient()
+
+    entry_order = Order(symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=10)
+    stop_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.STOP, quantity=10, stop_price=304.13)
+    target_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.LIMIT, quantity=5, limit_price=322.56)
+
+    result_entry, result_stop, result_target = client.place_bracket_entry(entry_order, stop_order, target_order)
+
+    assert captured["account_id"] == "test-account"
+    entry_payload, stop_payload, target_payload = captured["order_dicts"]
+    assert entry_payload["combo_type"] == "MASTER"
+    assert stop_payload["combo_type"] == "STOP_LOSS"
+    assert target_payload["combo_type"] == "STOP_PROFIT"
+    # All three legs share exactly one combo id -- ties them together as
+    # one atomic bracket entry rather than three independent orders.
+    assert entry_payload["client_combo_order_id"] == stop_payload["client_combo_order_id"]
+    assert entry_payload["client_combo_order_id"] == target_payload["client_combo_order_id"]
+    assert entry_payload["order_type"] == "MARKET"
+    assert entry_payload["side"] == "BUY"
+    assert stop_payload["order_type"] == "STOP_LOSS"
+    assert stop_payload["stop_price"] == "304.13"
+    assert target_payload["order_type"] == "LIMIT"
+    assert target_payload["limit_price"] == "322.56"
+
+    # Each leg gets its own client_order_id, distinct from the shared combo id.
+    assert len({entry_payload["client_order_id"], stop_payload["client_order_id"], target_payload["client_order_id"]}) == 3
+    assert result_entry.broker_order_id == entry_payload["client_order_id"]
+    assert result_stop.broker_order_id == stop_payload["client_order_id"]
+    assert result_target.broker_order_id == target_payload["client_order_id"]
+    assert result_entry.status == OrderStatus.SUBMITTED
+    assert result_stop.status == OrderStatus.SUBMITTED
+    assert result_target.status == OrderStatus.SUBMITTED
+
+
+def test_place_bracket_entry_omits_target_leg_when_none():
+    client = _sandbox_client()
+    captured = {}
+
+    class _FakeOrderV3:
+        def place_order(self, account_id, order_dicts):
+            captured["order_dicts"] = order_dicts
+            return _FakeResponse([{"status": "accepted"}])
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._trade_client = _FakeTradeClient()
+
+    entry_order = Order(symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=1)
+    stop_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.STOP, quantity=1, stop_price=304.13)
+
+    result_entry, result_stop, result_target = client.place_bracket_entry(entry_order, stop_order, None)
+
+    # Only 2 legs sent -- no STOP_PROFIT leg at all, not a zero-share one.
+    assert len(captured["order_dicts"]) == 2
+    assert result_target is None
+
+
+def test_place_bracket_entry_propagates_rejection_without_swallowing():
+    client = _sandbox_client()
+
+    class _FakeOrderV3:
+        def place_order(self, account_id, order_dicts):
+            raise RuntimeError("OAUTH_OPENAPI_PARAM_ERR: combo not supported for this instrument")
+
+    class _FakeTradeClient:
+        order_v3 = _FakeOrderV3()
+
+    client._trade_client = _FakeTradeClient()
+
+    entry_order = Order(symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=1)
+    stop_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.STOP, quantity=1, stop_price=1.0)
+    target_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.LIMIT, quantity=1, limit_price=2.0)
+
+    # No try/except inside place_bracket_entry -- a rejection must reach the
+    # caller as a real exception, never silently return something usable.
+    with pytest.raises(RuntimeError, match="combo not supported"):
+        client.place_bracket_entry(entry_order, stop_order, target_order)
+
+
+def test_place_bracket_entry_refuses_when_live_trading_not_authorized():
+    from webull_bot.config import TradingMode
+
+    client = _client()
+    client.settings = SimpleNamespace(
+        trading_mode=TradingMode.LIVE, is_live_trading_authorized=lambda: False,
+    )
+    client.account_id = "test-account"
+    entry_order = Order(symbol="AAPL", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=1)
+    stop_order = Order(symbol="AAPL", side=OrderSide.SELL, order_type=OrderType.STOP, quantity=1, stop_price=1.0)
+
+    with pytest.raises(RuntimeError):
+        client.place_bracket_entry(entry_order, stop_order, None)
+
+
 # -- priority tiers actually reach the shared limiter (2026-08-11) ----------
 # Every Webull call this client makes -- not just market_data.* -- now goes
 # through retry.call_with_retry with an explicit priority (see client.py's
