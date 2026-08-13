@@ -174,6 +174,21 @@ _INTERVAL_TO_TIMESPAN = {
 # subscribed" -- used by get_snapshots to chunk a larger symbol list.
 _SNAPSHOT_BATCH_SIZE = 100
 
+# Confirmed live 2026-08-13: DataStreamingClient.subscribe() rejects the
+# WHOLE call with TOO_MANY_SYMBOLS ("Maximum number of symbols: 100") once
+# the symbol list passed to it exceeds 100 -- a real incident where
+# subscribe_quotes was calling it with every not-yet-subscribed symbol at
+# once, uncapped. Once the tracked candidate list grew past 100, EVERY
+# subscribe attempt failed wholesale, repeated every single tick forever
+# (caught and logged as a WARNING, so nothing crashed, but streaming
+# silently never worked at all above 100 symbols, and the same failing
+# call kept burning real time/log volume every cycle). A distinct
+# constant from _SNAPSHOT_BATCH_SIZE above rather than reusing it: this is
+# a different SDK endpoint (streaming subscribe vs. REST
+# market_data.get_snapshot) whose limit currently happens to also be 100,
+# not guaranteed to stay that way.
+_STREAMING_SUBSCRIBE_BATCH_SIZE = 100
+
 # Confirmed live 2026-08-11 (scripts/verify_streaming.py) -- the SDK's own
 # bundled endpoints.json only knows the PRODUCTION quotes-api host
 # (data-api.webull.com) for any region; there is no sandbox entry in it at
@@ -933,6 +948,29 @@ class WebullBrokerClient(BrokerClient):
         bid, ask, bid_size, ask_size = quote
         return _dataclass_replace(base, bid=bid, ask=ask, bid_size=bid_size, ask_size=ask_size)
 
+    def _subscribe_symbols_in_batches(self, streaming_client, symbols: list[str]) -> None:
+        """Chunks `symbols` to _STREAMING_SUBSCRIBE_BATCH_SIZE before
+        calling streaming_client.subscribe() -- see that constant's
+        comment for the real incident this fixes (an uncapped call
+        rejected wholesale with TOO_MANY_SYMBOLS past 100 symbols).
+        Best-effort per chunk: one chunk raising is logged and does NOT
+        stop the remaining chunks from being attempted, so a single bad
+        batch can't take down subscription for every other symbol in the
+        same call -- callers that need to know about a failure at all
+        (subscribe_quotes' own already_connected branch) still see it via
+        this re-raising the LAST exception encountered, if any, after
+        every chunk has been tried."""
+        last_exception: Optional[Exception] = None
+        for start in range(0, len(symbols), _STREAMING_SUBSCRIBE_BATCH_SIZE):
+            chunk = symbols[start:start + _STREAMING_SUBSCRIBE_BATCH_SIZE]
+            try:
+                streaming_client.subscribe(chunk, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
+            except Exception as exc:
+                logger.warning("Streaming subscribe failed for a batch of %d symbol(s).", len(chunk), exc_info=True)
+                last_exception = exc
+        if last_exception is not None:
+            raise last_exception
+
     def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
         """Confirmed live and working (2026-08-11, see this module's
         docstring's "Streaming market data" note and
@@ -1034,7 +1072,7 @@ class WebullBrokerClient(BrokerClient):
                 # marking new_symbols subscribed once this call actually
                 # returns) is what makes a second call with the same
                 # symbols a genuine retry instead of a silent no-op.
-                self._streaming_client.subscribe(new_symbols, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
+                self._subscribe_symbols_in_batches(self._streaming_client, new_symbols)
                 with self._streaming_lock:
                     self._streaming_subscribed_symbols.update(new_symbols)
                 return
@@ -1104,7 +1142,7 @@ class WebullBrokerClient(BrokerClient):
                 session_id_, len(current_symbols),
             )
             try:
-                client_.subscribe(current_symbols, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
+                self._subscribe_symbols_in_batches(client_, current_symbols)
             except Exception:
                 logger.exception("Streaming subscribe failed on connect for %s", current_symbols)
 

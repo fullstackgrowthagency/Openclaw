@@ -1768,6 +1768,79 @@ from the dashboard's Settings panel via `GET`/`POST /api/position-settings`
 hence the separate endpoint pair; see "Dashboard" below), taking effect on
 the very next `check_exit()` call for every open position.
 
+### A stuck pending exit order can silently block all future protection forever (2026-08-13)
+
+Real incident, sandbox, root-caused with the user directly (dashboard
+"Last" price for the affected symbols was confirmed still updating, and
+the actual submitted order status was traced through a live log
+investigation, not guessed): a software-managed exit order for a
+position well past its stop-loss got submitted, entered
+`TradingLoop._pending_exit_orders`, and then simply never resolved --
+not filled, not rejected, not cancelled, not expired -- for many hours
+straight. This is a fundamentally different failure mode from every
+other exit-related incident this project has already fixed (RDGT's
+silent submission failure, CYCU/SCKT's retry-storm) -- those were about
+an exit attempt failing; this was about an exit attempt succeeding (at
+least as far as this process could tell -- the broker accepted the
+order) and then the resulting order just... never telling this process
+anything more, ever.
+
+**Why this was so bad, structurally:** `TradingLoop._manage_position`'s
+very first real check is `if pending is not None:
+self._poll_pending_exit(...); return` -- while a symbol has a pending
+exit order tracked, `PositionManager.check_exit` is never called again
+for it, full stop, no exceptions. And `_poll_pending_exit`'s handling of
+"still not FILLED, still not REJECTED/CANCELED/EXPIRED" used to be a
+bare `# else: still pending` with **zero logging** -- the single most
+plausible outcome (an order that's simply taking a while) was also the
+one branch that produced no trace anywhere. Combined, this meant: no
+error, no warning, nothing in the logs to find -- exactly why this took
+an extended live log investigation (with the user's direct help) to
+diagnose rather than a quick grep. It ALSO silently defeated the
+dashboard's own manual "Close" button: `_close_all_positions_now`
+correctly (in isolation) skips any symbol already in
+`self._pending_exit_orders`, reasoning that the close was "already
+submitted, just still resolving" -- correct for a genuinely in-flight
+order, silently wrong for one that's actually dead. The position rode
+on, completely unprotected, indefinitely, with the dashboard showing a
+live-updating price (proving the tick loop itself was healthy) right
+next to a stop-loss the position was clearly through.
+
+**Fix:** `TradingLoopConfig.pending_exit_stuck_timeout_seconds` (180s
+default -- 3 minutes, well beyond the ~1s a MARKET or marketable-LIMIT
+order should realistically take to resolve under normal conditions).
+Once an order in `_pending_exit_orders` has been outstanding that long
+with no terminal status, `_poll_pending_exit` now treats it as stuck:
+cancels it (best-effort -- if the cancel itself fails, still proceeds to
+drop tracking regardless, since leaving a possibly-dead order tracked
+forever is strictly worse than the rare case of a cancel racing a real
+late fill), drops it from `_pending_exit_orders`, and raises a new
+`RiskEventType.PENDING_EXIT_ORDER_STUCK` event via
+`RiskEngine.record_operational_event` (the same shared, dashboard-visible
+Risk Events mechanism `POSITION_UNPROTECTED_TOO_LONG` uses -- see
+"Visibility for a broker bracket that can never attach" below). Dropping
+the entry means the very next tick's `_manage_position` call falls
+through to a completely fresh `PositionManager.check_exit` /
+exit-submission attempt, instead of polling the same dead order forever
+-- and since a lingering manual-close request (`_manual_close_requests`)
+is re-evaluated every tick regardless, this also transitively unblocks
+the dashboard's Close button once the stuck order clears, with no
+separate fix needed there. See
+`tests/test_trading_loop.py::test_poll_pending_exit_cancels_and_drops_a_stuck_order_past_the_timeout`,
+`::test_poll_pending_exit_does_nothing_while_still_within_the_timeout`,
+and `::test_poll_pending_exit_drops_a_stuck_order_even_when_cancel_itself_fails`.
+
+**Root cause of the ORIGINAL stuck order still not fully understood.**
+This fix guarantees the SYMPTOM (permanent silent protection loss) can't
+recur, but why the sandbox left that specific order in a non-terminal
+state for hours in the first place is still an open question -- possibly
+a sandbox-specific simulated-fill limitation for a particular
+symbol/order-type/session combination, not yet reproduced on demand.
+Worth keeping in mind if this recurs: the new `PENDING_EXIT_ORDER_STUCK`
+event (and its `reason` text, which includes the exit action) will at
+least make the NEXT occurrence immediately visible instead of requiring
+another multi-hour log investigation to even confirm it's happening.
+
 ## Broker-side (resting) stop/target management (2026-08-11)
 
 Everything above describes checks ①/② running purely in software:
@@ -2382,6 +2455,49 @@ test (`test_subscribe_quotes_does_not_trust_the_sdks_get_connect_success`)
 whose fake mirrors the SDK's real (mis-)behavior rather than a
 nicer-behaved approximation of it, specifically so this can't silently
 regress.
+
+### Streaming subscribe silently failed wholesale past 100 symbols (2026-08-13)
+
+Real incident, found while diagnosing a stuck stop-loss (see "A stuck
+pending exit order can silently block all future protection forever"
+below -- this and that bug were found and fixed together in the same
+investigation, though they're independent of each other). `subscribe_quotes`
+called `DataStreamingClient.subscribe()` with every not-yet-subscribed
+symbol in ONE call, uncapped. Webull's streaming subscribe endpoint
+rejects the WHOLE call outright with `TOO_MANY_SYMBOLS` ("Maximum number
+of symbols: 100") once the list exceeds 100 -- confirmed live, and
+distinct from `get_snapshots`' own REST endpoint, which already chunks
+correctly to the same 100-symbol cap (see "Batched snapshot fetching"
+above). Since the connected/on_connect_success paths (see below) only
+mark symbols as subscribed on SUCCESS, a wholesale-failing call meant
+NONE of them ever got marked subscribed -- so every subsequent tick's
+`_ensure_streaming_subscribed` recomputed the exact same (or larger)
+list of "not yet subscribed" symbols and tried again, forever, once the
+tracked candidate count grew past 100. The failure itself was caught and
+logged as a `WARNING` (falls back to REST polling, so nothing crashed),
+but it repeated every single tick, burning real wall-clock time and log
+volume on a call that could never succeed as written, and meant
+streaming silently never worked at all for ANY symbol once the universe
+grew past 100 candidates.
+
+**Fix:** a new `WebullBrokerClient._subscribe_symbols_in_batches(streaming_client,
+symbols)` chunks to `_STREAMING_SUBSCRIBE_BATCH_SIZE` (100, mirroring
+`_SNAPSHOT_BATCH_SIZE` -- a separate constant since these are different
+SDK endpoints whose limits currently happen to match, not guaranteed to
+stay that way) before calling `.subscribe()`, used at both of this
+method's real call sites (the `already_connected` direct-subscribe
+branch, and `_on_connect_success`'s full-resubscribe-on-connect branch).
+Best-effort per chunk: one chunk raising is logged and does NOT stop the
+remaining chunks from being attempted, so a single bad batch (e.g. one
+symbol Webull rejects for some other reason) can't take down
+subscription for every other symbol in the same call -- the
+`already_connected` branch still sees a failure if any chunk failed
+(re-raises the last exception, preserving that branch's existing
+propagate-don't-swallow retry contract -- see the paragraph below this
+one), it just no longer means "zero symbols got subscribed" when it was
+really "249 out of 250 did." See
+`tests/test_webull_broker_client.py::test_subscribe_quotes_chunks_a_large_symbol_list_on_connect`
+and `::test_subscribe_quotes_chunking_keeps_going_after_one_batch_fails`.
 
 ### Streaming: retrying a failed connection or subscribe (2026-08-11)
 

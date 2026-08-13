@@ -129,6 +129,20 @@ class RiskEventType(str, Enum):
     # RiskEngine.evaluate itself) -- raised by TradingLoop via
     # RiskEngine.record_operational_event instead.
     POSITION_UNPROTECTED_TOO_LONG = "position_unprotected_too_long"
+    # A software-managed exit order sat in TradingLoop._pending_exit_orders
+    # for TradingLoopConfig.pending_exit_stuck_timeout_seconds or longer
+    # with no terminal status (never filled, never rejected/canceled/
+    # expired) -- see TradingLoop._poll_pending_exit. Real incident
+    # (2026-08-13, sandbox): an exit order for a position well past its
+    # stop-loss simply never resolved, and because _manage_position's
+    # very first check defers entirely to _poll_pending_exit whenever a
+    # symbol has a pending exit, PositionManager.check_exit was never
+    # called again for that symbol -- silently, for hours, with the
+    # dashboard's own "Close" button also refusing to act (it correctly
+    # skips a symbol already in _pending_exit_orders). Raised right
+    # before the stuck order is cancelled and dropped from tracking so a
+    # fresh check_exit/exit attempt can run the very next tick.
+    PENDING_EXIT_ORDER_STUCK = "pending_exit_order_stuck"
 
 
 class MomentumOutcome(str, Enum):

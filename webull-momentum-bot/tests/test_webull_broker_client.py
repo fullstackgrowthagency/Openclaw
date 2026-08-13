@@ -1316,6 +1316,56 @@ def test_subscribe_quotes_subscribes_on_connect_success(monkeypatch):
     assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
 
 
+def test_subscribe_quotes_chunks_a_large_symbol_list_on_connect(monkeypatch):
+    # Real incident (2026-08-13): subscribe() rejects the WHOLE call with
+    # TOO_MANY_SYMBOLS ("Maximum number of symbols: 100") once the symbol
+    # list exceeds 100 -- subscribe_quotes used to send every symbol in
+    # one uncapped call, so once the tracked candidate list grew past
+    # 100, EVERY subscribe attempt failed wholesale, every single tick,
+    # forever. Now chunked the same way get_snapshots already chunks its
+    # own 100-symbol-capped REST endpoint.
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    symbols = [f"SYM{i}" for i in range(250)]
+    client.subscribe_quotes(symbols, lambda snap: None)
+    fake = instances[0]
+
+    fake._connected = True
+    fake.on_connect_success(fake, None, "session-1")
+
+    assert len(fake.subscribe_calls) == 3
+    assert [len(call[0]) for call in fake.subscribe_calls] == [100, 100, 50]
+    # _on_connect_success reads current_symbols as sorted(self.
+    # _streaming_subscribed_symbols) (a set), not insertion order.
+    assert sum((call[0] for call in fake.subscribe_calls), []) == sorted(symbols)
+
+
+def test_subscribe_quotes_chunking_keeps_going_after_one_batch_fails(monkeypatch):
+    # Best-effort per chunk -- one bad batch shouldn't take down every
+    # other symbol in the same call.
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    symbols = [f"SYM{i}" for i in range(250)]
+    client.subscribe_quotes(symbols, lambda snap: None)
+    fake = instances[0]
+    fake._connected = True
+
+    original_subscribe = fake.subscribe
+    calls = []
+
+    def _flaky_subscribe(chunk, category, sub_types):
+        calls.append(list(chunk))
+        if len(calls) == 2:
+            raise RuntimeError("simulated TOO_MANY_SYMBOLS-adjacent failure")
+        return original_subscribe(chunk, category, sub_types)
+
+    monkeypatch.setattr(fake, "subscribe", _flaky_subscribe)
+
+    fake.on_connect_success(fake, None, "session-1")  # exception is caught and logged, not raised
+
+    assert len(calls) == 3  # all three chunks were still attempted
+
+
 def test_subscribe_quotes_delivers_a_merged_message_once_both_types_seen(monkeypatch):
     instances = _patch_streaming_client_factory(monkeypatch)
     client = _streaming_client()

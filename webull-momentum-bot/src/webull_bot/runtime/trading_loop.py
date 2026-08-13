@@ -293,6 +293,37 @@ class TradingLoopConfig:
     # a genuinely stuck position is flagged within about a minute rather
     # than being discovered by accident hours later.
     unprotected_position_alert_seconds: float = 60.0
+    # How long an exit order can sit in self._pending_exit_orders with
+    # neither a terminal status (FILLED/REJECTED/CANCELED/EXPIRED) nor
+    # being cleared, before _poll_pending_exit treats it as stuck: cancels
+    # it, drops it from tracking, and raises a
+    # RiskEventType.PENDING_EXIT_ORDER_STUCK event, letting the very next
+    # tick's PositionManager.check_exit fire a completely fresh exit
+    # attempt instead of polling the same never-resolving order forever.
+    # Real incident (2026-08-13, sandbox): a software-managed exit order
+    # for a position well past its stop-loss got submitted, entered
+    # self._pending_exit_orders, and then simply never resolved -- not
+    # filled, not rejected, not cancelled, not expired -- for many hours
+    # straight. _manage_position's very first check
+    # (`if pending is not None: self._poll_pending_exit(...); return`)
+    # means this doesn't just fail to protect the position -- it
+    # PERMANENTLY skips PositionManager.check_exit entirely for that
+    # symbol from then on (check_exit is never even called again), and
+    # _poll_pending_exit's own "still pending" branch was a bare
+    # `# else: still pending` with NO logging at all, so this failure
+    # mode was completely silent: no error, no warning, nothing in the
+    # logs to find, while the position rode on, unprotected, indefinitely.
+    # It ALSO silently defeated the dashboard's own manual "Close"
+    # button -- _close_all_positions_now explicitly skips any symbol
+    # already in self._pending_exit_orders (correctly so, for a order
+    # that's genuinely still in flight -- but wrongly so for one that's
+    # actually stuck forever). 180s (3 minutes -- well beyond the ~1s
+    # this bot's own MARKET/marketable-LIMIT exit orders should
+    # realistically take to fill under normal conditions) is long enough
+    # to never fire on a legitimate brief delay, short enough that a
+    # position can never again ride unprotected in this specific way for
+    # more than a few minutes, let alone hours.
+    pending_exit_stuck_timeout_seconds: float = 180.0
     # How long a candidate can sit TRIGGERED (entry order submitted, not yet
     # confirmed filled) before _poll_pending_entry also cross-checks
     # broker.get_positions() directly, on top of (not instead of) the
@@ -1950,6 +1981,35 @@ class TradingLoop:
             self._pending_exit_orders[candidate.symbol] = (order, exit_signal)
 
     def _poll_pending_exit(self, candidate: Candidate, snapshot: MarketSnapshot, now: datetime) -> None:
+        """While a symbol has an entry in self._pending_exit_orders,
+        _manage_position defers to this method EXCLUSIVELY -- check_exit
+        is never called again for it until this pops the entry (see
+        _manage_position's `if pending is not None: ...; return`). That
+        makes a still-pending order that never reaches a terminal status
+        a real trap: real incident (2026-08-13, sandbox), an exit order
+        for a position well past its stop-loss simply never resolved --
+        not filled, not rejected, not cancelled, not expired -- for many
+        hours, and this method used to just silently return every tick
+        with no logging at all in that case ("else: pass"). Nothing else
+        in this codebase noticed either: the dashboard's own manual
+        "Close" button (_close_all_positions_now) correctly refuses to
+        touch a symbol already in self._pending_exit_orders (it assumes
+        the order is still genuinely in flight), so it silently no-opped
+        too. The position rode on, completely unprotected, indefinitely,
+        with zero visibility anywhere.
+
+        Fix: once the order has been outstanding for
+        TradingLoopConfig.pending_exit_stuck_timeout_seconds (180s
+        default) with no terminal status, treat it as stuck -- cancel it
+        (best-effort; if this itself fails, still proceed to drop
+        tracking below, since leaving a possibly-already-filled or
+        already-dead order in self._pending_exit_orders forever is
+        strictly worse than the rare case of a cancel racing a real late
+        fill), raise a loud, visible RiskEventType.PENDING_EXIT_ORDER_STUCK
+        event, and drop it from self._pending_exit_orders so the very
+        next tick's _manage_position call falls through to a completely
+        fresh PositionManager.check_exit/exit-submission attempt instead
+        of polling the same dead order forever."""
         order, exit_signal = self._pending_exit_orders[candidate.symbol]
         try:
             status_order = self.order_manager.get_status(order.broker_order_id)
@@ -1965,7 +2025,32 @@ class TradingLoop:
         elif status_order.status in (OrderStatus.REJECTED, OrderStatus.CANCELED, OrderStatus.EXPIRED):
             self._pending_exit_orders.pop(candidate.symbol)
             logger.warning("Exit order for %s did not fill (%s); will re-evaluate exit next tick.", candidate.symbol, status_order.status.value)
-        # else still pending
+        elif now - order.created_at >= timedelta(seconds=self.config.pending_exit_stuck_timeout_seconds):
+            try:
+                self.order_manager.cancel(order.broker_order_id)
+            except Exception:
+                logger.warning(
+                    "Failed to cancel a stuck pending exit order for %s -- dropping it from "
+                    "tracking anyway so a fresh exit attempt can run next tick.", candidate.symbol,
+                    exc_info=True,
+                )
+            self._pending_exit_orders.pop(candidate.symbol)
+            logger.error(
+                "Exit order for %s has been pending for over %.0fs with no terminal status -- "
+                "treating it as stuck, cancelling it, and will attempt a fresh exit next tick.",
+                candidate.symbol, self.config.pending_exit_stuck_timeout_seconds,
+            )
+            self.risk_engine.record_operational_event(
+                RiskEventType.PENDING_EXIT_ORDER_STUCK,
+                candidate.symbol,
+                (
+                    f"{candidate.symbol}'s exit order ({exit_signal.action.value}) has been pending "
+                    f"for over {self.config.pending_exit_stuck_timeout_seconds:.0f}s with no fill, "
+                    "rejection, cancellation, or expiration -- cancelled and will retry fresh."
+                ),
+                now,
+            )
+        # else still pending, within the timeout -- normal, no action needed
 
     def _dispatch_exit_finalization(self, candidate: Candidate, position: Position, order: Order, exit_signal: Signal, now: datetime) -> None:
         """SCALE_OUT (a target hit -- see PositionManager.check_exit) closes

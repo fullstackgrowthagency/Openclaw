@@ -736,6 +736,116 @@ def test_exit_stays_managing_while_pending_then_finalizes_on_fill():
     assert trades[0].quantity == 5
 
 
+def test_poll_pending_exit_does_nothing_while_still_within_the_timeout():
+    from webull_bot.enums import RiskEventType
+
+    broker = _RestingBroker(fills_after_polls=999_999)  # never reports FILLED
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=_IN_HOURS_NOW, strategy_name="test",
+    )
+    snapshot = _snapshot(_IN_HOURS_NOW, 4.00, 4.00, 600_000, 3.99, 4.01, 4.10)  # below stop_price=4.50
+
+    loop._manage_position(candidate, snapshot, _IN_HOURS_NOW)
+    assert "TEST" in loop._pending_exit_orders
+
+    still_within_timeout = _IN_HOURS_NOW + timedelta(seconds=loop.config.pending_exit_stuck_timeout_seconds - 1)
+    loop._poll_pending_exit(candidate, snapshot, still_within_timeout)
+
+    assert "TEST" in loop._pending_exit_orders  # not dropped
+    assert broker._cancelled == []
+    assert not any(e.event_type == RiskEventType.PENDING_EXIT_ORDER_STUCK.value for e in loop.risk_engine.events)
+
+
+def test_poll_pending_exit_cancels_and_drops_a_stuck_order_past_the_timeout():
+    # Real incident (2026-08-13, sandbox): a software-managed exit order
+    # for a position well past its stop-loss got submitted and then
+    # simply never resolved -- not filled, not rejected, not cancelled,
+    # not expired -- for many hours. _manage_position defers entirely to
+    # _poll_pending_exit while a symbol has a pending exit, so
+    # PositionManager.check_exit was never called again for it, and the
+    # dashboard's own manual "Close" button also silently refused to act
+    # (it correctly skips a symbol already in _pending_exit_orders). This
+    # is the fix: past pending_exit_stuck_timeout_seconds, the stuck
+    # order is cancelled, dropped from tracking, and a loud
+    # RiskEventType.PENDING_EXIT_ORDER_STUCK event is raised, so the very
+    # next tick gets a completely fresh exit attempt instead of polling
+    # a dead order forever.
+    from webull_bot.enums import RiskEventType
+
+    broker = _RestingBroker(fills_after_polls=999_999)  # never reports FILLED
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=_IN_HOURS_NOW, strategy_name="test",
+    )
+    snapshot = _snapshot(_IN_HOURS_NOW, 4.00, 4.00, 600_000, 3.99, 4.01, 4.10)  # below stop_price=4.50
+
+    loop._manage_position(candidate, snapshot, _IN_HOURS_NOW)
+    assert "TEST" in loop._pending_exit_orders
+    stuck_order, _exit_signal = loop._pending_exit_orders["TEST"]
+
+    past_timeout = _IN_HOURS_NOW + timedelta(seconds=loop.config.pending_exit_stuck_timeout_seconds + 1)
+    loop._poll_pending_exit(candidate, snapshot, past_timeout)
+
+    assert "TEST" not in loop._pending_exit_orders
+    assert stuck_order.broker_order_id in broker._cancelled
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.PENDING_EXIT_ORDER_STUCK.value]
+    assert len(alerts) == 1
+    assert alerts[0].symbol == "TEST"
+
+    # Confirms the actual real-world fix: the very next tick reaches
+    # check_exit/submits a genuinely fresh exit attempt instead of being
+    # stuck forever polling the dead order.
+    loop._manage_position(candidate, snapshot, past_timeout)
+    assert "TEST" in loop._pending_exit_orders
+    new_order, _new_signal = loop._pending_exit_orders["TEST"]
+    assert new_order.broker_order_id != stuck_order.broker_order_id
+
+
+def test_poll_pending_exit_drops_a_stuck_order_even_when_cancel_itself_fails():
+    from webull_bot.enums import RiskEventType
+
+    class _CancelFailsBroker(_RestingBroker):
+        def cancel_order(self, broker_order_id):
+            raise RuntimeError("simulated cancel failure")
+
+    broker = _CancelFailsBroker(fills_after_polls=999_999)
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState
+
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=None, trailing_stop_pct=None, opened_at=_IN_HOURS_NOW, strategy_name="test",
+    )
+    snapshot = _snapshot(_IN_HOURS_NOW, 4.00, 4.00, 600_000, 3.99, 4.01, 4.10)
+
+    loop._manage_position(candidate, snapshot, _IN_HOURS_NOW)
+    past_timeout = _IN_HOURS_NOW + timedelta(seconds=loop.config.pending_exit_stuck_timeout_seconds + 1)
+
+    loop._poll_pending_exit(candidate, snapshot, past_timeout)  # must not raise
+
+    assert "TEST" not in loop._pending_exit_orders
+    assert any(e.event_type == RiskEventType.PENDING_EXIT_ORDER_STUCK.value for e in loop.risk_engine.events)
+
+
 def test_manage_position_survives_an_unexpected_broker_exception_on_stop_loss():
     # Real production incident: a position sat well past its stop_price
     # with the stop never firing. _manage_position's exit-submission catch

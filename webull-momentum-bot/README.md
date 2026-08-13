@@ -741,6 +741,47 @@ What's implemented and tested:
   item: whether `market_hours.py`'s core-hours check is worth hardening
   against market holidays/early closes (currently a pure weekday+time-
   window check with no calendar awareness).
+- **A stuck pending exit order could silently block all future
+  protection forever -- fixed 2026-08-13, root-caused with the user
+  directly.** Real sandbox incident: an exit order for a position well
+  past its stop-loss got submitted and then simply never resolved --
+  not filled, not rejected, not cancelled, not expired -- for hours.
+  `_manage_position`'s very first check defers ENTIRELY to
+  `_poll_pending_exit` while a symbol has a pending exit (`check_exit` is
+  never called again for it), and `_poll_pending_exit`'s "still pending"
+  branch used to be a bare `# else: pass` with zero logging -- so this
+  failure mode produced no error, no warning, nothing to grep for. It
+  also silently defeated the dashboard's manual "Close" button
+  (`_close_all_positions_now` correctly skips a symbol already in
+  `_pending_exit_orders`, assuming it's still genuinely in flight).
+  Diagnosed live: confirmed the tick loop itself was healthy (the
+  dashboard's "Last" price for the affected symbols was still updating)
+  while zero exit-related log lines existed for those symbols at all.
+  **Fix:** `TradingLoopConfig.pending_exit_stuck_timeout_seconds` (180s
+  default) -- once a pending exit has been outstanding that long with no
+  terminal status, it's cancelled, dropped from tracking, and a new
+  `RiskEventType.PENDING_EXIT_ORDER_STUCK` event is raised (same
+  dashboard-visible mechanism as the unprotected-position alert above),
+  so the very next tick gets a completely fresh exit attempt instead of
+  polling a dead order forever. See `docs/ARCHITECTURE.md`'s "A stuck
+  pending exit order can silently block all future protection forever"
+  section and `tests/test_trading_loop.py`'s
+  `test_poll_pending_exit_cancels_and_drops_a_stuck_order_past_the_timeout`.
+- **Streaming subscribe silently failed wholesale past 100 tracked
+  symbols -- found and fixed alongside the above.** `subscribe_quotes`
+  called Webull's streaming subscribe with every not-yet-subscribed
+  symbol in ONE uncapped call; confirmed live that Webull rejects the
+  WHOLE call with `TOO_MANY_SYMBOLS` ("Maximum number of symbols: 100")
+  past that limit -- unlike `get_snapshots`' sibling REST endpoint, which
+  already chunks correctly. Since symbols only get marked subscribed on
+  success, the wholesale failure meant NONE of them ever did, so the
+  exact same (or larger) list got retried every single tick, forever,
+  burning real time and log volume on a call that could never succeed as
+  written. Fixed with a new `_subscribe_symbols_in_batches` helper that
+  chunks to `_STREAMING_SUBSCRIBE_BATCH_SIZE` (100), best-effort per
+  chunk so one bad batch can't take down every other symbol in the same
+  call. See `docs/ARCHITECTURE.md`'s "Streaming subscribe silently
+  failed wholesale past 100 symbols" section.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and
