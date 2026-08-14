@@ -3022,6 +3022,143 @@ itself being too short; fixing the underlying saturation (parts 1-3
 above) is the correct fix, not loosening a value that was working as
 designed once the bot can actually tick at its configured cadence again.
 
+## TICK-derived order flow (2026-08-14)
+
+Real motivation, user question: "Should we be using TICK instead of
+SNAPSHOT?" Investigation into the installed SDK's protobuf schema
+(`webull.data.quotes.subscribe.message_pb2`) found the two are
+fundamentally different shapes of data, not competing options for the
+same thing: `Snapshot` carries `price/open/high/low/volume/...` -- a
+periodic AGGREGATED state, matching what `MarketSnapshot` already models
+-- while `Tick` carries only `time/price/volume/side` -- ONE individual
+trade print, including `side` (buyer- vs. seller-initiated), a field
+`Snapshot`/`Quote` structurally cannot provide at all. Every existing
+component in this pipeline (volume acceleration, price acceleration,
+dollar-volume acceleration, ...) measures THAT price/volume moved, never
+WHICH SIDE was driving it -- a volume spike from aggressive buying and one
+from someone dumping into a thin book that briefly ticks up anyway look
+identical to all of them. TICK closes that gap. Answer to the "instead
+of" framing: no -- SNAPSHOT/QUOTE stay exactly as they are (still the
+source for `MarketSnapshot`'s cumulative volume/OHLC/bid-ask), TICK is
+added as a third, independent stream.
+
+### Ingestion (`brokers/webull/client.py`)
+
+`subscribe_quotes`/`_subscribe_symbols_in_batches` now request `["QUOTE",
+"SNAPSHOT", "TICK"]` for the same symbol list (not an extra call) --
+reasoned, not confirmed live, to not count as additional "subscriptions"
+against the 100-symbol cumulative cap discussed in the zero-trades section
+above, since it's the same symbols, just one more data type per symbol.
+`TickDecoder` for payload type `'tick'` is already pre-registered by the
+SDK's own `DataStreamingClient.__init__` (confirmed by reading the SDK
+source), so no new decoder wiring was needed there -- only a new
+`topic == "tick"` branch in `_on_quotes_message`.
+
+Ticks are fundamentally different from snapshot/quote messages in how
+they're consumed: SNAPSHOT+QUOTE get merged into one `MarketSnapshot` and
+pushed to `on_update` per message. A tick is never merged into anything or
+pushed anywhere -- it's appended to a new bounded per-symbol
+`self._streaming_tick_buffer: dict[str, deque[TickRecord]]`
+(`_TICK_BUFFER_MAX_AGE_SECONDS=90`, `_TICK_BUFFER_MAX_COUNT=2000`, pruned
+on every append -- a genuinely hot low-float mover can print far more
+often than SNAPSHOT ever pushes, so this is a real memory/CPU bound, not
+just tidiness), and callers pull a COPY of the recent window on demand via
+the new `get_recent_ticks(symbol, max_age_seconds=None)` -- an optional,
+getattr-gated capability, same pattern as `get_snapshots`/
+`list_open_orders`/`place_oco_bracket` elsewhere in this codebase.
+`unsubscribe_quotes`/`disconnect` both clear the buffer for released/torn-
+down symbols, same as the existing snapshot/quote caches.
+
+### The unconfirmed piece: `side`'s real wire encoding
+
+`Tick.side` is a plain STRING on the wire (protobuf field type, confirmed
+by inspecting the descriptor directly), like every other numeric-looking
+field in this schema (`price`, `volume`, ...) -- but unlike `price`/
+`volume`, the SDK's own `TickResult` wrapper applies NO cast to it at all,
+and its real values have **never been observed against a live message**.
+`_TICK_SIDE_MAP` in `brokers/webull/client.py` currently guesses `"1"`/
+`"B"`/`"BUY"` -> BUY and `"2"`/`"S"`/`"SELL"` -> SELL; every other value,
+including every real value if all of those guesses are wrong, falls
+through to `TradeSide.UNKNOWN`.
+
+This is deliberately fail-safe, not fail-silent-wrong: `enums.TradeSide`
+docs the contract, `metrics.calculations.order_flow_imbalance` is only
+ever computed from BUY/SELL-classified volume (never UNKNOWN), and
+`MomentumMetrics.order_flow_imbalance_1m` stays `None` -- not `0.0`/
+"confirmed balanced" -- whenever there's no classified volume to measure.
+So an entirely wrong `_TICK_SIDE_MAP` just means order flow reads as "not
+enough data" everywhere, forever, until corrected -- never a confidently
+WRONG signal driving a scoring decision or blocking a real trade. This is
+the same "fails toward no-signal, not toward wrong-signal" discipline this
+project has applied to every other unconfirmed-but-load-bearing guess
+(e.g. `_position_from_dict`'s missing `side` field on real positions).
+
+**`scripts/verify_tick_stream.py`** (new) is the live-verification path:
+subscribes to TICK+QUOTE for a real, actively-trading symbol, and for each
+tick compares its price against the simultaneous best bid/ask to
+independently infer buyer- vs. seller-initiated (a print at/above the ask
+is conventionally a buy, at/below the bid a sell), then cross-tabulates
+that inference against the raw `side` string actually reported. Run this
+against the sandbox during core hours on a liquid, moving low-float name
+and update `_TICK_SIDE_MAP` from its output before trusting the order-flow
+gate below in anything but the safe "always None" state it ships in.
+
+### Where it's wired in
+
+1. **`metrics/rolling.py`**: `compute_metrics` gained an optional `ticks`
+   parameter and a new `_order_flow_since` helper (mirrors `_volume_since`'s
+   windowing, but sums individual trade volumes by side rather than
+   diffing cumulative totals). Populates `MomentumMetrics.buy_volume_1m`/
+   `sell_volume_1m`/`order_flow_imbalance_1m`/`order_flow_sample_count_1m`,
+   and finally wires up `trade_velocity` (a field that existed since this
+   project's very first version with the comment "trades/sec, once tick
+   data is wired up" -- now it is).
+2. **`scoring/momentum_ignition_score.py`**: new `order_flow_score`
+   component, reading `metrics.order_flow_imbalance_1m`/
+   `order_flow_sample_count_1m` directly (no extra `compute_score`
+   parameters needed, unlike `room_to_target_score` -- these numbers
+   already live on `MomentumMetrics` by the time scoring runs). `None`
+   (excluded from the weighted average, not scored as 0) until
+   `weights.yaml`'s `min_order_flow_sample_count` (8) classified prints
+   have accumulated. `weights.yaml` bumped to `v2.3-tick-order-flow`: all
+   12 existing weights scaled by 0.92 (preserves relative weighting),
+   `order_flow_score: 0.08`.
+3. **`scanner/candidate_watcher.py`**: `CandidateWatcher` gained an
+   optional `get_recent_ticks_fn` closure (mirrors `reward_risk_ratio_fn`/
+   `stop_loss_pct_fn`'s live-closure pattern rather than handing the class
+   a broker reference directly), threaded through `update()` into
+   `compute_metrics`.
+4. **`runtime/trading_loop.py`**: `_poll_confirmation` gained a 4th
+   failure condition alongside price-reversal/MIS-fade/spread-widening --
+   net sell-side order flow (`TradingLoopConfig.order_flow_sell_pressure_threshold`,
+   -0.4 default) once `order_flow_min_sample_count_for_gate` (10 --
+   deliberately higher than the MIS-scoring threshold, since blocking a
+   trade outright is a stronger action than nudging a ranking score)
+   classified prints exist. Reuses `RiskEventType.CONFIRMATION_FAILED`
+   (same event family, no new event type needed). Mirrors
+   `max_runway_consumed_pct`'s existing pattern: a soft MIS-scoring signal
+   (`order_flow_score`) coexists with a stricter, independently-configured
+   hard gate for the stronger action.
+5. **`main.py`**: `build_trading_loop` wires an optional, getattr-gated
+   `get_recent_ticks_fn` closure into `CandidateWatcher` construction --
+   `PaperBrokerClient`/backtests have no `get_recent_ticks` at all, in
+   which case every order-flow field simply stays at its "not enough
+   data" default, exactly as before TICK existed.
+
+**Deliberately NOT touched in this pass:** exit/stop-loss execution
+timing. TICK could in principle shave reaction time off a stop-loss
+breach the same way it tightens entry timing, but that's a higher-risk
+change to correctness-critical code and wasn't part of what was asked --
+noted here as a real, understood option for a future pass, not built.
+
+See `tests/test_metrics.py`, `tests/test_rolling.py`,
+`tests/test_momentum_score.py`, `tests/test_webull_broker_client.py`
+(`test_tick_*`/`test_*unsubscribe*`/`test_get_recent_ticks_*`),
+`tests/test_candidate_watcher.py`, and `tests/test_trading_loop.py`
+(`test_poll_confirmation_fails_on_sell_side_order_flow_with_enough_samples`,
+`test_poll_confirmation_ignores_sell_side_order_flow_below_the_sample_floor`)
+for coverage.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right

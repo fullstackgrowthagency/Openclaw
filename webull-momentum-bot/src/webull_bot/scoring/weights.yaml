@@ -15,7 +15,7 @@
 #
 # Bump `version` any time you change a weight or threshold so MomentumScore
 # records stay traceable to the formula that produced them.
-version: "v2.2-selectivity-rework"
+version: "v2.3-tick-order-flow"
 
 # v2 (2026-08-09): added float_turnover_score/short_term_relative_volume_score/
 # dollar_volume_acceleration_score -- metrics/rolling.py already computed
@@ -52,19 +52,38 @@ version: "v2.2-selectivity-rework"
 # 0.93 (preserves every component's *relative* weighting exactly -- nothing
 # below was judged less important than anything else, this just makes room
 # for the new one), with the freed 7% going to room_to_target_score.
+#
+# v2.3 (2026-08-14, TICK-derived order flow -- see docs/ARCHITECTURE.md):
+# added order_flow_score (buy-vs-sell aggressor volume from the TICK
+# streaming sub-type -- see metrics/rolling.py's compute_metrics `ticks`
+# parameter and scoring/momentum_ignition_score.py's compute_components).
+# Real motivation: every existing component measures THAT volume/price is
+# moving, never WHICH SIDE is driving it -- a volume spike from aggressive
+# buying and one from aggressive selling into a thin book look identical
+# to every component above. Every existing weight (all 12, including
+# room_to_target_score) is the v2.2 value scaled by 0.92 (preserves each
+# component's *relative* weighting exactly), with the freed 8% going to
+# order_flow_score. NOTE: this component is currently effectively inert
+# in production -- Webull's real TICK `side` wire encoding hasn't been
+# confirmed live yet (see brokers/webull/client.py's _TICK_SIDE_MAP), so
+# order_flow_imbalance_1m reads None (excluded from the weighted average,
+# not scored as 0) for every candidate until that's verified and the map
+# is corrected if needed. Safe to ship weighted-in ahead of that
+# verification specifically because of this None-until-confirmed fallback.
 weights:
-  float_score: 0.0558                         # structural (float size) -- 0.06 * 0.93
-  float_velocity_score: 0.1116                # popularity: 5m float turnover rate -- 0.12 * 0.93
-  float_turnover_score: 0.0930                # today's cumulative float turnover -- 0.10 * 0.93
-  relative_volume_score: 0.1116                # popularity: whole-session RVOL -- 0.12 * 0.93
-  short_term_relative_volume_score: 0.1395     # windowed (5m) RVOL, the freshest "hot right now" signal -- 0.15 * 0.93
-  volume_acceleration_score: 0.0837            # 0.09 * 0.93
-  dollar_volume_acceleration_score: 0.0837     # 0.09 * 0.93
-  price_acceleration_score: 0.0930             # fast price movement is itself a popularity signal -- 0.10 * 0.93
-  breakout_proximity_score: 0.0465             # least popularity-relevant structural factor -- 0.05 * 0.93
-  trend_quality_score: 0.0465                  # 0.05 * 0.93
-  liquidity_score: 0.0651                      # 0.07 * 0.93
-  room_to_target_score: 0.07                   # v2.2: new -- see comment above
+  float_score: 0.0513                          # structural (float size) -- 0.0558 * 0.92
+  float_velocity_score: 0.1027                 # popularity: 5m float turnover rate -- 0.1116 * 0.92
+  float_turnover_score: 0.0856                 # today's cumulative float turnover -- 0.0930 * 0.92
+  relative_volume_score: 0.1027                # popularity: whole-session RVOL -- 0.1116 * 0.92
+  short_term_relative_volume_score: 0.1283      # windowed (5m) RVOL, the freshest "hot right now" signal -- 0.1395 * 0.92
+  volume_acceleration_score: 0.0770             # 0.0837 * 0.92
+  dollar_volume_acceleration_score: 0.0770      # 0.0837 * 0.92
+  price_acceleration_score: 0.0856              # fast price movement is itself a popularity signal -- 0.0930 * 0.92
+  breakout_proximity_score: 0.0428              # least popularity-relevant structural factor -- 0.0465 * 0.92
+  trend_quality_score: 0.0428                   # 0.0465 * 0.92
+  liquidity_score: 0.0599                       # 0.0651 * 0.92
+  room_to_target_score: 0.0644                  # v2.2 -- 0.07 * 0.92
+  order_flow_score: 0.08                        # v2.3: new -- see comment above
 
 # Thresholds used to normalize raw metrics into 0-100 sub-scores, and to
 # drive DISCOVERED -> WATCHING -> HEATING_UP -> ARMED transitions. All
@@ -86,3 +105,14 @@ thresholds:
   min_dollar_volume: 500_000
   armed_score_threshold: 70.0
   heating_up_score_threshold: 40.0
+  # Minimum classified (BUY or SELL, never UNKNOWN) TICK prints required
+  # in the trailing 1-minute window before order_flow_score trusts the
+  # ratio enough to score it at all -- see MomentumScoreComponents
+  # .order_flow_score's docstring. Below this, order_flow_imbalance_1m is
+  # still computed (see MomentumMetrics) but the MIS component itself
+  # stays None/excluded, same reasoning as every other "not enough data
+  # yet" gate in this file. 8 is a starting value, not backtested -- small
+  # enough that a real move gets scored within seconds of ticks starting
+  # to arrive, large enough that 1-2 stray prints can't swing the ratio
+  # to +/-1.0 on pure noise.
+  min_order_flow_sample_count: 8

@@ -200,11 +200,28 @@ def build_trading_loop(
     # see each one's own config for why.
     stop_loss_pct_fn = lambda: risk_engine.config.stop_loss_pct  # noqa: E731
 
-    # Handed the same two closures as the strategies below so its
-    # room_to_target_score MIS component (scoring/momentum_ignition_score.py)
-    # targets the exact same fixed +stop*R level every strategy itself
-    # targets -- see CandidateWatcher.__init__'s docstring.
-    watcher = CandidateWatcher(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn)
+    # TICK-derived order flow (2026-08-14, see docs/ARCHITECTURE.md) --
+    # optional broker capability, getattr-gated like get_snapshots/
+    # list_open_orders/place_oco_bracket elsewhere in this codebase.
+    # PaperBrokerClient/backtests simply have no get_recent_ticks method at
+    # all, in which case this always returns an empty list and every
+    # order-flow metric/component stays at its "not enough data" default,
+    # exactly as before TICK existed. 90s matches
+    # WebullBrokerClient._TICK_BUFFER_MAX_AGE_SECONDS -- no point asking
+    # for a wider window than the buffer itself ever retains.
+    get_recent_ticks_fn = lambda symbol: (  # noqa: E731
+        broker.get_recent_ticks(symbol, max_age_seconds=90.0) if hasattr(broker, "get_recent_ticks") else []
+    )
+
+    # Handed the same closures as the strategies below so its
+    # room_to_target_score/order_flow_score MIS components
+    # (scoring/momentum_ignition_score.py) target the exact same fixed
+    # +stop*R level every strategy itself targets and read live TICK data
+    # -- see CandidateWatcher.__init__'s docstring.
+    watcher = CandidateWatcher(
+        reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn,
+        get_recent_ticks_fn=get_recent_ticks_fn,
+    )
 
     # Ordered most-selective/confirmed first, most-permissive last -- the
     # first strategy to return a Signal for a given tick wins (see

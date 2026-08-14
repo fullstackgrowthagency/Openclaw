@@ -500,6 +500,40 @@ class TradingLoopConfig:
     # rework is based on, not backtested.
     max_runway_consumed_pct: float = 0.40
 
+    # -- TICK-derived order flow (2026-08-14, see docs/ARCHITECTURE.md) -------
+    # Real motivation: every existing confirmation-window check (price
+    # reversal, MIS fading, spread widening) measures the SAME thing every
+    # other component in this pipeline already sees -- price and volume
+    # moving. None of them can tell a genuine buyer-driven breakout apart
+    # from a volume spike caused by someone dumping into a thin book at a
+    # price that briefly ticks up anyway. TICK's `side` field (aggressor
+    # classification) is the one signal that can. A hard gate here mirrors
+    # max_runway_consumed_pct above: a soft MIS-scoring signal
+    # (order_flow_score in weights.yaml) coexists with a stricter,
+    # independently-configured threshold for the stronger action of
+    # actually blocking an entry outright.
+    #
+    # Imbalance ((buy-sell)/(buy+sell)) at or below this during CONFIRMING
+    # fails the window, same failure family as reversed_past_tolerance/
+    # mis_faded/spread_too_wide (RiskEventType.CONFIRMATION_FAILED) -- see
+    # _poll_confirmation. -0.4 means net sell-side volume is at least 70%
+    # of classified flow (buy=0.15, sell=0.85 -> imbalance=-0.70... at
+    # exactly -0.4, a 30/70 buy/sell split). Starting value, not
+    # backtested.
+    order_flow_sell_pressure_threshold: float = -0.4
+    # Minimum classified (BUY or SELL, never UNKNOWN) TICK prints required
+    # in the trailing window before the sell-pressure gate above is even
+    # evaluated -- deliberately a HIGHER bar than weights.yaml's
+    # min_order_flow_sample_count (8), since blocking a trade outright is
+    # a stronger action than nudging a ranking score, and CONFIRMING
+    # candidates get subscribed to TICK data right when they trigger, so
+    # a symbol with too few classified prints this early just hasn't had
+    # enough real trading yet to trust a directional read. Below this,
+    # candidate.latest_metrics.order_flow_imbalance_1m may still be a real
+    # (if noisy) number, but _poll_confirmation ignores it entirely rather
+    # than blocking an entry on a thin sample.
+    order_flow_min_sample_count_for_gate: int = 10
+
     # -- atomic bracket entry retry (2026-08-13, see docs/ARCHITECTURE.md's
     # "Atomic bracket entry" section) -----------------------------------
     # How many additional attempts a rejected atomic bracket entry gets
@@ -1460,9 +1494,11 @@ class TradingLoop:
         Three ways this ends:
         1. FAILS before the window elapses -- price reversed past
            confirmation_max_pullback_pct, MIS fell back below the armed
-           threshold, or the spread widened back out -- RiskEventType
-           .CONFIRMATION_FAILED, revert to ARMED, must re-trigger fresh
-           (not resume this same clock).
+           threshold, the spread widened back out, or (2026-08-14)
+           TICK-derived order flow shows net sell-side pressure past
+           order_flow_sell_pressure_threshold with enough classified
+           volume to trust it -- RiskEventType.CONFIRMATION_FAILED, revert
+           to ARMED, must re-trigger fresh (not resume this same clock).
         2. Window elapses clean -- recompute stop/target from the ACTUAL
            current price, not signal.reference_price (which by now is
            confirmation_window_seconds stale), preserving the ORIGINAL
@@ -1504,8 +1540,29 @@ class TradingLoop:
             candidate.latest_metrics is not None
             and candidate.latest_metrics.spread_pct > self.watcher.config.max_spread_pct
         )
-        if reversed_past_tolerance or mis_faded or spread_too_wide:
-            failure = "price reversed" if reversed_past_tolerance else "MIS faded" if mis_faded else "spread widened"
+        # TICK-derived order flow (2026-08-14, see
+        # TradingLoopConfig.order_flow_sell_pressure_threshold's
+        # docstring): net sell-side volume during the confirmation window
+        # is a real reason to distrust the trigger even when price hasn't
+        # reversed and MIS/spread still look fine -- those three checks
+        # above all measure price/volume moving, never which side is
+        # driving it. Requires order_flow_min_sample_count_for_gate
+        # classified prints before trusting the ratio enough to block an
+        # entry on it; below that, order_flow_imbalance_1m may still be a
+        # real number but is ignored here as too thin a sample.
+        sell_pressure_detected = (
+            candidate.latest_metrics is not None
+            and candidate.latest_metrics.order_flow_imbalance_1m is not None
+            and candidate.latest_metrics.order_flow_sample_count_1m >= self.config.order_flow_min_sample_count_for_gate
+            and candidate.latest_metrics.order_flow_imbalance_1m <= self.config.order_flow_sell_pressure_threshold
+        )
+        if reversed_past_tolerance or mis_faded or spread_too_wide or sell_pressure_detected:
+            failure = (
+                "price reversed" if reversed_past_tolerance
+                else "MIS faded" if mis_faded
+                else "spread widened" if spread_too_wide
+                else "sell-side order flow"
+            )
             reason = (
                 f"{candidate.symbol} failed confirmation ({failure}, {elapsed_seconds:.0f}s into a "
                 f"{self.config.confirmation_window_seconds:.0f}s window)"

@@ -2,6 +2,7 @@ from webull_bot.metrics.calculations import (
     bid_ask_spread,
     dollar_volume,
     float_turnover,
+    order_flow_imbalance,
     price_acceleration,
     price_velocity_pct,
     relative_volume,
@@ -53,3 +54,10 @@ def test_bid_ask_spread():
 
 def test_dollar_volume():
     assert dollar_volume(5.0, 100_000) == 500_000.0
+
+
+def test_order_flow_imbalance():
+    assert order_flow_imbalance(80, 20) == 0.6
+    assert order_flow_imbalance(20, 80) == -0.6
+    assert order_flow_imbalance(50, 50) == 0.0
+    assert order_flow_imbalance(0, 0) == 0.0  # no classified volume -- safe_div's default, not "confirmed neutral"

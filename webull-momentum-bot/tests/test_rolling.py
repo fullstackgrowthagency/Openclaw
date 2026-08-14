@@ -6,8 +6,9 @@ metrics that scoring/diagnostics lean on instead of a pass/fail cutoff.
 """
 from datetime import datetime, timedelta
 
+from webull_bot.enums import TradeSide
 from webull_bot.metrics.rolling import compute_metrics, seed_history_from_bars
-from webull_bot.models import MarketSnapshot
+from webull_bot.models import MarketSnapshot, TickRecord
 
 
 def _snap(minutes_ago, price, cumulative_volume, now):
@@ -174,3 +175,45 @@ def test_seeded_history_lets_compute_metrics_see_pre_discovery_momentum():
     assert without_seed.price_velocity_5m == 0.0
     assert with_seed.volume_5m == 600_000.0
     assert with_seed.price_velocity_5m == 100.0  # (2.0 - 1.0) / 1.0 * 100
+
+
+# -- TICK-derived order flow (2026-08-14) -----------------------------------
+
+def _tick(seconds_ago, price, volume, side, now):
+    return TickRecord(symbol="TEST", timestamp=now - timedelta(seconds=seconds_ago), price=price, volume=volume, side=side)
+
+
+def test_compute_metrics_without_ticks_leaves_order_flow_unset():
+    now = datetime(2026, 1, 1, 10, 0, 0)
+    m = compute_metrics(1_000_000, [_snap(0, 10.0, 100_000, now)])
+    assert m.buy_volume_1m == 0.0
+    assert m.sell_volume_1m == 0.0
+    assert m.order_flow_imbalance_1m is None
+    assert m.order_flow_sample_count_1m == 0
+    assert m.trade_velocity is None
+
+
+def test_compute_metrics_sums_classified_volume_within_the_1m_window():
+    now = datetime(2026, 1, 1, 10, 0, 0)
+    ticks = [
+        _tick(10, 10.0, 80.0, TradeSide.BUY, now),
+        _tick(5, 10.0, 20.0, TradeSide.SELL, now),
+        _tick(2, 10.0, 30.0, TradeSide.UNKNOWN, now),  # counts toward neither side
+        _tick(90, 10.0, 999.0, TradeSide.BUY, now),  # outside the 1m window -- excluded
+    ]
+    m = compute_metrics(1_000_000, [_snap(0, 10.0, 100_000, now)], ticks=ticks)
+    assert m.buy_volume_1m == 80.0
+    assert m.sell_volume_1m == 20.0
+    assert m.order_flow_imbalance_1m == 0.6  # (80-20)/(80+20)
+    assert m.order_flow_sample_count_1m == 2  # only the 2 classified prints
+    assert m.trade_velocity == 3 / 60.0  # 3 total prints in-window (incl. UNKNOWN) / 60s
+
+
+def test_compute_metrics_order_flow_imbalance_stays_none_when_all_ticks_unclassified():
+    now = datetime(2026, 1, 1, 10, 0, 0)
+    ticks = [_tick(5, 10.0, 100.0, TradeSide.UNKNOWN, now)]
+    m = compute_metrics(1_000_000, [_snap(0, 10.0, 100_000, now)], ticks=ticks)
+    assert m.buy_volume_1m == 0.0
+    assert m.sell_volume_1m == 0.0
+    assert m.order_flow_imbalance_1m is None  # nothing classified -- not "confirmed balanced"
+    assert m.trade_velocity == 1 / 60.0  # the print still counts toward activity/trade_velocity

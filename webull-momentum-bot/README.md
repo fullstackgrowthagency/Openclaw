@@ -937,6 +937,39 @@ What's implemented and tested:
   incident and the three-part scaling fix" section for the full five-step
   causal chain and `tests/test_trading_loop.py`, `tests/test_retry.py`,
   `tests/test_webull_broker_client.py` for the new coverage.
+- **TICK-derived order flow -- 2026-08-14, at the user's explicit request
+  ("Should we be using TICK instead of SNAPSHOT?" -> "do a full scope
+  where TICK would be the most useful").** SNAPSHOT/QUOTE stay exactly as
+  they are (still the source for `MarketSnapshot`); TICK is added as a
+  third, independent stream of individual trade prints (`time/price/
+  volume/side`), added specifically for its `side` field -- buyer- vs.
+  seller-initiated, the one signal nothing else in this pipeline can see.
+  `WebullBrokerClient` now subscribes `["QUOTE", "SNAPSHOT", "TICK"]` and
+  accumulates ticks into a new bounded per-symbol buffer
+  (`get_recent_ticks`, an optional getattr-gated capability). `metrics/rolling.py`'s
+  `compute_metrics` sums buy/sell volume by side over a trailing 1-minute
+  window into new `MomentumMetrics` fields (`buy_volume_1m`/`sell_volume_1m`/
+  `order_flow_imbalance_1m`/`order_flow_sample_count_1m`), finally wiring
+  up the long-dormant `trade_velocity` field along the way. A new
+  `order_flow_score` MIS component (`weights.yaml` v2.3, 8% weight,
+  existing 12 components scaled by 0.92) and a new hard confirmation-window
+  gate (`TradingLoopConfig.order_flow_sell_pressure_threshold`, mirroring
+  `max_runway_consumed_pct`'s soft-score-plus-hard-gate pattern) both key
+  off it. **Important caveat, shipped deliberately fail-safe:** Webull's
+  real `Tick.side` wire encoding (a plain, uncast string) has never been
+  observed live -- `brokers/webull/client.py`'s `_TICK_SIDE_MAP` is an
+  educated guess, and any unrecognized value (including every real one, if
+  every guess is wrong) falls through to `TradeSide.UNKNOWN`, which
+  `order_flow_imbalance_1m` treats as "not enough data" (`None`), never a
+  confidently wrong signal. New `scripts/verify_tick_stream.py` is the
+  live-verification path (cross-tabulates raw `side` values against an
+  independent bid/ask-based inference) -- run it against the sandbox
+  before trusting this component/gate as anything more than inert. See
+  `docs/ARCHITECTURE.md`'s "TICK-derived order flow" section and
+  `tests/test_metrics.py`, `tests/test_rolling.py`,
+  `tests/test_momentum_score.py`, `tests/test_webull_broker_client.py`,
+  `tests/test_candidate_watcher.py`, `tests/test_trading_loop.py` for the
+  new coverage.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

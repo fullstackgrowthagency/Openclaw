@@ -218,3 +218,41 @@ def test_compute_score_renormalizes_missing_component_instead_of_treating_it_as_
         if getattr(components, key) is not None
     )
     assert without_context.score > naive_if_treated_as_zero
+
+
+# -- TICK-derived order flow (2026-08-14) -----------------------------------
+
+def test_order_flow_score_is_none_without_enough_classified_samples():
+    config = MISConfig.load()
+    # Extreme imbalance, but only 3 classified prints -- below weights.yaml's
+    # min_order_flow_sample_count (8 by default) -- must stay None/excluded,
+    # same contract as room_to_target_score without price context.
+    metrics = _metrics(order_flow_imbalance_1m=0.9, order_flow_sample_count_1m=3)
+    score = compute_score(metrics, _float_data(5_000_000), config)
+    assert score.components.order_flow_score is None
+
+
+def test_order_flow_score_scales_imbalance_to_0_100_once_sample_floor_is_met():
+    config = MISConfig.load()
+    balanced = compute_score(
+        _metrics(order_flow_imbalance_1m=0.0, order_flow_sample_count_1m=20), _float_data(5_000_000), config,
+    )
+    all_buy = compute_score(
+        _metrics(order_flow_imbalance_1m=1.0, order_flow_sample_count_1m=20), _float_data(5_000_000), config,
+    )
+    all_sell = compute_score(
+        _metrics(order_flow_imbalance_1m=-1.0, order_flow_sample_count_1m=20), _float_data(5_000_000), config,
+    )
+    assert balanced.components.order_flow_score == 50.0
+    assert all_buy.components.order_flow_score == 100.0
+    assert all_sell.components.order_flow_score == 0.0
+    assert all_buy.score > balanced.score > all_sell.score
+
+
+def test_order_flow_score_is_none_when_metrics_never_saw_any_ticks():
+    # The pre-TICK/default case (compute_metrics never given `ticks`) --
+    # order_flow_imbalance_1m is None on the metrics object itself, not
+    # just under-sampled.
+    config = MISConfig.load()
+    score = compute_score(_metrics(), _float_data(5_000_000), config)
+    assert score.components.order_flow_score is None

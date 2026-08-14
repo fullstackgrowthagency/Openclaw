@@ -48,6 +48,24 @@ class OrderSide(str, Enum):
     BUY_TO_COVER = "buy_to_cover"
 
 
+class TradeSide(str, Enum):
+    """Aggressor classification for a single TICK-streamed trade print (see
+    models.TickRecord, brokers/webull/client.py's TICK sub-type support) --
+    distinct from OrderSide above, which describes OUR OWN orders, not a
+    trade someone else made. UNKNOWN is the default/fail-safe value: it's
+    used both for a genuinely unclassifiable print and for the case where
+    Webull's real `side` wire encoding doesn't match any entry in
+    brokers/webull/client.py's _TICK_SIDE_MAP (that mapping is an
+    unconfirmed guess as of 2026-08-14 -- see its own docstring). Callers
+    computing order-flow imbalance (metrics/calculations.order_flow_imbalance)
+    must only ever count BUY/SELL volume, never UNKNOWN, so an entirely
+    wrong _TICK_SIDE_MAP fails toward "no signal" rather than a
+    confidently wrong one."""
+    BUY = "buy"
+    SELL = "sell"
+    UNKNOWN = "unknown"
+
+
 class OrderType(str, Enum):
     MARKET = "market"
     LIMIT = "limit"

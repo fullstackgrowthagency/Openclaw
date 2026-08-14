@@ -21,17 +21,20 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Optional, Sequence
 
-from ..models import MarketSnapshot, MomentumMetrics
+from ..models import MarketSnapshot, MomentumMetrics, TickRecord
+from ..enums import TradeSide
 from .calculations import (
     bid_ask_spread,
     distance_pct,
     dollar_volume,
     dollar_volume_from_avg_price,
     float_velocity,
+    order_flow_imbalance,
     price_acceleration,
     price_range_pct,
     price_velocity_pct,
     relative_volume,
+    trade_velocity,
     volume_acceleration,
 )
 
@@ -145,6 +148,34 @@ def _volume_since(history_window: list[MarketSnapshot], latest: MarketSnapshot) 
     return max(0.0, latest.cumulative_volume - history_window[0].cumulative_volume)
 
 
+def _order_flow_since(ticks: Sequence[TickRecord], now: datetime, minutes: float = 1.0) -> tuple[float, float, int, int]:
+    """Sums TICK-derived trade volume by side within the trailing `minutes`
+    window ending at `now` -- mirrors _volume_since's windowing, but counts
+    individual trade prints rather than diffing cumulative_volume, since
+    TickRecord.volume is each trade's own size, not a running total.
+    Returns (buy_volume, sell_volume, classified_sample_count, total_tick_count):
+    TradeSide.UNKNOWN ticks count toward neither buy nor sell volume nor
+    classified_sample_count (see TickRecord's docstring for why a print
+    can be unclassified) but are still real trades, so total_tick_count
+    -- used for trade_velocity, which measures activity, not direction --
+    counts every tick in the window regardless of side."""
+    cutoff = now - timedelta(minutes=minutes)
+    buy_volume = sell_volume = 0.0
+    sample_count = 0
+    total_count = 0
+    for tick in ticks:
+        if tick.timestamp < cutoff:
+            continue
+        total_count += 1
+        if tick.side == TradeSide.BUY:
+            buy_volume += tick.volume
+            sample_count += 1
+        elif tick.side == TradeSide.SELL:
+            sell_volume += tick.volume
+            sample_count += 1
+    return buy_volume, sell_volume, sample_count, total_count
+
+
 def compute_metrics(
     free_float_shares: Optional[float],
     history: list[MarketSnapshot],
@@ -153,6 +184,16 @@ def compute_metrics(
     typical_volume_1m: Optional[float] = None,
     typical_volume_5m: Optional[float] = None,
     resistance_level: Optional[float] = None,
+    # TICK-derived trade prints (see brokers/webull/client.py's
+    # get_recent_ticks and TickRecord's docstring) -- optional, like every
+    # other context-dependent input here (typical_volume_*, resistance_level):
+    # None (the default) simply leaves order_flow_imbalance_1m/trade_velocity
+    # uncomputed (None), exactly the contract every other optional metric
+    # in this module already follows. Not part of `history`'s
+    # MarketSnapshot rolling window since ticks are fundamentally a
+    # different shape of data (individual trade prints, not periodic
+    # aggregated state) -- see TickRecord's docstring.
+    ticks: Optional[Sequence[TickRecord]] = None,
 ) -> MomentumMetrics:
     if not history:
         raise ValueError("compute_metrics requires at least one snapshot")
@@ -218,6 +259,17 @@ def compute_metrics(
     range_pct_3m = price_range_pct([s.last_price for s in w3])
     range_pct_15m = price_range_pct([s.last_price for s in w15])
 
+    # TICK-derived order flow -- see compute_metrics' `ticks` parameter
+    # docstring and MomentumMetrics.order_flow_imbalance_1m's docstring for
+    # why this stays None (not 0.0) whenever there's no classified volume
+    # to measure, rather than defaulting to "confirmed balanced."
+    ticks = ticks or []
+    buy_volume_1m, sell_volume_1m, order_flow_sample_count_1m, total_ticks_1m = _order_flow_since(ticks, now, minutes=1.0)
+    order_flow_imb_1m = (
+        order_flow_imbalance(buy_volume_1m, sell_volume_1m) if (buy_volume_1m + sell_volume_1m) > 0 else None
+    )
+    trade_velocity_val = trade_velocity(total_ticks_1m, 60.0) if ticks else None
+
     return MomentumMetrics(
         symbol=latest.symbol,
         timestamp=now,
@@ -255,4 +307,9 @@ def compute_metrics(
         dollar_volume=dollar_volume(latest.last_price, latest.cumulative_volume),
         price_range_pct_3m=range_pct_3m,
         price_range_pct_15m=range_pct_15m,
+        trade_velocity=trade_velocity_val,
+        buy_volume_1m=buy_volume_1m,
+        sell_volume_1m=sell_volume_1m,
+        order_flow_imbalance_1m=order_flow_imb_1m,
+        order_flow_sample_count_1m=order_flow_sample_count_1m,
     )

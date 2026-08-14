@@ -133,6 +133,24 @@ def compute_components(
             current_price, target_price, static_resistance_levels or [],
         ).room_to_target_score
 
+    # v2.3 addition (2026-08-14, TICK-derived order flow -- see
+    # docs/ARCHITECTURE.md): buy-vs-sell aggressor volume, the one signal
+    # SNAPSHOT/QUOTE can't provide. Read straight off `metrics` (unlike
+    # room_to_target_score above, this doesn't need extra current_price/
+    # target_pct context -- order_flow_imbalance_1m/order_flow_sample_count_1m
+    # are already fully computed by metrics/rolling.py's compute_metrics).
+    # None (excluded from the weighted average, not scored as 0 -- same
+    # contract as room_to_target_score) until at least
+    # min_order_flow_sample_count real classified prints have accumulated,
+    # so a thin/just-subscribed symbol isn't scored on a handful of noisy
+    # prints.
+    order_flow_score = None
+    if (
+        metrics.order_flow_imbalance_1m is not None
+        and metrics.order_flow_sample_count_1m >= th["min_order_flow_sample_count"]
+    ):
+        order_flow_score = _scale(metrics.order_flow_imbalance_1m, -1.0, 1.0)
+
     return MomentumScoreComponents(
         float_score=float_score,
         float_velocity_score=float_velocity_score,
@@ -146,6 +164,7 @@ def compute_components(
         short_term_relative_volume_score=short_term_relative_volume_score,
         dollar_volume_acceleration_score=dollar_volume_acceleration_score,
         room_to_target_score=room_to_target_score,
+        order_flow_score=order_flow_score,
     )
 
 

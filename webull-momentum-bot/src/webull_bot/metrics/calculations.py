@@ -103,6 +103,19 @@ def trade_velocity(trade_count: int, seconds: float) -> float:
     return safe_div(trade_count, seconds)
 
 
+def order_flow_imbalance(buy_volume: float, sell_volume: float) -> float:
+    """(buy - sell) / (buy + sell): -1.0 (entirely seller-initiated) to
+    +1.0 (entirely buyer-initiated), 0.0 for a perfectly balanced split OR
+    (via safe_div's own default) when there's no classified volume at all
+    to measure. That ambiguity is deliberate and matches relative_volume's
+    own default=1.0 pattern: this pure function always returns a definite
+    number, and it's the CALLER's job to check buy_volume + sell_volume > 0
+    before trusting a 0.0 result as "confirmed balanced" rather than
+    "nothing to measure" -- see MomentumMetrics.order_flow_imbalance_1m,
+    which is None (not 0.0) in exactly that case for this reason."""
+    return safe_div(buy_volume - sell_volume, buy_volume + sell_volume, default=0.0)
+
+
 def price_range_pct(prices: Sequence[float]) -> float:
     """High-low range of a list of prices as a % of their average -- a
     coarse volatility proxy for detecting a tightening/consolidating range

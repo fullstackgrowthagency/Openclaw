@@ -5,6 +5,7 @@ captured live against the Webull sandbox on 2026-08-08 (see
 brokers/webull/client.py's module docstring for exactly what was verified
 vs. best-effort/unverified).
 """
+from collections import deque
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Optional
@@ -13,8 +14,8 @@ import pytest
 
 from webull_bot.brokers.webull import retry as retry_module
 from webull_bot.brokers.webull.client import WebullBrokerClient
-from webull_bot.enums import OrderSide, OrderStatus, OrderType, TimeInForce
-from webull_bot.models import MarketSnapshot, Order
+from webull_bot.enums import OrderSide, OrderStatus, OrderType, TimeInForce, TradeSide
+from webull_bot.models import MarketSnapshot, Order, TickRecord
 
 
 @pytest.fixture(autouse=True)
@@ -1289,6 +1290,70 @@ def test_merge_streamed_snapshot_returns_none_until_both_message_types_seen():
     assert merged.bid_size == 41.0 and merged.ask_size == 203.0
 
 
+class _FakeTickResult:
+    def __init__(self, symbol, timestamp, price=None, volume=None, side=None, trading_session="RTH"):
+        self.basic = _FakeBasicResult(symbol, timestamp, trading_session)
+        self.price = price
+        self.volume = volume
+        self.side = side
+
+
+def test_tick_from_streamed_result_maps_known_side_codes():
+    client = _client()
+    result = _FakeTickResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=304.39, volume=100, side="1")
+    tick = client._tick_from_streamed_result(result)
+    assert tick.symbol == "AAPL"
+    assert tick.price == 304.39
+    assert tick.volume == 100.0
+    assert tick.side == TradeSide.BUY
+
+
+def test_tick_from_streamed_result_falls_back_to_unknown_for_an_unrecognized_side():
+    # See _TICK_SIDE_MAP's docstring: an unconfirmed/wrong guess must fail
+    # safe (UNKNOWN), never silently misclassify a print as BUY or SELL.
+    client = _client()
+    result = _FakeTickResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS, price=304.39, volume=100, side="some-value-not-in-the-map")
+    tick = client._tick_from_streamed_result(result)
+    assert tick.side == TradeSide.UNKNOWN
+
+
+def test_tick_from_streamed_result_defaults_missing_fields():
+    client = _client()
+    result = _FakeTickResult(symbol="AAPL", timestamp=_REGULAR_HOURS_QUOTE_TIME_MS)
+    tick = client._tick_from_streamed_result(result)
+    assert tick.price == 0.0
+    assert tick.volume == 0.0
+    assert tick.side == TradeSide.UNKNOWN
+
+
+def test_get_recent_ticks_returns_empty_for_an_unsubscribed_symbol():
+    client = _streaming_client()
+    assert client.get_recent_ticks("AAPL") == []
+
+
+def test_get_recent_ticks_returns_a_copy_not_the_live_buffer():
+    client = _streaming_client()
+    now = datetime.utcnow()
+    tick = TickRecord(symbol="AAPL", timestamp=now, price=1.0, volume=10.0, side=TradeSide.BUY)
+    client._streaming_tick_buffer["AAPL"] = deque([tick])
+
+    returned = client.get_recent_ticks("AAPL")
+    returned.append("mutated")
+
+    assert list(client._streaming_tick_buffer["AAPL"]) == [tick]  # untouched by the caller's mutation
+
+
+def test_get_recent_ticks_narrows_to_max_age_seconds():
+    client = _streaming_client()
+    now = datetime.utcnow()
+    old_tick = TickRecord(symbol="AAPL", timestamp=now - timedelta(seconds=120), price=1.0, volume=10.0, side=TradeSide.BUY)
+    fresh_tick = TickRecord(symbol="AAPL", timestamp=now - timedelta(seconds=5), price=1.0, volume=20.0, side=TradeSide.SELL)
+    client._streaming_tick_buffer["AAPL"] = deque([old_tick, fresh_tick])
+
+    assert client.get_recent_ticks("AAPL", max_age_seconds=60.0) == [fresh_tick]
+    assert client.get_recent_ticks("AAPL") == [old_tick, fresh_tick]  # unnarrowed when max_age_seconds is None
+
+
 class _FakeDataStreamingClient:
     """Stands in for webull.data.data_streaming_client.DataStreamingClient
     -- subscribe_quotes constructs one of these internally (not injectable
@@ -1367,6 +1432,7 @@ def _streaming_client(trading_mode=None):
     client._streaming_subscribed_symbols = set()
     client._streaming_snapshot_cache = {}
     client._streaming_quote_cache = {}
+    client._streaming_tick_buffer = {}
     import threading
     client._streaming_lock = threading.Lock()
     return client
@@ -1430,7 +1496,7 @@ def test_subscribe_quotes_subscribes_on_connect_success(monkeypatch):
     fake._connected = True
     fake.on_connect_success(fake, None, "session-1")
 
-    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
+    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT", "TICK"])]
 
 
 def test_subscribe_quotes_chunks_a_large_symbol_list_on_connect(monkeypatch):
@@ -1522,9 +1588,46 @@ def test_subscribe_quotes_ignores_unknown_topics(monkeypatch):
     client.subscribe_quotes(["AAPL"], received.append)
     fake = instances[0]
 
-    fake.on_quotes_message(fake, "tick", object())  # a payload type this project doesn't consume
+    # "tick" is now a real, handled topic (see the TICK tests below) -- use
+    # something genuinely unrecognized to exercise the fallthrough branch.
+    fake.on_quotes_message(fake, "event-quote", object())
 
     assert received == []
+
+
+def test_subscribe_quotes_routes_tick_messages_into_the_buffer_not_on_update(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    received = []
+    client.subscribe_quotes(["AAPL"], received.append)
+    fake = instances[0]
+
+    # Uses a timestamp close to "now" (unlike _REGULAR_HOURS_QUOTE_TIME_MS,
+    # a fixed historical fixture used elsewhere) -- the tick buffer prunes
+    # against real datetime.utcnow() on every append (see
+    # _TICK_BUFFER_MAX_AGE_SECONDS), so a stale fixed timestamp would be
+    # evicted the instant it's added.
+    recent_ms = int(datetime.utcnow().timestamp() * 1000)
+    tick_result = _FakeTickResult(symbol="AAPL", timestamp=recent_ms, price=304.39, volume=100, side="1")
+    fake.on_quotes_message(fake, "tick", tick_result)
+
+    assert received == []  # ticks never feed the merged-snapshot on_update callback
+    ticks = client.get_recent_ticks("AAPL")
+    assert len(ticks) == 1
+    assert ticks[0].price == 304.39
+    assert ticks[0].volume == 100.0
+    assert ticks[0].side == TradeSide.BUY
+
+
+def test_subscribe_quotes_swallows_a_malformed_tick_payload(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+
+    fake.on_quotes_message(fake, "tick", object())  # missing .basic/.price/etc -- must not raise
+
+    assert client.get_recent_ticks("AAPL") == []
 
 
 def test_subscribe_quotes_swallows_an_on_update_exception(monkeypatch):
@@ -1559,7 +1662,7 @@ def test_subscribe_quotes_reuses_the_existing_connection_for_new_symbols(monkeyp
     assert fake.connect_calls == 1
     # Only the NEW symbol -- not a re-subscribe of AAPL (already covered
     # by the on_connect_success call above).
-    assert fake.subscribe_calls == [(["AAPL"], "US_STOCK", ["QUOTE", "SNAPSHOT"]), (["MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
+    assert fake.subscribe_calls == [(["AAPL"], "US_STOCK", ["QUOTE", "SNAPSHOT", "TICK"]), (["MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT", "TICK"])]
 
 
 def test_subscribe_quotes_does_not_trust_the_sdks_get_connect_success(monkeypatch):
@@ -1613,7 +1716,7 @@ def test_subscribe_quotes_defers_new_symbols_until_connected(monkeypatch):
     fake.on_connect_success(fake, None, "session-1")
 
     assert client._streaming_connected is True
-    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
+    assert fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT", "TICK"])]
 
 
 def test_subscribe_quotes_propagates_a_failed_additional_subscribe(monkeypatch):
@@ -1703,7 +1806,7 @@ def test_subscribe_quotes_reconnects_with_a_fresh_client_after_the_delay(monkeyp
     # resubscribed once the fresh connection comes up -- AAPL was never
     # actually confirmed subscribed against the dead connection.
     fresh_fake.on_connect_success(fresh_fake, None, "session-2")
-    assert fresh_fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
+    assert fresh_fake.subscribe_calls == [(["AAPL", "MSFT"], "US_STOCK", ["QUOTE", "SNAPSHOT", "TICK"])]
 
 
 def test_subscribe_quotes_does_not_reconnect_before_the_delay_elapses(monkeypatch):
@@ -1744,7 +1847,7 @@ def test_unsubscribe_quotes_releases_a_connected_symbol(monkeypatch):
 
     client.unsubscribe_quotes(["AAPL"])
 
-    assert fake.unsubscribe_calls == [(["AAPL"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
+    assert fake.unsubscribe_calls == [(["AAPL"], "US_STOCK", ["QUOTE", "SNAPSHOT", "TICK"])]
     assert client._streaming_subscribed_symbols == {"MSFT"}
     assert "AAPL" not in client._streaming_snapshot_cache
     assert "AAPL" not in client._streaming_quote_cache

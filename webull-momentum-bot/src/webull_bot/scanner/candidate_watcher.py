@@ -34,7 +34,7 @@ from typing import Callable
 
 from ..enums import CandidateState, TradeBlockReason
 from ..metrics.rolling import MAX_HISTORY_MINUTES, compute_metrics
-from ..models import Candidate, MarketSnapshot
+from ..models import Candidate, MarketSnapshot, TickRecord
 from ..scoring.momentum_ignition_score import MISConfig, compute_score
 from ..state_machine import transition
 
@@ -69,11 +69,24 @@ class CandidateWatcher:
         # existing behavior, see compute_score's docstring on that component.
         reward_risk_ratio_fn: Callable[[], float] | None = None,
         stop_loss_pct_fn: Callable[[], float] | None = None,
+        # Optional broker capability closure (2026-08-14, TICK-derived
+        # order flow -- see docs/ARCHITECTURE.md) -- mirrors
+        # reward_risk_ratio_fn/stop_loss_pct_fn's "live-reading closure"
+        # pattern rather than handing this class a broker reference
+        # directly. Callers (main.py's build_trading_loop) getattr-gate
+        # this the same way every other optional broker capability in this
+        # codebase is checked (get_snapshots, list_open_orders, ...) --
+        # PaperBrokerClient/backtests simply have nothing to wire up here,
+        # in which case `update()` passes ticks=None into compute_metrics,
+        # exactly the same as before TICK existed. None (the default)
+        # leaves every order-flow field at its "not enough data" default.
+        get_recent_ticks_fn: Callable[[str], list[TickRecord]] | None = None,
     ):
         self.mis_config = mis_config or MISConfig.load()
         self.config = config or WatcherConfig()
         self._reward_risk_ratio_fn = reward_risk_ratio_fn
         self._stop_loss_pct_fn = stop_loss_pct_fn
+        self._get_recent_ticks_fn = get_recent_ticks_fn
         self._history: dict[str, list[MarketSnapshot]] = defaultdict(list)
 
     def _push_history(
@@ -122,6 +135,7 @@ class CandidateWatcher:
         # breakout could ever trigger. `update_resistance` (called by the
         # caller *after* the trigger engine has looked at this bar) is what
         # rolls the current bar's high into resistance for the *next* bar.
+        ticks = self._get_recent_ticks_fn(candidate.symbol) if self._get_recent_ticks_fn is not None else None
         metrics = compute_metrics(
             free_float,
             history,
@@ -129,6 +143,7 @@ class CandidateWatcher:
             typical_volume_same_time=typical_same_time,
             typical_volume_1m=typical_1m,
             typical_volume_5m=typical_5m,
+            ticks=ticks,
         )
         candidate.latest_metrics = metrics
         target_pct = None

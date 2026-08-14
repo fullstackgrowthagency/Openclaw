@@ -138,6 +138,7 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from collections import deque
 from dataclasses import replace as _dataclass_replace
 from datetime import datetime, time, timedelta, timezone
 from typing import Callable, Optional
@@ -151,10 +152,10 @@ from webull.data.data_streaming_client import DataStreamingClient
 from webull.trade.trade_client import TradeClient
 
 from ...config import Settings, TradingMode
-from ...enums import OrderSide, OrderStatus, OrderType, TimeInForce
+from ...enums import OrderSide, OrderStatus, OrderType, TimeInForce, TradeSide
 from ...interfaces.broker import BrokerClient
 from ...market_hours import is_within_core_trading_hours
-from ...models import Fill, MarketSnapshot, Order, Position
+from ...models import Fill, MarketSnapshot, Order, Position, TickRecord
 from .retry import CallPriority, call_with_retry, webull_limiter
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,53 @@ _SNAPSHOT_BATCH_SIZE = 100
 # market_data.get_snapshot) whose limit currently happens to also be 100,
 # not guaranteed to stay that way.
 _STREAMING_SUBSCRIBE_BATCH_SIZE = 100
+
+# -- TICK streaming sub-type (2026-08-14, see docs/ARCHITECTURE.md) --------
+# A third streaming sub-type alongside SNAPSHOT/QUOTE: individual trade
+# prints (time/price/volume/side of ONE trade), not a periodic aggregated
+# state. Requested for the SAME symbol list as SNAPSHOT/QUOTE in the same
+# `.subscribe()` call (see _subscribe_symbols_in_batches) -- reasoned to
+# NOT count as extra "subscriptions" against the 100-symbol cumulative cap
+# discussed above, since it's the same symbol list, just one more data
+# type per symbol, not unconfirmed live either way.
+
+# How long a symbol's accumulated TICK prints stay in
+# self._streaming_tick_buffer before being pruned, and the hard cap on how
+# many prints are kept regardless of age -- a genuinely hot low-float
+# mover can print far more often than SNAPSHOT ever pushes, so this is a
+# real memory/CPU bound, not just tidiness. 90s is enough to comfortably
+# cover metrics/rolling.py's 1-minute order-flow window with margin;
+# 2000 prints is a hard ceiling against a pathological print storm on a
+# single symbol, unrelated to the time bound.
+_TICK_BUFFER_MAX_AGE_SECONDS = 90.0
+_TICK_BUFFER_MAX_COUNT = 2000
+
+# UNCONFIRMED (2026-08-14): Tick.side is a raw STRING on the wire (like
+# every other numeric-looking field in this protobuf schema -- see
+# TickResult.side's own source, which passes it through with no int/enum
+# cast, unlike Snapshot's Decimal-cast numeric fields) and its real values
+# have never been observed against a live sandbox message. Every entry
+# below is an educated guess at Webull's likely encoding, not a confirmed
+# mapping -- run scripts/verify_tick_stream.py against a real symbol
+# during market hours and compare printed `side` values to simultaneous
+# QUOTE bid/ask movement (a print at/near the ask is typically buyer-
+# initiated, at/near the bid seller-initiated) to confirm or correct this,
+# then update the map. Deliberately fails safe in the meantime: any value
+# not in this map -- including every real value, if every guess below is
+# wrong -- falls through to TradeSide.UNKNOWN, and
+# metrics.calculations.order_flow_imbalance is only ever computed from
+# BUY/SELL-classified volume (see metrics/rolling.py's _order_flow_since).
+# So an entirely-wrong map just means order flow reads as "not enough
+# classified data yet" (None) everywhere, never a confidently WRONG signal
+# -- see MomentumMetrics.order_flow_imbalance_1m's docstring.
+_TICK_SIDE_MAP: dict[str, TradeSide] = {
+    "1": TradeSide.BUY,
+    "2": TradeSide.SELL,
+    "B": TradeSide.BUY,
+    "S": TradeSide.SELL,
+    "BUY": TradeSide.BUY,
+    "SELL": TradeSide.SELL,
+}
 
 # Confirmed live 2026-08-11 (scripts/verify_streaming.py) -- the SDK's own
 # bundled endpoints.json only knows the PRODUCTION quotes-api host
@@ -379,7 +427,16 @@ class WebullBrokerClient(BrokerClient):
         # snapshot must never reach a caller doing spread math.
         self._streaming_snapshot_cache: dict[str, MarketSnapshot] = {}
         self._streaming_quote_cache: dict[str, tuple[float, float, float, float]] = {}
-        # Guards all four of the streaming dicts/sets above -- they're
+        # Per-symbol bounded rolling buffer of individual trade prints from
+        # the TICK streaming sub-type -- see get_recent_ticks and
+        # _tick_from_streamed_result. Unlike the snapshot/quote caches
+        # above, a tick is never merged into anything or handed to
+        # on_update -- callers (CandidateWatcher, via
+        # TradingLoop._get_recent_ticks-style plumbing) pull a copy on
+        # demand instead of being pushed one per message, since order-flow
+        # metrics need the whole recent window, not just the latest print.
+        self._streaming_tick_buffer: dict[str, deque[TickRecord]] = {}
+        # Guards all five of the streaming dicts/sets above -- they're
         # written from whatever thread calls subscribe_quotes (TradingLoop's
         # main thread in practice) and read/written from the MQTT client's
         # own background network-loop thread inside _on_connect_success/
@@ -415,6 +472,7 @@ class WebullBrokerClient(BrokerClient):
                 self._streaming_subscribed_symbols = set()
                 self._streaming_snapshot_cache = {}
                 self._streaming_quote_cache = {}
+                self._streaming_tick_buffer = {}
         self._api_client = None
         self._trade_client = None
         self._data_client = None
@@ -933,6 +991,53 @@ class WebullBrokerClient(BrokerClient):
         bid_size = float(bids[0].size) if bids and bids[0].size is not None else 0.0
         return result.basic.symbol, bid, ask, bid_size, ask_size
 
+    def _tick_from_streamed_result(self, result) -> TickRecord:
+        """Maps a live-streamed TickResult
+        (webull.data.quotes.subscribe.tick_result.TickResult) to this
+        project's TickRecord -- one individual trade print, NOT a periodic
+        aggregated state like SNAPSHOT (see TickRecord's docstring).
+
+        Uses `result.basic.timestamp` for the print's time, the same
+        already-int-cast field every other streamed mapping in this module
+        keys off (see _snapshot_from_streamed_result/_quote_top_of_book) --
+        NOT the separate `result.time` string field TickResult also
+        exposes, whose exact relationship to `.basic.timestamp` (trade
+        time vs. message-push time?) is unconfirmed and, unlike
+        `.basic.timestamp`, would need its own casting/parsing to use at
+        all. Consistent with this file's existing convention rather than
+        introducing a second, less-trusted timestamp source.
+
+        `side` goes through _TICK_SIDE_MAP -- see that constant's docstring
+        for why it's an unconfirmed guess and how an entirely wrong map
+        still fails safe (TradeSide.UNKNOWN) rather than confidently
+        wrong."""
+        basic = result.basic
+        timestamp = _epoch_ms_to_dt(basic.timestamp)
+        price = float(result.price) if result.price is not None else 0.0
+        volume = float(result.volume) if result.volume is not None else 0.0
+        side = _TICK_SIDE_MAP.get(str(result.side), TradeSide.UNKNOWN) if result.side is not None else TradeSide.UNKNOWN
+        return TickRecord(symbol=basic.symbol, timestamp=timestamp, price=price, volume=volume, side=side)
+
+    def get_recent_ticks(self, symbol: str, max_age_seconds: Optional[float] = None) -> list[TickRecord]:
+        """Best-effort, optional capability -- getattr-gated by callers,
+        same pattern as get_snapshots/list_open_orders/place_oco_bracket
+        elsewhere in this codebase. Returns a snapshot COPY of the recent
+        trade-tick buffer accumulated for `symbol` via the TICK streaming
+        sub-type (see subscribe_quotes' docstring), already pruned to
+        _TICK_BUFFER_MAX_AGE_SECONDS/_TICK_BUFFER_MAX_COUNT. `max_age_seconds`,
+        if given, narrows further to just that trailing window (e.g. the
+        1-minute window metrics/rolling.py's order-flow calculation
+        actually wants) without mutating the underlying buffer. Empty list
+        for a symbol with no TICK subscription yet or no trades seen since
+        subscribing -- never raises."""
+        with self._streaming_lock:
+            buffer = self._streaming_tick_buffer.get(symbol)
+            ticks = list(buffer) if buffer else []
+        if max_age_seconds is None:
+            return ticks
+        cutoff = datetime.utcnow() - timedelta(seconds=max_age_seconds)
+        return [t for t in ticks if t.timestamp >= cutoff]
+
     def _merge_streamed_snapshot(self, symbol: str) -> Optional[MarketSnapshot]:
         """Combines the latest cached SNAPSHOT-derived MarketSnapshot
         (price/OHLC/volume) with the latest cached QUOTE-derived top-of-
@@ -971,12 +1076,17 @@ class WebullBrokerClient(BrokerClient):
         same call -- callers that need to know about a failure at all
         (subscribe_quotes' own already_connected branch) still see it via
         this re-raising the LAST exception encountered, if any, after
-        every chunk has been tried."""
+        every chunk has been tried.
+
+        TICK included alongside QUOTE/SNAPSHOT since 2026-08-14 -- see
+        that sub-type's own module-level comment block for what it adds
+        (individual trade prints for order-flow analysis) and the caveat
+        on its `side` field's still-unconfirmed encoding."""
         last_exception: Optional[Exception] = None
         for start in range(0, len(symbols), _STREAMING_SUBSCRIBE_BATCH_SIZE):
             chunk = symbols[start:start + _STREAMING_SUBSCRIBE_BATCH_SIZE]
             try:
-                streaming_client.subscribe(chunk, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
+                streaming_client.subscribe(chunk, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT", "TICK"])
             except Exception as exc:
                 logger.warning("Streaming subscribe failed for a batch of %d symbol(s).", len(chunk), exc_info=True)
                 last_exception = exc
@@ -1176,6 +1286,26 @@ class WebullBrokerClient(BrokerClient):
                     return
                 with self._streaming_lock:
                     self._streaming_quote_cache[symbol] = (bid, ask, bid_size, ask_size)
+            elif topic == "tick":
+                # Ticks are accumulated into a rolling buffer for callers
+                # to pull on demand (get_recent_ticks) -- never merged into
+                # a MarketSnapshot or handed to on_update, unlike
+                # snapshot/quote above (see TickRecord's docstring for why
+                # this is a fundamentally different shape of data).
+                try:
+                    tick = self._tick_from_streamed_result(payload)
+                except Exception:
+                    logger.exception("Failed to map a streamed tick payload: %r", payload)
+                    return
+                with self._streaming_lock:
+                    buffer = self._streaming_tick_buffer.setdefault(tick.symbol, deque())
+                    buffer.append(tick)
+                    cutoff = datetime.utcnow() - timedelta(seconds=_TICK_BUFFER_MAX_AGE_SECONDS)
+                    while buffer and buffer[0].timestamp < cutoff:
+                        buffer.popleft()
+                    while len(buffer) > _TICK_BUFFER_MAX_COUNT:
+                        buffer.popleft()
+                return
             else:
                 return
 
@@ -1238,7 +1368,7 @@ class WebullBrokerClient(BrokerClient):
             for start in range(0, len(to_release), _STREAMING_SUBSCRIBE_BATCH_SIZE):
                 chunk = to_release[start:start + _STREAMING_SUBSCRIBE_BATCH_SIZE]
                 try:
-                    client_.unsubscribe(chunk, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
+                    client_.unsubscribe(chunk, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT", "TICK"])
                 except Exception:
                     logger.warning("Streaming unsubscribe failed for a batch of %d symbol(s).", len(chunk), exc_info=True)
         with self._streaming_lock:
@@ -1246,6 +1376,7 @@ class WebullBrokerClient(BrokerClient):
                 self._streaming_subscribed_symbols.discard(s)
                 self._streaming_snapshot_cache.pop(s, None)
                 self._streaming_quote_cache.pop(s, None)
+                self._streaming_tick_buffer.pop(s, None)
 
     # -- orders --------------------------------------------------------------
 

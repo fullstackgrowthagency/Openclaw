@@ -261,3 +261,46 @@ def test_update_relative_volume_defaults_to_neutral_without_baseline():
     watcher.update(candidate, snapshot)
 
     assert candidate.latest_metrics.relative_volume == 1.0
+
+
+# -- TICK-derived order flow wiring (2026-08-14) ----------------------------
+
+def test_update_without_get_recent_ticks_fn_leaves_order_flow_unset():
+    # No closure at all (the pre-TICK default) -- must behave exactly as
+    # before TICK existed, not raise.
+    watcher = CandidateWatcher()
+    candidate = _candidate()
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=0.1, cumulative_volume=1_000.0)
+
+    watcher.update(candidate, snapshot)
+
+    assert candidate.latest_metrics.order_flow_imbalance_1m is None
+    assert candidate.latest_metrics.buy_volume_1m == 0.0
+    assert candidate.latest_metrics.sell_volume_1m == 0.0
+
+
+def test_update_threads_get_recent_ticks_fn_into_computed_metrics():
+    from webull_bot.enums import TradeSide
+    from webull_bot.models import TickRecord
+
+    now = datetime.utcnow()
+    ticks = [
+        TickRecord(symbol="TEST", timestamp=now, price=10.0, volume=80.0, side=TradeSide.BUY),
+        TickRecord(symbol="TEST", timestamp=now, price=10.0, volume=20.0, side=TradeSide.SELL),
+    ]
+    calls = []
+
+    def _get_recent_ticks_fn(symbol):
+        calls.append(symbol)
+        return ticks
+
+    watcher = CandidateWatcher(get_recent_ticks_fn=_get_recent_ticks_fn)
+    candidate = _candidate()
+    snapshot = _snapshot_with_conditions(price=10.0, spread_pct=0.1, cumulative_volume=1_000.0)
+
+    watcher.update(candidate, snapshot)
+
+    assert calls == ["TEST"]
+    assert candidate.latest_metrics.buy_volume_1m == 80.0
+    assert candidate.latest_metrics.sell_volume_1m == 20.0
+    assert candidate.latest_metrics.order_flow_imbalance_1m == 0.6  # (80-20)/(80+20)

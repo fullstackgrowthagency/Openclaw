@@ -474,6 +474,66 @@ def test_poll_confirmation_fails_and_reverts_to_armed_on_a_price_reversal():
     assert loop.risk_engine.events[-1].event_type == RiskEventType.CONFIRMATION_FAILED.value
 
 
+def test_poll_confirmation_fails_on_sell_side_order_flow_with_enough_samples():
+    from webull_bot.enums import TradeSide
+    from webull_bot.models import TickRecord
+    from webull_bot.state_machine import transition
+
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.watcher.config.armed_score_threshold = -1.0  # isolate from cold-start MIS
+    transition(candidate, CandidateState.CONFIRMING)
+
+    later = _IN_HOURS_NOW + timedelta(seconds=2)
+    # 15 classified prints, net heavily sell-side (imbalance well past the
+    # -0.4 default threshold) -- price itself hasn't reversed, isolating
+    # this from test_poll_confirmation_fails_and_reverts_to_armed_on_a_price_reversal.
+    ticks = (
+        [TickRecord(symbol="TEST", timestamp=later, price=5.20, volume=10.0, side=TradeSide.SELL) for _ in range(12)]
+        + [TickRecord(symbol="TEST", timestamp=later, price=5.20, volume=10.0, side=TradeSide.BUY) for _ in range(3)]
+    )
+    loop.watcher._get_recent_ticks_fn = lambda symbol: ticks
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._start_confirmation(candidate, _confirming_signal(reference_price=5.20), snapshot, _IN_HOURS_NOW)
+
+    holding_snapshot = _snapshot(later, 5.20, 5.20, 610_000, 5.19, 5.21, 5.15)  # price unchanged, not reversed
+    loop._poll_confirmation(candidate, holding_snapshot, later)
+
+    assert candidate.state == CandidateState.ARMED
+    assert "TEST" not in loop._pending_confirmations
+    assert "sell-side order flow" in candidate.entry_block_reason
+    from webull_bot.enums import RiskEventType
+    assert loop.risk_engine.events[-1].event_type == RiskEventType.CONFIRMATION_FAILED.value
+
+
+def test_poll_confirmation_ignores_sell_side_order_flow_below_the_sample_floor():
+    from webull_bot.enums import TradeSide
+    from webull_bot.models import TickRecord
+    from webull_bot.state_machine import transition
+
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.watcher.config.armed_score_threshold = -1.0
+    transition(candidate, CandidateState.CONFIRMING)
+
+    later = _IN_HOURS_NOW + timedelta(seconds=2)
+    # Only 3 classified prints -- below order_flow_min_sample_count_for_gate's
+    # default of 10, even though the imbalance itself is extreme (all sell).
+    # The gate must not fire on too thin a sample.
+    ticks = [TickRecord(symbol="TEST", timestamp=later, price=5.20, volume=10.0, side=TradeSide.SELL) for _ in range(3)]
+    loop.watcher._get_recent_ticks_fn = lambda symbol: ticks
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._start_confirmation(candidate, _confirming_signal(reference_price=5.20), snapshot, _IN_HOURS_NOW)
+
+    holding_snapshot = _snapshot(later, 5.20, 5.20, 610_000, 5.19, 5.21, 5.15)
+    loop._poll_confirmation(candidate, holding_snapshot, later)
+
+    assert candidate.state == CandidateState.CONFIRMING  # not failed -- still waiting out the window
+    assert "TEST" in loop._pending_confirmations
+
+
 def test_poll_confirmation_succeeds_after_the_window_and_queues_for_ranking():
     broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)

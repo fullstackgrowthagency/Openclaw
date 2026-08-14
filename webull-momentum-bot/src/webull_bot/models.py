@@ -20,6 +20,7 @@ from .enums import (
     SignalAction,
     TimeInForce,
     TradeBlockReason,
+    TradeSide,
 )
 from .metrics.volume_baseline import VolumeBaseline
 
@@ -53,6 +54,24 @@ class MarketSnapshot:
     open_price: float
     premarket_high: Optional[float] = None
     prev_close: Optional[float] = None
+
+
+@dataclass
+class TickRecord:
+    """A single individual trade print from Webull's TICK streaming
+    sub-type (see brokers/webull/client.py's subscribe_quotes/
+    _tick_from_streamed_result) -- fundamentally different from
+    MarketSnapshot, which is a periodic AGGREGATED state (cumulative
+    volume, OHLC), not one trade. `volume` here is THIS trade's own size,
+    not a running total. `side` is the trade's aggressor classification,
+    TradeSide.UNKNOWN by default until Webull's real wire encoding for it
+    is confirmed live -- see enums.TradeSide's docstring and
+    brokers/webull/client.py's _TICK_SIDE_MAP."""
+    symbol: str
+    timestamp: datetime
+    price: float
+    volume: float
+    side: TradeSide
 
 
 @dataclass
@@ -123,6 +142,34 @@ class MomentumMetrics:
     price_range_pct_15m: float = 0.0
     trade_velocity: Optional[float] = None  # trades/sec, once tick data is wired up
 
+    # -- TICK-derived order flow (2026-08-14, see metrics/rolling.py's
+    # compute_metrics `ticks` parameter and brokers/webull/client.py's
+    # get_recent_ticks) -- the one signal SNAPSHOT/QUOTE structurally can't
+    # give us: which side was aggressive, not just that volume happened.
+    # buy_volume_1m/sell_volume_1m are 0.0 (not None) even with zero TICK
+    # data -- there's genuinely zero classified volume in that case, a
+    # real (if uninteresting) number, unlike order_flow_imbalance_1m below.
+    buy_volume_1m: float = 0.0
+    sell_volume_1m: float = 0.0
+    # (buy_volume_1m - sell_volume_1m) / (buy_volume_1m + sell_volume_1m),
+    # -1.0 (all seller-initiated) to +1.0 (all buyer-initiated). None
+    # whenever buy_volume_1m + sell_volume_1m is 0 -- no TICK subscription
+    # yet, no trades in the window, or every entry in
+    # brokers/webull/client.py's _TICK_SIDE_MAP guess turns out wrong for
+    # this account's real feed. Deliberately None, not 0.0/"confirmed
+    # neutral," so scoring/momentum_ignition_score.py's compute_score can
+    # exclude it from the weighted average exactly like it already does
+    # for room_to_target_score, rather than scoring unmeasured flow as
+    # balanced.
+    order_flow_imbalance_1m: Optional[float] = None
+    # How many classified (BUY or SELL, never UNKNOWN) prints fed the
+    # imbalance above -- both scoring/momentum_ignition_score.py's
+    # order_flow_score and TradingLoopConfig.order_flow_min_sample_count_for_gate
+    # require this to clear a minimum before trusting the ratio at all, so
+    # a symbol with e.g. one lone classified print in the window doesn't
+    # score/gate on a statistically meaningless reading.
+    order_flow_sample_count_1m: int = 0
+
 
 @dataclass
 class MomentumScoreComponents:
@@ -159,6 +206,18 @@ class MomentumScoreComponents:
     # rather than scoring it as a 0, so an unscoreable component never
     # silently drags the whole MIS down.
     room_to_target_score: Optional[float] = None
+    # v2.3 addition (2026-08-14, TICK-derived order flow -- see
+    # docs/ARCHITECTURE.md): buy-vs-sell aggressor volume from the TICK
+    # streaming sub-type, the one signal SNAPSHOT/QUOTE structurally can't
+    # provide (they show volume happened, never which side was
+    # aggressive). Same None-when-unavailable contract as
+    # room_to_target_score -- None until MomentumMetrics.order_flow_sample_count_1m
+    # clears weights.yaml's min_order_flow_sample_count threshold, and
+    # currently effectively inert in production until Webull's real TICK
+    # `side` string encoding is confirmed live (brokers/webull/client.py's
+    # _TICK_SIDE_MAP) -- deliberately fails toward "no signal" (None)
+    # rather than a confidently wrong one if that map's guesses are wrong.
+    order_flow_score: Optional[float] = None
 
 
 @dataclass
