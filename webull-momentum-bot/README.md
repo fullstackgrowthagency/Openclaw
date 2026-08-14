@@ -970,6 +970,32 @@ What's implemented and tested:
   `tests/test_momentum_score.py`, `tests/test_webull_broker_client.py`,
   `tests/test_candidate_watcher.py`, `tests/test_trading_loop.py` for the
   new coverage.
+- **Real session VWAP -- the ONFO incident, 2026-08-14, at the user's
+  explicit request after the bot tried to enter a stock well after it had
+  already spiked and faded hard back down.** Root cause:
+  `WebullBrokerClient`'s live snapshot paths (REST and streaming both)
+  hardcode `vwap = last_price` -- Webull's snapshot/streaming APIs simply
+  don't return real VWAP -- which made `distance_from_vwap_pct`
+  deterministically exactly `0.0` on every live tick. That silently broke
+  FOUR separate mechanisms at once: `trend_quality_score` (a useless MIS
+  constant), `VWAPReclaimStrategy` and `IgnitionPullbackStrategy` (both
+  structurally unable to ever trigger live), and
+  `PositionManager`'s `exit_on_vwap_failure` safety backstop (structurally
+  unable to ever fire). A stock trading well below its real session
+  VWAP -- exactly the incident stock's situation -- got zero penalty from
+  any of them. Fix: new `metrics/session_vwap.py` computes a real
+  session-VWAP starting point from the same discovery-time bars
+  `BroadScanner` already fetches (`Candidate.vwap_anchor_pv`/
+  `vwap_anchor_volume`, no extra network call); new
+  `TradingLoop._update_session_vwap` continues accumulating it live (the
+  same boundary-price approximation `dollar_volume_from_avg_price` already
+  uses elsewhere) and overwrites `snapshot.vwap` in place for EVERY
+  tracked state, one call site reaching both pre-entry scoring and
+  open-position exit management. See `docs/ARCHITECTURE.md`'s "Real
+  session VWAP" section and `tests/test_session_vwap.py`,
+  `tests/test_broad_scanner.py`, `tests/test_trading_loop.py` (including a
+  regression test proving the previously-dead VWAP-failure exit now
+  actually fires through the real pipeline) for the new coverage.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

@@ -3159,6 +3159,115 @@ See `tests/test_metrics.py`, `tests/test_rolling.py`,
 `test_poll_confirmation_ignores_sell_side_order_flow_below_the_sample_floor`)
 for coverage.
 
+## Real session VWAP (2026-08-14) -- the ONFO incident
+
+Real incident, user report with chart evidence: the bot was trying to
+enter ONFO on 2026-08-17 at ~$2.55-2.58, well after it had already spiked
+from ~$2.18 to a $6.08 high the prior session and faded hard back down --
+a textbook "already made its run" fade, not a fresh breakout. The
+resistance-runway/target-clearance gate and TICK order-flow gate (both
+above) didn't catch it because neither measures this specific pattern
+(trading well below where the day's real volume-weighted average price
+sits) -- but something in this codebase was SUPPOSED to: VWAP.
+
+Investigation found the real root cause: `WebullBrokerClient`'s live
+snapshot paths -- BOTH REST (`_snapshot_from_dict`) and streaming
+(`_snapshot_from_streamed_result`) -- hardcode `vwap = last_price`,
+because Webull's snapshot/streaming APIs simply don't return VWAP at all.
+That makes `distance_from_vwap_pct` (`metrics/rolling.py`'s
+`compute_metrics`) deterministically **exactly 0.0** on every single live
+tick, which silently broke FOUR separate mechanisms that all depend on
+it, all at once:
+
+1. `scoring/momentum_ignition_score.py`'s `trend_quality_score` component
+   -- `_scale(0.0, -2.0, 5.0)` is a CONSTANT (~28.57) for every candidate,
+   every tick, contributing zero real discriminative signal to the score
+   that's supposed to separate a healthy uptrend from a fading one.
+2. `strategy/vwap_reclaim.py` -- its guard condition
+   (`distance_from_vwap_pct <= below_vwap_threshold_pct`, -0.3 default)
+   can never be true when the value is pinned at exactly 0.0. Structurally
+   unable to ever trigger in live trading.
+3. `strategy/ignition_pullback.py` -- `_is_igniting`'s
+   `distance_from_vwap_pct > 0` check is likewise never true at exactly
+   0.0. Also structurally unable to ever reach its igniting phase live.
+4. `position/position_manager.py`'s `exit_on_vwap_failure` safety backstop
+   -- `last_price < vwap * (1 - buffer)` can never be true when
+   `vwap == last_price`, always. A real, safety-relevant protective exit
+   was silently dead the entire time this codebase has existed.
+
+A stock trading well below its real session VWAP -- exactly ONFO's
+situation -- got zero penalty from any of these, while its still-elevated
+RVOL/volume-acceleration numbers (driven by the earlier spike, cumulative
+and direction-blind) kept it looking attractive to every OTHER component.
+
+### The fix: a real, running session VWAP
+
+Built in two pieces, mirroring the "anchor from discovery-time bars, then
+continue live" pattern `seed_history_from_bars`'s `cumulative_volume`
+anchoring already established in this codebase:
+
+1. **`metrics/session_vwap.py`** (new): `compute_session_vwap_anchor(bars, now)`
+   sums `close * volume` and `volume` across today's regular-session bars
+   (9:30am ET onward, via the same `zoneinfo`-based session-date
+   resolution `metrics/opening_range.py` already uses) up to `now`. Built
+   on the SAME raw bars `BroadScanner` already fetches for
+   resistance/opening-range/RVOL-baseline analysis -- no extra network
+   call. Wired into `BroadScanner.check_symbol_verbose` via a new
+   `_compute_vwap_anchor` helper, populating two new `Candidate` fields:
+   `vwap_anchor_pv`/`vwap_anchor_volume`. Deliberately regular-session-only
+   (unlike static resistance/volume baseline, which DO include extended
+   hours) -- VWAP is a specific, well-known intraday reference every
+   trading platform computes the same way; diverging from that convention
+   would make this project's "VWAP" not match what a human looking at a
+   chart alongside the bot would see (exactly the two chart screenshots
+   this incident report included).
+
+2. **`TradingLoop._update_session_vwap`** (new): maintains a running
+   `(cumulative_pv, last_seen_cumulative_volume, last_seen_price)` tuple
+   per symbol in `self._vwap_state`, seeded ONCE per symbol from
+   `candidate.vwap_anchor_pv`/`vwap_anchor_volume` (or cold-started at
+   `(0, 0)` if no anchor exists -- e.g. a position adopted via
+   `reconcile_positions_from_broker` rather than discovered through the
+   normal `BroadScanner` pipeline; self-heals as real ticks accumulate,
+   same tolerance `seed_history_from_bars` already applies elsewhere).
+   Every tick after the first, the volume traded since the last tick
+   (`snapshot.cumulative_volume` -- Webull's own real, trustworthy running
+   total; unlike `vwap`, this field is NOT faked) is priced at the AVERAGE
+   of the previous and current tick's price -- the same boundary-price
+   approximation `metrics.calculations.dollar_volume_from_avg_price`
+   already relies on elsewhere, since a snapshot only reveals its own
+   price and the cumulative volume since the last tick, never the true
+   distribution of trades within that gap.
+
+   **Called from `_process_candidate_inner` for EVERY tracked state**, not
+   just pre-entry ones -- deliberately, so this ONE fix reaches BOTH
+   `CandidateWatcher.update()` (MIS scoring, `vwap_reclaim`/
+   `ignition_pullback`'s trigger checks) AND `_manage_position`'s
+   `PositionManager.check_exit` call (the VWAP-failure backstop) from a
+   single call site, since those are otherwise completely separate code
+   paths for pre-entry candidates vs. open positions that would otherwise
+   each need their own fix. Mutates `snapshot.vwap` in place BEFORE any
+   state-based branching, so `compute_metrics`'s existing `vwap=latest.vwap`
+   line picks up the real value with zero changes needed in
+   `metrics/rolling.py` itself.
+
+### What this does NOT change
+
+Backtesting was never affected -- `WebullBrokerClient._snapshots_from_bars`
+(the REST historical-bars path backtests/the seed-history feature run on)
+already computed a real cumulative VWAP from bar data; this bug was
+specific to the two LIVE snapshot paths. `MomentumMetrics.vwap` itself
+required no code change -- it already echoes whatever `latest.vwap` says,
+so overwriting `snapshot.vwap` upstream was sufficient.
+
+See `tests/test_session_vwap.py`, `tests/test_broad_scanner.py`
+(`test_scan_populates_vwap_anchor_from_raw_bars` and siblings), and
+`tests/test_trading_loop.py`'s "real session VWAP" section -- including
+`test_process_candidate_lets_the_vwap_failure_exit_fire_through_the_real_pipeline`,
+which proves the previously-dead safety backstop now actually fires,
+through the real `_process_candidate` pipeline, not just a hand-fed
+`snapshot.vwap` in an isolated unit test.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right

@@ -3843,6 +3843,129 @@ def test_manage_position_finalizes_via_broker_bracket_without_submitting_its_own
     assert broker._orders == {}
 
 
+# -- real session VWAP (2026-08-14, see docs/ARCHITECTURE.md) --------------
+# Real incident: WebullBrokerClient's live snapshot paths (REST and
+# streaming both) hardcode vwap=last_price since Webull's own APIs don't
+# return VWAP at all, which silently made distance_from_vwap_pct exactly
+# 0.0 on every live tick -- breaking trend_quality_score (a no-signal
+# constant), vwap_reclaim/ignition_pullback (structurally unable to ever
+# trigger live), and exit_on_vwap_failure (structurally unable to ever
+# fire). _update_session_vwap is the fix: a real running VWAP, seeded from
+# BroadScanner's discovery-time bars anchor and continued live via the
+# same boundary-price approximation dollar_volume_from_avg_price uses.
+
+def test_update_session_vwap_seeds_from_the_candidate_anchor_on_the_first_tick():
+    broker = _FakeBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+    candidate.vwap_anchor_pv = 300.0
+    candidate.vwap_anchor_volume = 100.0  # unused on the first tick -- see below
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 200.0, 5.19, 5.21, 999.0)
+    loop._update_session_vwap(candidate, snapshot)
+
+    # Denominator is THIS tick's real cumulative_volume (200), not the
+    # anchor's own volume total (100) -- the anchor only seeds the
+    # numerator; see _update_session_vwap's docstring.
+    assert snapshot.vwap == pytest.approx(300.0 / 200.0)
+
+
+def test_update_session_vwap_starts_cold_without_an_anchor():
+    broker = _FakeBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+    candidate.vwap_anchor_pv = None
+    candidate.vwap_anchor_volume = None
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.00, 5.00, 100_000, 4.99, 5.01, 999.0)
+    loop._update_session_vwap(candidate, snapshot)
+
+    assert snapshot.vwap == 0.0  # no anchor, nothing yet to price the first 100k shares against
+
+
+def test_update_session_vwap_accumulates_live_via_boundary_price_approximation():
+    broker = _FakeBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+    candidate.vwap_anchor_pv = None
+    candidate.vwap_anchor_volume = None
+
+    first = _snapshot(_IN_HOURS_NOW, 5.00, 5.00, 100_000, 4.99, 5.01, 999.0)
+    loop._update_session_vwap(candidate, first)
+
+    later = _IN_HOURS_NOW + timedelta(seconds=5)
+    second = _snapshot(later, 6.00, 6.00, 150_000, 5.99, 6.01, 999.0)
+    loop._update_session_vwap(candidate, second)
+
+    # 50_000 new shares (150_000 - 100_000) priced at avg(5.00, 6.00)=5.50 --
+    # the boundary-price approximation, since only the tick's own price is
+    # known, not the true distribution of trades within the gap.
+    assert second.vwap == pytest.approx((0.0 + 5.50 * 50_000) / 150_000)
+
+
+def test_update_session_vwap_is_a_noop_when_cumulative_volume_is_zero():
+    broker = _FakeBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.00, 5.00, 0.0, 4.99, 5.01, 5.00)
+    loop._update_session_vwap(candidate, snapshot)
+    assert snapshot.vwap == 5.00  # untouched -- nothing to divide by yet
+
+
+def test_process_candidate_replaces_the_fake_vwap_with_a_real_one():
+    # _FakeBroker.get_snapshot always returns last_price=5.20,
+    # cumulative_volume=200_000, vwap=5.20 (the fake last_price fallback,
+    # matching real WebullBrokerClient behavior) -- before this fix,
+    # distance_from_vwap_pct would be exactly 0.0 no matter what. With a
+    # real anchor seeded well above the current price, it must not be.
+    broker = _FakeBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+    candidate.vwap_anchor_pv = 3_000_000.0  # real vwap ~= 15.00 given this tick's 200_000 cumulative_volume
+    candidate.vwap_anchor_volume = 250_000.0
+
+    loop._process_candidate(candidate, _IN_HOURS_NOW)
+
+    assert candidate.latest_metrics is not None
+    assert candidate.latest_metrics.vwap == pytest.approx(15.0)
+    assert candidate.latest_metrics.distance_from_vwap_pct < -30.0  # meaningfully below vwap, not 0.0
+
+
+def test_process_candidate_lets_the_vwap_failure_exit_fire_through_the_real_pipeline():
+    # Regression proof for the actual safety mechanism this fix restores:
+    # exit_on_vwap_failure could never fire before this fix (last_price <
+    # vwap*(1-buffer) can never be true when vwap == last_price, always).
+    from webull_bot.state_machine import transition
+
+    broker = _RestingBroker(fills_after_polls=1)
+    loop, candidate = _armed_candidate_setup(broker)
+    loop.position_manager = PositionManager(PositionManagementConfig(
+        trailing_stop_pct=None, exit_on_vwap_failure=True, vwap_failure_buffer_pct=0.5,
+        time_limit_minutes=None, breakeven_trigger_pct=None,
+    ))
+    transition(candidate, CandidateState.CONFIRMING)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=3.00, target_price=None, trailing_stop_pct=None,  # stop far away, won't fire first
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    loop._attach_broker_bracket(candidate, position, _IN_HOURS_NOW)
+    stop_id = position.broker_stop_order_id
+    assert stop_id is not None
+
+    # _FakeBroker.get_snapshot fixes last_price=5.20/cumulative_volume=200_000
+    # -- seed a real vwap anchor well above that so this fixed-price tick
+    # reads as meaningfully (well past the 0.5% buffer) below vwap.
+    candidate.vwap_anchor_pv = 3_000_000.0  # real vwap ~= 15.00
+    candidate.vwap_anchor_volume = 250_000.0
+
+    loop._process_candidate(candidate, _IN_HOURS_NOW)
+
+    assert stop_id in broker._cancelled
+    assert position.broker_stop_order_id is None
+    assert position.broker_target_order_id is None
+
+
 def test_manage_position_cancels_resting_orders_before_a_vwap_failure_exit():
     broker = _RestingBroker(fills_after_polls=1)
     loop, candidate = _armed_candidate_setup(broker)

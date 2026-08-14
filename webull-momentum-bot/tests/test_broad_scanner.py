@@ -549,6 +549,46 @@ def test_scan_leaves_opening_range_high_none_on_raw_bars_failure():
     assert candidates[0].opening_range_high is None
 
 
+# -- vwap_anchor_pv/vwap_anchor_volume (2026-08-14, see docs/ARCHITECTURE.md
+# and metrics/session_vwap.py -- the real-session-VWAP fix for the ONFO
+# incident) -- shares the same raw bars as static_resistance_levels/
+# opening_range_high above, no extra network call. ------------------------
+
+def test_scan_populates_vwap_anchor_from_raw_bars():
+    # 2026-08-03 is EDT (UTC-4) -- 9:30am ET == 13:30 UTC. Both bars fall
+    # inside today's regular session (after market open, at/before "now").
+    bars = [
+        _bar(5, 6, 1000, time="2026-08-03T13:32:00.000+0000", close=5.5),
+        _bar(6, 7, 500, time="2026-08-03T13:40:00.000+0000", close=6.5),
+    ]
+    broker = _RawBarsAwareBroker({"OPEN": bars}, prices={"OPEN": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider(), now_fn=lambda: datetime(2026, 8, 3, 15, 0, 0))
+
+    candidates = scanner.scan(["OPEN"])
+
+    assert candidates[0].vwap_anchor_pv == pytest.approx(5.5 * 1000 + 6.5 * 500)
+    assert candidates[0].vwap_anchor_volume == pytest.approx(1500.0)
+
+
+def test_scan_leaves_vwap_anchor_none_when_bars_predate_market_open():
+    bars = [_bar(5, 6, 1000)]  # _bar()'s default time (12:00 UTC) is before 13:30 UTC market open
+    broker = _RawBarsAwareBroker({"ANY": bars}, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider(), now_fn=lambda: datetime(2026, 8, 3, 15, 0, 0))
+
+    candidates = scanner.scan(["ANY"])
+
+    assert candidates[0].vwap_anchor_pv is None
+    assert candidates[0].vwap_anchor_volume is None
+
+
+def test_scan_leaves_vwap_anchor_none_without_get_raw_bars():
+    broker = _SlowFakeBroker(delay_seconds=0.0, prices={"ANY": 5.0})
+    scanner = BroadScanner(broker, _FakeFloatProvider())
+    candidates = scanner.scan(["ANY"])
+    assert candidates[0].vwap_anchor_pv is None
+    assert candidates[0].vwap_anchor_volume is None
+
+
 def test_scan_fetches_raw_bars_only_once_per_symbol():
     # static_resistance_levels and opening_range_high both derive from raw
     # bars -- get_raw_bars must be called once per symbol, not twice.

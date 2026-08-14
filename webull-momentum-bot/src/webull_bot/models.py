@@ -267,6 +267,22 @@ class Candidate:
     # isn't re-fetched on every single rescan cycle regardless of how
     # frequently those run.
     resistance_last_refreshed_at: Optional[datetime] = None
+    # Real session VWAP starting point (2026-08-14, see
+    # docs/ARCHITECTURE.md and metrics/session_vwap.py's module docstring
+    # for the ONFO incident this fixes) -- cumulative price*volume and
+    # cumulative volume across today's regular-session bars from market
+    # open through discovery, computed once at discovery from the same
+    # raw bars already fetched for static_resistance_levels above (no
+    # extra network call). TradingLoop._update_session_vwap seeds its own
+    # running per-symbol state from these once, on this candidate's first
+    # tick, then continues accumulating live from there -- see that
+    # method's docstring. None if bars didn't cover market open (e.g.
+    # discovered well after the open) or no get_raw_bars capability;
+    # _update_session_vwap starts cold (accumulates from 0) in that case
+    # rather than failing, same fail-soft contract as every other
+    # bars-derived enrichment field on this class.
+    vwap_anchor_pv: Optional[float] = None
+    vwap_anchor_volume: Optional[float] = None
     state_history: list[tuple[CandidateState, datetime]] = field(default_factory=list)
     notes: str = ""
 

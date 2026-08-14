@@ -655,10 +655,17 @@ class WebullBrokerClient(BrokerClient):
                 except (TypeError, ValueError):
                     pass
         # Webull's snapshot endpoint does not return VWAP directly (confirmed
-        # live -- the field is simply absent). Falling back to last_price
-        # keeps distance_from_vwap_pct at a neutral 0 rather than fabricating
-        # a biased number; replace once a real VWAP source is wired up
-        # (e.g. accumulating price*volume from get_history_bar ourselves).
+        # live -- the field is simply absent). last_price here is only ever
+        # a placeholder for the caller to overwrite -- see
+        # TradingLoop._update_session_vwap, which replaces this with a real
+        # running session VWAP (accumulated from BroadScanner's discovery-
+        # time bars anchor -- metrics/session_vwap.py -- plus live ticks)
+        # before it ever reaches scoring/strategy logic. Real incident
+        # (2026-08-14): leaving this last_price placeholder unreplaced made
+        # distance_from_vwap_pct exactly 0.0 on every live tick, silently
+        # breaking trend_quality_score, vwap_reclaim/ignition_pullback, and
+        # PositionManager's exit_on_vwap_failure backstop all at once -- see
+        # docs/ARCHITECTURE.md's "Real session VWAP" section.
         vwap = last_price
         return MarketSnapshot(
             symbol=raw.get("symbol", ""),
@@ -934,8 +941,9 @@ class WebullBrokerClient(BrokerClient):
         callers receive.
 
         `vwap` is not available from this feed either, matching the REST
-        endpoint's own gap (see `_snapshot_from_dict`'s docstring) --
-        falls back to `last_price`, the identical convention."""
+        endpoint's own gap (see `_snapshot_from_dict`'s docstring, including
+        the 2026-08-14 note on what replaces this placeholder downstream)
+        -- falls back to `last_price`, the identical convention."""
         basic = result.basic
         quote_timestamp = _epoch_ms_to_dt(basic.timestamp)
         last_price = float(result.price) if result.price is not None else 0.0

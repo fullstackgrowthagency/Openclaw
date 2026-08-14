@@ -77,6 +77,7 @@ from ..interfaces.broker import BrokerClient
 from ..interfaces.float_provider import FloatDataProvider
 from ..metrics.opening_range import compute_opening_range_high
 from ..metrics.rolling import MAX_HISTORY_MINUTES, seed_history_from_bars
+from ..metrics.session_vwap import compute_session_vwap_anchor
 from ..metrics.volume_baseline import VolumeBaseline, compute_volume_baseline
 from ..metrics.volume_profile import compute_volume_profile, filter_bars_by_lookback, high_volume_node_levels
 
@@ -258,6 +259,7 @@ class BroadScanner:
         candidate.resistance_last_refreshed_at = snapshot.timestamp
         candidate.volume_baseline = self._compute_volume_baseline(bars)
         candidate.seed_snapshots = self._compute_seed_snapshots(bars, snapshot)
+        candidate.vwap_anchor_pv, candidate.vwap_anchor_volume = self._compute_vwap_anchor(bars)
         transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason="passed broad scanner filters")
         return candidate, None
 
@@ -449,6 +451,30 @@ class BroadScanner:
         if not bars:
             return []
         return seed_history_from_bars(bars, current=current_snapshot, lookback_minutes=MAX_HISTORY_MINUTES)
+
+    def _compute_vwap_anchor(self, bars: Optional[list[dict]]) -> tuple[Optional[float], Optional[float]]:
+        """Real session-VWAP starting point (2026-08-14, see
+        docs/ARCHITECTURE.md and metrics/session_vwap.py's module
+        docstring for the ONFO incident this fixes) -- (cumulative_pv,
+        cumulative_volume) from the same bars as
+        _compute_static_resistance_levels/_compute_opening_range_high
+        above, no extra network call. TradingLoop._update_session_vwap
+        seeds its own running per-symbol state from this once, on this
+        candidate's first tick, then continues accumulating live.
+
+        Uses self.now_fn(), the SAME injected clock
+        _compute_opening_range_high already uses (not snapshot.timestamp
+        -- a real broker-reported value close to now in production, but
+        not the source of truth this class's tests inject determinism
+        through).
+
+        Returns (None, None) on missing bars or when no bars fall in
+        today's regular session yet, same fail-soft contract as the rest
+        of this enrichment step -- _update_session_vwap starts cold
+        (accumulates from 0) in that case rather than failing."""
+        if not bars:
+            return None, None
+        return compute_session_vwap_anchor(bars, now=self.now_fn())
 
     def scan(self, symbol_universe: list[str]) -> list[Candidate]:
         if not symbol_universe:

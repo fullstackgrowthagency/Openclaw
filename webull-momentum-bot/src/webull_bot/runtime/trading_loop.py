@@ -725,6 +725,14 @@ class TradingLoop:
         # -- simpler than adding cleanup for a value nothing reads once its
         # position is gone).
         self._last_known_snapshots: dict[str, MarketSnapshot] = {}
+        # symbol -> (cumulative_pv, last_seen_cumulative_volume, last_seen_price),
+        # this process's own running approximation of REAL session VWAP --
+        # see _update_session_vwap's docstring for the 2026-08-14 ONFO
+        # incident this fixes and the boundary-price approximation used to
+        # keep accumulating it tick to tick. Deliberately never cleared for
+        # a symbol that stops being tracked, same harmless/bounded-by-
+        # universe-size tradeoff as _last_known_snapshots just above.
+        self._vwap_state: dict[str, tuple[float, float, float]] = {}
         self._last_universe_scan: Optional[datetime] = None
         self._last_position_reconcile: Optional[datetime] = None
         self._last_account_summary_refresh: Optional[datetime] = None
@@ -1322,6 +1330,64 @@ class TradingLoop:
 
     # -- per-candidate processing ---------------------------------------------
 
+    def _update_session_vwap(self, candidate: Candidate, snapshot: MarketSnapshot) -> None:
+        """Overwrites `snapshot.vwap` IN PLACE with a real, running,
+        whole-regular-session VWAP -- see metrics/session_vwap.py's module
+        docstring for the full 2026-08-14 ONFO incident this fixes:
+        WebullBrokerClient's live snapshot paths (REST and streaming both)
+        hardcode `vwap = last_price` because Webull's own snapshot/
+        streaming APIs don't return VWAP at all, which silently made
+        `distance_from_vwap_pct` exactly 0.0 on every live tick --
+        breaking scoring/momentum_ignition_score.py's trend_quality_score
+        (a no-signal constant), strategy/vwap_reclaim.py and
+        strategy/ignition_pullback.py (structurally unable to ever trigger
+        live), and position/position_manager.py's exit_on_vwap_failure
+        safety backstop (structurally unable to ever fire), all at once.
+
+        Called from _process_candidate_inner for EVERY tracked
+        state -- not just pre-entry ones -- specifically so this reaches
+        BOTH CandidateWatcher.update() (MIS scoring, vwap_reclaim/
+        ignition_pullback's trigger checks) AND _manage_position's
+        PositionManager.check_exit call (the VWAP-failure backstop) from
+        one place, since those two are otherwise completely separate code
+        paths that never both see the same fix applied once.
+
+        Maintains a running (cumulative_pv, last_seen_cumulative_volume,
+        last_seen_price) tuple per symbol in self._vwap_state, seeded ONCE
+        per symbol from candidate.vwap_anchor_pv/vwap_anchor_volume
+        (BroadScanner's discovery-time bars-derived starting point -- see
+        metrics/session_vwap.py) or from scratch (0, 0) if no anchor
+        exists (e.g. a position TradingLoop adopted via
+        reconcile_positions_from_broker rather than discovering through
+        the normal BroadScanner pipeline -- same "start cold, self-heals
+        as real ticks accumulate" tolerance seed_history_from_bars already
+        applies elsewhere in this codebase).
+
+        Every tick AFTER the first for a symbol, the volume that traded
+        since the last tick (snapshot.cumulative_volume, Webull's own
+        real, trustworthy running total -- unlike vwap, this field is NOT
+        faked) is priced at the AVERAGE of the previous and current tick's
+        price, the same boundary-price approximation
+        metrics.calculations.dollar_volume_from_avg_price already relies
+        on elsewhere in this codebase: a snapshot only tells us this
+        tick's price and the cumulative volume since the last one, never
+        the true distribution of trades within that gap. A no-op (leaves
+        snapshot.vwap untouched, i.e. still last_price) only when
+        cumulative volume is 0 or unavailable -- nothing to divide by yet."""
+        symbol = candidate.symbol
+        state = self._vwap_state.get(symbol)
+        if state is None:
+            cumulative_pv = candidate.vwap_anchor_pv or 0.0
+        else:
+            cumulative_pv, last_volume, last_price = state
+            volume_delta = max(0.0, snapshot.cumulative_volume - last_volume)
+            if volume_delta > 0:
+                avg_price = (last_price + snapshot.last_price) / 2.0
+                cumulative_pv += avg_price * volume_delta
+        self._vwap_state[symbol] = (cumulative_pv, snapshot.cumulative_volume, snapshot.last_price)
+        if snapshot.cumulative_volume > 0:
+            snapshot.vwap = cumulative_pv / snapshot.cumulative_volume
+
     def _process_candidate(
         self, candidate: Candidate, now: datetime, prefetched_snapshot: Optional[MarketSnapshot] = None
     ) -> None:
@@ -1373,6 +1439,11 @@ class TradingLoop:
             except Exception:
                 logger.warning("get_snapshot failed for %s this cycle; skipping.", candidate.symbol, exc_info=True)
                 return
+
+        try:
+            self._update_session_vwap(candidate, snapshot)
+        except Exception:
+            logger.exception("_update_session_vwap failed for %s this cycle; snapshot.vwap left as-is.", candidate.symbol)
 
         if self.momentum_event_tracker is not None:
             try:
