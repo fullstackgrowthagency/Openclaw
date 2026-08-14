@@ -125,22 +125,56 @@ class RateLimiter:
     (lowest CallPriority value) one first -- ties broken by arrival order,
     so same-priority calls still queue fairly.
 
-    Implementation: a single lock/condition variable guards a min-heap of
-    waiting tickets `(priority, sequence_number)`. Each waiting thread
-    holds its own ticket on the heap and, each time it wakes (on a timeout
-    equal to the remaining interval, or a notify from whichever thread just
-    got a slot or a new higher-priority ticket arrived), rechecks whether
-    it is now both the heap's minimum AND the interval has elapsed. This is
-    a bounded busy-recheck, not an unbounded spin: the condition variable's
-    timeout is always set to (at most) the remaining interval, so a thread
-    never wakes needlessly more than once per pending slot."""
+    Anti-starvation floor (2026-08-14): strict priority ordering alone
+    means a waiting BACKGROUND ticket (BroadScanner discovery) can be
+    passed over indefinitely as long as CRITICAL/NORMAL traffic keeps
+    arriving -- confirmed live the same day (see brokers/webull/client.py's
+    _STREAMING_SUBSCRIBE_BATCH_SIZE comment for the related incident this
+    was discovered alongside): zero "passed broad scanner filters" log
+    lines for an entire trading day, strongly suggesting discovery's own
+    BACKGROUND-priority calls were starved out completely by a flood of
+    CRITICAL-priority REST-polling fallback traffic. `max_wait_seconds`
+    bounds this: once ANY waiting ticket has been queued that long, it
+    wins the next available slot regardless of priority, guaranteeing
+    every call -- however low its priority -- eventually gets forward
+    progress instead of only when priority-order happens to reach it.
 
-    def __init__(self, min_interval_seconds: float):
+    Implementation: a single lock/condition variable guards a min-heap of
+    waiting tickets `(priority, sequence_number)`, plus an arrival-time map
+    keyed by sequence number. Each waiting thread holds its own ticket and,
+    each time it wakes (on a bounded timeout, or a notify from whichever
+    thread just got a slot), calls _select_winner to determine who gets
+    the next slot -- normally the heap's minimum (highest priority), but
+    the single longest-waiting ticket overall if it has aged past
+    max_wait_seconds. This is a bounded busy-recheck, not an unbounded
+    spin: the condition variable's timeout is always set to (at most) the
+    remaining pacing interval, or max_wait_seconds as a worst-case safety-
+    net poll when a slot is already free but this thread isn't (yet) the
+    winner -- see wait()'s inline comment for why that fallback timeout
+    (rather than blocking forever on notify alone) is what makes the aging
+    guarantee actually hold under real scheduling, not just in the common
+    case where the eventual winner's own thread happens to be the one that
+    wakes up to claim it."""
+
+    def __init__(self, min_interval_seconds: float, max_wait_seconds: float = 30.0):
         self.min_interval_seconds = min_interval_seconds
+        # See class docstring's "Anti-starvation floor" section. 30s is a
+        # starting value, not backtested: comfortably shorter than a human
+        # would ever notice as "the bot stopped discovering," comfortably
+        # longer than the handful of seconds a legitimately busy CRITICAL-
+        # priority stretch (a burst of simultaneous entries/exits) should
+        # ever realistically last.
+        self.max_wait_seconds = max_wait_seconds
         self._condition = threading.Condition()
         self._last_call_at: float = 0.0
         self._waiting: list[tuple[int, int]] = []
         self._counter = itertools.count()
+        # ticket sequence number -> time.monotonic() it was enqueued, used
+        # by _select_winner to find the single longest-waiting ticket
+        # regardless of priority. Populated when a ticket is pushed onto
+        # _waiting, removed whenever that ticket leaves _waiting (claimed
+        # or cancelled) -- always kept in sync with _waiting's membership.
+        self._arrival_times: dict[int, float] = {}
         # Real incident (CYCU/SCKT/BIVI, 2026-08-12): CallPriority already
         # lets a CRITICAL call win contention against BACKGROUND traffic,
         # but does nothing when SEVERAL genuinely CRITICAL calls (a stuck
@@ -158,10 +192,28 @@ class RateLimiter:
         # discovery/reconcile/other-order traffic for the same slots.
         self._exclusive_holder: Optional[int] = None
 
+    def _select_winner(self, now: float) -> tuple[int, int]:
+        """Which waiting ticket gets the next available slot: the heap's
+        priority-order minimum, UNLESS some other waiting ticket has been
+        queued for at least max_wait_seconds, in which case THAT ticket
+        (the single longest-waiting one overall) wins instead -- see this
+        class's docstring for the starvation this bounds. O(n) in the
+        number of concurrently waiting threads, which in practice is small
+        (bounded by this codebase's own thread pool/call-site counts).
+        Callers must hold self._condition."""
+        priority_winner = self._waiting[0]
+        oldest = min(self._waiting, key=lambda t: self._arrival_times.get(t[1], now))
+        if oldest == priority_winner:
+            return priority_winner
+        if now - self._arrival_times.get(oldest[1], now) >= self.max_wait_seconds:
+            return oldest
+        return priority_winner
+
     def wait(self, priority: int = CallPriority.NORMAL) -> None:
         with self._condition:
             ticket = (int(priority), next(self._counter))
             heapq.heappush(self._waiting, ticket)
+            self._arrival_times[ticket[1]] = time.monotonic()
             try:
                 while True:
                     # Exclusive mode: every thread except the holder waits
@@ -176,22 +228,43 @@ class RateLimiter:
                         continue
                     now = time.monotonic()
                     elapsed = now - self._last_call_at
-                    if self._waiting[0] == ticket and elapsed >= self.min_interval_seconds:
-                        heapq.heappop(self._waiting)
+                    if elapsed >= self.min_interval_seconds and self._select_winner(now) == ticket:
+                        self._waiting.remove(ticket)
+                        heapq.heapify(self._waiting)
+                        self._arrival_times.pop(ticket[1], None)
                         self._last_call_at = time.monotonic()
                         self._condition.notify_all()
                         return
                     remaining = self.min_interval_seconds - elapsed
-                    timeout = remaining if remaining > 0 else None
+                    # A losing thread normally wakes on the winner's own
+                    # notify_all() once it claims a slot, which under
+                    # sustained load happens roughly every
+                    # min_interval_seconds -- frequent enough to re-check
+                    # aging well within max_wait_seconds in practice. But
+                    # relying on that alone would leave the ACTUAL eventual
+                    # winner (once its wait crosses max_wait_seconds and
+                    # _select_winner starts returning it instead of the
+                    # priority-order ticket) stuck asleep with no notify
+                    # ever coming, if nothing else happens to wake it --
+                    # the priority-order ticket's own thread would just
+                    # keep losing and re-sleeping too. Falling back to
+                    # max_wait_seconds here (rather than blocking
+                    # indefinitely on notify alone) is what makes this
+                    # thread self-recover and re-check even in that
+                    # worst case, bounding every waiter's staleness to at
+                    # most max_wait_seconds regardless of what any other
+                    # thread happens to do.
+                    timeout = remaining if remaining > 0 else self.max_wait_seconds
                     self._condition.wait(timeout=timeout)
             except BaseException:
                 # A waiter that never reaches the normal return path (e.g.
-                # interrupted) must not leave a phantom ticket stuck at the
-                # head of the heap, which would permanently block every
-                # other thread behind it.
+                # interrupted) must not leave a phantom ticket stuck in
+                # _waiting, which would permanently block every other
+                # thread behind it.
                 try:
                     self._waiting.remove(ticket)
                     heapq.heapify(self._waiting)
+                    self._arrival_times.pop(ticket[1], None)
                     self._condition.notify_all()
                 except ValueError:
                     pass
@@ -248,7 +321,13 @@ class RateLimiter:
 # Shared across EVERY Webull call this codebase makes -- market data AND
 # order/account/position management alike (see this module's docstring's
 # "Priority tiers" section) -- since the account-wide budget it's pacing
-# against is a single shared ceiling, not one per endpoint.
+# against is a single shared ceiling, not one per endpoint. max_wait_seconds
+# left at RateLimiter's own default (30s) -- see that default's docstring
+# and the class docstring's "Anti-starvation floor" section for why this
+# specific value matters for the shared singleton: it's what guarantees
+# BroadScanner's BACKGROUND-priority discovery calls can never again be
+# starved out entirely by sustained CRITICAL/NORMAL trading traffic, the
+# way they appear to have been for the entirety of 2026-08-14.
 webull_limiter = RateLimiter(min_interval_seconds=1.0)
 
 # Backward-compatible alias -- webull_market_data_limiter was the name used

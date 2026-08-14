@@ -46,6 +46,7 @@ class _SlowFakeBroker(BrokerClient):
     def get_positions(self): return []
     def get_bars(self, symbol, interval, lookback): raise NotImplementedError
     def subscribe_quotes(self, symbols, on_update): raise NotImplementedError
+    def unsubscribe_quotes(self, symbols): raise NotImplementedError
     def place_order(self, order): raise NotImplementedError
     def cancel_order(self, broker_order_id): raise NotImplementedError
     def modify_order(self, broker_order_id, **changes): raise NotImplementedError

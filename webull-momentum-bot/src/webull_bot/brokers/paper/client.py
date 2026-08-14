@@ -74,6 +74,9 @@ class PaperBrokerClient(BrokerClient):
     def subscribe_quotes(self, symbols: list[str], on_update: Callable[[MarketSnapshot], None]) -> None:
         raise NotImplementedError("PaperBrokerClient is pull/feed-based; use feed_snapshot() in tests/backtests")
 
+    def unsubscribe_quotes(self, symbols: list[str]) -> None:
+        raise NotImplementedError("PaperBrokerClient is pull/feed-based; use feed_snapshot() in tests/backtests")
+
     def _simulated_fill_price(self, order: Order, snapshot: MarketSnapshot) -> float:
         mid = (snapshot.bid + snapshot.ask) / 2 if snapshot.bid and snapshot.ask else snapshot.last_price
         slippage = mid * (self.config.fill_slippage_bps / 10_000)

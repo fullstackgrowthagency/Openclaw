@@ -174,17 +174,29 @@ _INTERVAL_TO_TIMESPAN = {
 # subscribed" -- used by get_snapshots to chunk a larger symbol list.
 _SNAPSHOT_BATCH_SIZE = 100
 
-# Confirmed live 2026-08-13: DataStreamingClient.subscribe() rejects the
-# WHOLE call with TOO_MANY_SYMBOLS ("Maximum number of symbols: 100") once
-# the symbol list passed to it exceeds 100 -- a real incident where
-# subscribe_quotes was calling it with every not-yet-subscribed symbol at
-# once, uncapped. Once the tracked candidate list grew past 100, EVERY
-# subscribe attempt failed wholesale, repeated every single tick forever
-# (caught and logged as a WARNING, so nothing crashed, but streaming
-# silently never worked at all above 100 symbols, and the same failing
-# call kept burning real time/log volume every cycle). A distinct
-# constant from _SNAPSHOT_BATCH_SIZE above rather than reusing it: this is
-# a different SDK endpoint (streaming subscribe vs. REST
+# Confirmed live 2026-08-13: DataStreamingClient.subscribe() rejects a call
+# with TOO_MANY_SYMBOLS ("Maximum number of symbols: 100") once the symbol
+# list passed to it exceeds 100 -- a real incident where subscribe_quotes
+# was calling it with every not-yet-subscribed symbol at once, uncapped.
+# _subscribe_symbols_in_batches (below) chunks any single call to this
+# size, which fixed that specific failure mode.
+#
+# CORRECTED 2026-08-14: chunking a single call's ARGUMENT LIST to <=100
+# does NOT make the underlying limit go away -- live evidence the same day
+# showed a batch of only ~36 new symbols still rejected wholesale with the
+# identical TOO_MANY_SYMBOLS error. The limit is cumulative across the
+# whole MQTT session (self._streaming_subscribed_symbols), not a per-call
+# argument-count cap: once the session's total ACTIVE subscription count
+# is already near 100, even a small additional batch pushes the session
+# total over the real ceiling. subscribe_quotes/_subscribe_symbols_in_batches
+# only ever grew that total (there was no unsubscribe path at all before
+# this date) -- see unsubscribe_quotes and
+# TradingLoop._reconcile_streaming_subscriptions, which now keep the
+# session's total under TradingLoopConfig.streaming_subscription_budget by
+# evicting the lowest-priority subscribed symbols before adding new ones,
+# rather than relying on argument-list chunking alone. A distinct constant
+# from _SNAPSHOT_BATCH_SIZE above rather than reusing it: this is a
+# different SDK endpoint (streaming subscribe vs. REST
 # market_data.get_snapshot) whose limit currently happens to also be 100,
 # not guaranteed to stay that way.
 _STREAMING_SUBSCRIBE_BATCH_SIZE = 100
@@ -1186,6 +1198,54 @@ class WebullBrokerClient(BrokerClient):
             self._streaming_connect_attempted_at = datetime.utcnow()
         client.connect_and_loop_start()
         self._streaming_client = client
+
+    def unsubscribe_quotes(self, symbols: list[str]) -> None:
+        """Releases `symbols` from the live MQTT subscription set previously
+        established via subscribe_quotes -- the counterpart TradingLoop
+        needs to keep the total ACTIVE subscription count under Webull's
+        confirmed cumulative-per-session cap (see
+        _STREAMING_SUBSCRIBE_BATCH_SIZE's comment and
+        TradingLoop._reconcile_streaming_subscriptions) instead of only
+        ever growing, which is all subscribe_quotes alone did before
+        2026-08-14.
+
+        Silently no-ops for any symbol not currently in
+        self._streaming_subscribed_symbols (nothing to release) and skips
+        the real broker-side call entirely if there's no live connection
+        yet (self._streaming_client is None or not yet connected) -- there
+        is no real server-side subscription to release in that state.
+        Local bookkeeping for every requested symbol is dropped
+        unconditionally regardless of which branch runs or whether the
+        broker-side call below succeeds: worst case on a failure there is
+        a phantom subscription that still counts against the session's
+        cap until Webull itself times it out, not a correctness problem
+        for this process (nothing reads self._streaming_subscribed_symbols
+        to decide whether a symbol's cache entries are trustworthy).
+
+        Chunked through the same _STREAMING_SUBSCRIBE_BATCH_SIZE batches
+        subscribe uses (unconfirmed whether unsubscribe shares that exact
+        cap, but cheap and safe to assume it might rather than risk the
+        same wholesale-rejection failure mode in the other direction).
+        Best-effort per chunk, same as _subscribe_symbols_in_batches -- one
+        failing chunk doesn't stop the rest from being attempted."""
+        with self._streaming_lock:
+            to_release = [s for s in symbols if s in self._streaming_subscribed_symbols]
+            connected = self._streaming_connected
+            client_ = self._streaming_client
+        if not to_release:
+            return
+        if client_ is not None and connected:
+            for start in range(0, len(to_release), _STREAMING_SUBSCRIBE_BATCH_SIZE):
+                chunk = to_release[start:start + _STREAMING_SUBSCRIBE_BATCH_SIZE]
+                try:
+                    client_.unsubscribe(chunk, Category.US_STOCK.name, ["QUOTE", "SNAPSHOT"])
+                except Exception:
+                    logger.warning("Streaming unsubscribe failed for a batch of %d symbol(s).", len(chunk), exc_info=True)
+        with self._streaming_lock:
+            for s in to_release:
+                self._streaming_subscribed_symbols.discard(s)
+                self._streaming_snapshot_cache.pop(s, None)
+                self._streaming_quote_cache.pop(s, None)
 
     # -- orders --------------------------------------------------------------
 

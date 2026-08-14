@@ -266,15 +266,24 @@ What's implemented and tested:
   candidate's symbol is (re-)subscribed once per tick (cheap once already
   requested). Either way, it falls back to REST polling automatically if
   nothing has streamed in the last 10s, and is excluded from that tick's
-  batched REST `get_snapshots` call once it's actively streaming. Known
-  open tradeoff: there's still no unsubscribe path for a symbol that
-  leaves every streaming-eligible state, so subscriptions only grow for
-  the life of the process -- now covering a much larger population than
-  just open positions, whether Webull's subscription count/rate has a
-  practical ceiling this could approach is not yet confirmed. One other
-  still-open loose end from the original verification: a "Protocol not
-  supported" MQTT error observed during the verify script's own shutdown
-  sequence on every test run, not yet understood.
+  batched REST `get_snapshots` call once it's actively streaming.
+  **2026-08-14 fix:** Webull's streaming subscribe cap (100) turned out to
+  be cumulative across the whole MQTT session, not per-call as an earlier
+  fix assumed -- confirmed live when a batch of only ~36 new symbols was
+  still rejected wholesale once the session's running total was already
+  near 100. `TradingLoop._reconcile_streaming_subscriptions` now keeps the
+  total ACTIVE subscription count within a fixed `streaming_subscription_budget`
+  (90), evicting the lowest-priority currently-subscribed symbols
+  (`BrokerClient.unsubscribe_quotes`, new) before adding higher-priority
+  ones once the budget is full -- an open position or a candidate actively
+  working toward an entry always outranks the long tail of `WATCHING`/
+  `HEATING_UP` candidates, for which streaming is a latency optimization
+  on top of a fully-correct REST-polling fallback. See
+  `docs/ARCHITECTURE.md`'s "Zero-trades incident and the three-part
+  scaling fix" section. One other still-open loose end from the original
+  verification: a "Protocol not supported" MQTT error observed during the
+  verify script's own shutdown sequence on every test run, not yet
+  understood.
 - `Strategy -> RiskEngine -> OrderManager -> Broker` enforced in code --
   strategies never hold a broker reference
 - Position manager: a universal breakeven-at-+5% rule (stop jumps to entry
@@ -901,6 +910,33 @@ What's implemented and tested:
   `docs/ARCHITECTURE.md`'s "Atomic bracket entry" section and
   `tests/test_webull_broker_client.py`, `tests/test_order_manager.py`,
   `tests/test_trading_loop.py` for the new coverage.
+- **Zero-trades incident: candidate cleanup, a real streaming budget, and
+  a rate-limiter starvation floor -- 2026-08-14, at the user's explicit
+  request after the bot attempted zero successful trades all day while
+  missing every one of the day's actual biggest movers.** Root cause was
+  an infrastructure/scaling bug, not entry selection: `self.candidates`
+  had no removal path at all, grew to 184 tracked symbols by mid-day, blew
+  past Webull's real (cumulative-per-session, not per-call -- an earlier
+  fix assumed per-call) streaming-subscribe cap, whose REST-polling
+  fallback then saturated the shared rate limiter (9,515 rate-limit hits
+  logged since 04:00) badly enough to apparently starve `BroadScanner`'s
+  own discovery calls out completely (zero successful discoveries all
+  day). Three independent fixes: (1) `TradingLoop._prune_stale_candidates`
+  drops long-cold `WATCHING`/`HEATING_UP`/`REJECTED`/`COOLDOWN` candidates
+  (1 hour of no state transition) every tick, never touching an active or
+  open-position candidate; (2) `TradingLoop._reconcile_streaming_subscriptions`
+  keeps the broker's live subscription count within a real
+  `streaming_subscription_budget` (90), evicting the lowest-priority
+  subscribed symbols (new `BrokerClient.unsubscribe_quotes`) before adding
+  higher-priority ones -- an open position or a candidate actively working
+  toward an entry always outranks the long tail of watch-stage names; (3)
+  `RateLimiter.max_wait_seconds` (30s) guarantees every `BACKGROUND`-priority
+  call eventually wins a slot regardless of how much `CRITICAL`/`NORMAL`
+  traffic keeps arriving, closing the starvation gap strict priority
+  ordering alone couldn't. See `docs/ARCHITECTURE.md`'s "Zero-trades
+  incident and the three-part scaling fix" section for the full five-step
+  causal chain and `tests/test_trading_loop.py`, `tests/test_retry.py`,
+  `tests/test_webull_broker_client.py` for the new coverage.
 - **Resistance detection via volume profile** (`metrics/volume_profile.py`):
   resistance is no longer just the running high of day. At discovery,
   `BroadScanner` fetches recent intraday bars -- including pre-market and

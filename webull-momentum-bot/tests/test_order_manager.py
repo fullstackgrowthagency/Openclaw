@@ -51,6 +51,7 @@ class _NoRestingOrdersBroker(BrokerClient):
     def get_snapshot(self, symbol): raise NotImplementedError
     def get_bars(self, symbol, interval, lookback): raise NotImplementedError
     def subscribe_quotes(self, symbols, on_update): raise NotImplementedError
+    def unsubscribe_quotes(self, symbols): raise NotImplementedError
 
     def place_order(self, order: Order) -> Order:
         order.broker_order_id = order.client_order_id or "unexpected-call"

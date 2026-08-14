@@ -214,6 +214,79 @@ def test_rate_limiter_still_enforces_interval_regardless_of_priority():
     assert time.monotonic() - start >= 0.14
 
 
+# -- anti-starvation floor (2026-08-14) --------------------------------------
+# Real incident: strict priority ordering alone let a BACKGROUND-priority
+# waiter (BroadScanner discovery) be passed over indefinitely as long as
+# CRITICAL-priority traffic kept arriving -- zero "passed broad scanner
+# filters" log lines for an entire trading day. max_wait_seconds bounds
+# this: once a ticket has waited that long, it wins the next slot
+# regardless of priority.
+
+def test_rate_limiter_bounds_background_starvation_under_sustained_critical_load():
+    limiter = RateLimiter(min_interval_seconds=0.02, max_wait_seconds=0.1)
+    limiter.wait()  # consumes the first slot synchronously
+
+    stop = threading.Event()
+
+    def critical_feeder():
+        # Keeps re-queuing CRITICAL-priority work for the whole test --
+        # without the anti-starvation floor, this alone would be enough to
+        # keep a BACKGROUND waiter starved forever, since CRITICAL always
+        # wins strict priority-order contention.
+        while not stop.is_set():
+            limiter.wait(CallPriority.CRITICAL)
+
+    feeders = [threading.Thread(target=critical_feeder) for _ in range(3)]
+    for feeder in feeders:
+        feeder.start()
+    time.sleep(0.03)  # let sustained CRITICAL contention actually establish
+
+    started = time.monotonic()
+    limiter.wait(CallPriority.BACKGROUND)
+    elapsed = time.monotonic() - started
+
+    stop.set()
+    for feeder in feeders:
+        feeder.join(timeout=2.0)
+
+    # Bounded by roughly max_wait_seconds plus a little scheduling slack --
+    # NOT the tens of iterations (or worse) it would take strict priority
+    # order alone to ever let BACKGROUND through against 3 continuously
+    # re-queuing CRITICAL feeders.
+    assert elapsed < 0.5
+
+
+def test_rate_limiter_default_max_wait_does_not_affect_ordinary_priority_contention():
+    # The aging floor must not change the outcome of a normal, short-lived
+    # priority contest (see test_rate_limiter_releases_higher_priority_waiter_first)
+    # -- it should only ever matter once a waiter has genuinely been queued
+    # for max_wait_seconds, never sooner.
+    limiter = RateLimiter(min_interval_seconds=0.05)
+    assert limiter.max_wait_seconds == 30.0  # the documented default
+    order: list[str] = []
+    lock = threading.Lock()
+    limiter.wait()
+
+    def worker(label: str, priority: int, start_barrier: threading.Barrier):
+        start_barrier.wait()
+        limiter.wait(priority)
+        with lock:
+            order.append(label)
+
+    barrier = threading.Barrier(2)
+    threads = [
+        threading.Thread(target=worker, args=("background", CallPriority.BACKGROUND, barrier)),
+        threading.Thread(target=worker, args=("critical", CallPriority.CRITICAL, barrier)),
+    ]
+    threads[0].start()
+    time.sleep(0.02)
+    threads[1].start()
+    for t in threads:
+        t.join(timeout=2.0)
+
+    assert order[0] == "critical"
+
+
 # -- exclusive() -- real incident (CYCU/SCKT/BIVI, 2026-08-12): CallPriority
 # alone doesn't help once several genuinely CRITICAL calls are simultaneously
 # in flight -- they still compete with each other for the same slots.

@@ -54,6 +54,17 @@ class BrokerClient(ABC):
         ...
 
     @abstractmethod
+    def unsubscribe_quotes(self, symbols: list[str]) -> None:
+        """Stop streaming real-time quotes/bars for `symbols` previously
+        passed to subscribe_quotes. Required (not optional/getattr-gated)
+        for the same reason subscribe_quotes is -- a backend without real
+        streaming support (e.g. PaperBrokerClient) should raise
+        NotImplementedError rather than silently doing nothing, so a
+        caller can tell "not supported" apart from "supported and a no-op
+        because nothing was subscribed."""
+        ...
+
+    @abstractmethod
     def place_order(self, order: Order) -> Order:
         """Submit an order; returns the order updated with broker_order_id/status."""
         ...

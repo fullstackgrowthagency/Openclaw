@@ -223,6 +223,37 @@ class TradingLoopConfig:
     # unvalidated starting point, not tuned against live rate limits yet.
     resistance_refresh_interval_seconds: float = 300.0
     cooldown_seconds: float = 900.0  # 15 min before a cooled-down candidate can be watched again
+    # How long a candidate can sit in a PRE-ENTRY, NOT-currently-active state
+    # (WATCHING/HEATING_UP/REJECTED/COOLDOWN -- see _PRUNABLE_STATES) with no
+    # state transition at all before _prune_stale_candidates drops it from
+    # self.candidates entirely and unsubscribes its symbol from streaming.
+    # Real incident (2026-08-14): self.candidates has never had a removal
+    # path since this codebase's very first version -- every symbol
+    # BroadScanner ever surfaced stayed tracked, and re-processed every
+    # single tick, for the rest of the process's life. By mid-day this had
+    # grown to 184 tracked candidates, which (1) blew past Webull's
+    # confirmed cumulative-per-session streaming-subscribe cap (see
+    # brokers/webull/client.py's _STREAMING_SUBSCRIBE_BATCH_SIZE comment
+    # and _reconcile_streaming_subscriptions below) so most of them fell
+    # back to REST polling, and (2) that REST-polling volume saturated the
+    # shared account-wide rate limiter badly enough that BroadScanner's
+    # own BACKGROUND-priority discovery calls appear to have been starved
+    # out completely (zero "passed broad scanner filters" log lines for
+    # the entire day) -- the bot effectively stopped finding NEW winners
+    # while it kept re-polling a growing pile of old, cold ones. A
+    # candidate's last_updated_at only moves on an actual state transition
+    # (see state_machine.transition), not on every tick's score recompute
+    # -- so this correctly measures "how long has nothing interesting
+    # happened for this symbol," not "how long since it was last ticked."
+    # Deliberately excludes ARMED/CONFIRMING/TRIGGERED (actively working
+    # toward an entry) and ENTERED/MANAGING (an open position) -- those
+    # must never be dropped out from under the entry/exit logic still
+    # actively managing them. 1 hour is a starting value, not backtested:
+    # long enough that a name which cools off and reheats within a normal
+    # low-float move's timeframe isn't lost, short enough that a full
+    # session's worth of one-off cold discoveries doesn't accumulate
+    # unbounded the way it did today.
+    candidate_stale_after_seconds: float = 3600.0
     # How often reconcile_positions_from_broker re-runs after its initial
     # run_forever-startup call -- see that method's docstring for why this
     # needs to run more than once: a position can be closed OUTSIDE this
@@ -381,6 +412,28 @@ class TradingLoopConfig:
     # reconnect issue noted in WebullBrokerClient.subscribe_quotes'
     # docstring) rather than pacing normal operation.
     streaming_staleness_seconds: float = 10.0
+    # Maximum number of symbols _reconcile_streaming_subscriptions will
+    # keep actively subscribed to live streaming at once -- see that
+    # method and brokers/webull/client.py's corrected
+    # _STREAMING_SUBSCRIBE_BATCH_SIZE comment for the 2026-08-14 incident:
+    # Webull's DataStreamingClient.subscribe() enforces a cumulative,
+    # per-MQTT-session cap of 100 ACTIVE subscriptions (confirmed live --
+    # a batch of just ~36 NEW symbols was still rejected wholesale with
+    # TOO_MANY_SYMBOLS once the session's running total was already near
+    # 100), not a per-call argument-count cap the way chunking alone
+    # (already in place since 2026-08-13) assumed. Before this fix,
+    # subscriptions only ever grew for the life of the process -- once
+    # total tracked candidates passed the real cap, EVERY subscribe
+    # attempt for any new symbol failed wholesale, forever, with the
+    # affected symbols silently and permanently stuck on REST polling.
+    # 90 rather than the full confirmed 100: headroom against the eager,
+    # immediate _ensure_streaming_subscribed calls made outside this
+    # method's own reconcile pass (_confirm_entry_filled/
+    # reconcile_positions_from_broker's position-adoption path), which
+    # could otherwise transiently push the session's real total a few
+    # symbols past the last reconcile's computed budget before the next
+    # reconcile tick evicts back down to it.
+    streaming_subscription_budget: int = 90
     # How many minutes before the 4:00pm ET core-session close the end-of-
     # day auto-flatten fires -- see market_hours.is_within_closing_buffer's
     # docstring for the full story: firing exactly at (or after) the
@@ -489,6 +542,35 @@ class TradingLoop:
         CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED, CandidateState.CONFIRMING,
         CandidateState.ENTERED, CandidateState.MANAGING,
     )
+
+    # States eligible for _prune_stale_candidates to drop entirely -- see
+    # TradingLoopConfig.candidate_stale_after_seconds' docstring. Everything
+    # NOT in this tuple (ARMED, CONFIRMING, TRIGGERED, ENTERED, MANAGING) is
+    # either actively working toward an entry or an open position, and must
+    # never be pruned regardless of how long it's been sitting there.
+    _PRUNABLE_STATES = (
+        CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.REJECTED, CandidateState.COOLDOWN,
+    )
+
+    # Priority tier for _reconcile_streaming_subscriptions -- lower wins a
+    # scarce streaming slot first when demand exceeds
+    # TradingLoopConfig.streaming_subscription_budget. An open position
+    # (ENTERED/MANAGING) must never lose its live price, and a candidate
+    # actively working toward an entry (ARMED/CONFIRMING, where poll
+    # cadence directly affects confirmation-window accuracy) comes next --
+    # both always outrank the long tail of WATCHING/HEATING_UP candidates,
+    # for which streaming is a latency optimization on top of a REST-
+    # polling fallback that's otherwise fully correct, just slower. Any
+    # state not listed here (TRIGGERED, DISCOVERED, REJECTED, COOLDOWN)
+    # never reaches this ranking at all -- see _STREAMING_ELIGIBLE_STATES.
+    _STREAMING_PRIORITY_TIERS = {
+        CandidateState.ENTERED: 0,
+        CandidateState.MANAGING: 0,
+        CandidateState.ARMED: 1,
+        CandidateState.CONFIRMING: 1,
+        CandidateState.WATCHING: 2,
+        CandidateState.HEATING_UP: 2,
+    }
 
     def __init__(
         self,
@@ -664,6 +746,15 @@ class TradingLoop:
         # retrying a call already known to fail. True once at least one
         # real subscription has succeeded.
         self._streaming_supported: Optional[bool] = None
+        # Symbols CURRENTLY subscribed for live streaming (not, since
+        # 2026-08-14, "ever requested this process's lifetime" -- see
+        # _reconcile_streaming_subscriptions, which now removes a symbol
+        # from here via broker.unsubscribe_quotes when it's pruned
+        # (_prune_stale_candidates) or evicted to make room for a
+        # higher-priority one under streaming_subscription_budget).
+        # _ensure_streaming_subscribed still only subscribes a symbol not
+        # already in this set, so a symbol dropped here is a genuine future
+        # re-subscribe candidate, not a permanent no-op.
         self._streaming_requested_symbols: set[str] = set()
         self._persisted_transition_counts: dict[str, int] = {}  # symbol -> len(state_history) already flushed
         # Set by engage_kill_switch_and_flatten (callable from any thread,
@@ -941,6 +1032,54 @@ class TradingLoop:
         with self._candidates_lock:
             return list(self.candidates.values())
 
+    def _prune_stale_candidates(self, now: datetime) -> None:
+        """Drops candidates in a _PRUNABLE_STATES state that have gone
+        candidate_stale_after_seconds with no state transition at all --
+        see that config field's docstring for the 2026-08-14 incident this
+        fixes (self.candidates growing unboundedly for the life of the
+        process). Runs on the main thread from _process_all_candidates,
+        same as every other structural self.candidates mutation site
+        (_rescan_universe's insert) -- deletion is guarded by the same
+        _candidates_lock for the same reason: the rescan thread reads/
+        inserts into this dict concurrently.
+
+        Best-effort cleanup only, mirroring _ensure_streaming_subscribed's
+        own fallback contract: a symbol dropped here also has its streaming
+        subscription released (freeing a slot in
+        _reconcile_streaming_subscriptions' cap-limited budget for a
+        genuinely active candidate to use instead) and its bookkeeping
+        cleared, but a failure to unsubscribe it at the broker is only
+        logged, never allowed to block the candidate drop itself -- an
+        orphaned subscription self-corrects the next time
+        _reconcile_streaming_subscriptions runs short on budget and evicts
+        it anyway."""
+        with self._candidates_lock:
+            stale_symbols = [
+                symbol for symbol, candidate in self.candidates.items()
+                if candidate.state in self._PRUNABLE_STATES
+                and now - candidate.last_updated_at >= timedelta(seconds=self.config.candidate_stale_after_seconds)
+            ]
+            for symbol in stale_symbols:
+                del self.candidates[symbol]
+        if not stale_symbols:
+            return
+        logger.info(
+            "Pruned %d stale candidate(s) with no activity for over %.0fs: %s",
+            len(stale_symbols), self.config.candidate_stale_after_seconds, stale_symbols,
+        )
+        for symbol in stale_symbols:
+            self._streaming_requested_symbols.discard(symbol)
+            with self._live_snapshots_lock:
+                self._live_snapshots.pop(symbol, None)
+        try:
+            self.broker.unsubscribe_quotes(stale_symbols)
+        except Exception:
+            logger.warning(
+                "unsubscribe_quotes failed for pruned candidates %s; harmless -- an orphaned "
+                "subscription self-corrects the next time the streaming budget runs short.",
+                stale_symbols, exc_info=True,
+            )
+
     def scan_and_add_candidate(self, symbol: str) -> tuple[Optional[Candidate], Optional[str], bool]:
         """On-demand, single-symbol equivalent of _rescan_universe -- runs
         one ticker through BroadScanner's structural gates right now and,
@@ -1032,10 +1171,10 @@ class TradingLoop:
         _confirm_entry_filled/reconcile_positions_from_broker's adoption
         path (an eager first attempt right when a position starts being
         tracked, mirroring _attach_broker_bracket's own call sites), and
-        _process_all_candidates once per tick for every currently
-        streaming-eligible candidate (both an eventual first attempt for a
-        watch-stage candidate and a RETRY of the eager attempt above if it
-        failed -- see the "retried automatically" paragraph below).
+        _reconcile_streaming_subscriptions once per tick with the
+        budget-ranked add-list it computed (both an eventual first attempt
+        for a watch-stage candidate and a RETRY of the eager attempt above
+        if it failed -- see the "retried automatically" paragraph below).
 
         subscribe_quotes is a required BrokerClient ABC method (unlike
         get_snapshots/list_open_orders/place_oco_bracket, which are
@@ -1061,23 +1200,20 @@ class TradingLoop:
         `poll_interval_seconds` (a "short wait" in wall-clock terms, not
         multiple ticks), with no separate retry timer needed here.
 
-        Only ever subscribes symbols not already requested this process's
-        lifetime (self._streaming_requested_symbols) -- there is
-        deliberately no unsubscribe path for a symbol that later leaves
-        every _STREAMING_ELIGIBLE_STATES state (a closed position, a
-        candidate that cooled off back to REJECTED): the extra ticks for
-        an unwatched symbol are harmless (nothing reads them --
-        _get_streaming_snapshot is only ever consulted for a candidate
-        currently in one of those states) and simpler than tracking
-        exactly when it's safe to unsubscribe. Known tradeoff worth
-        watching in production, now that this covers the much larger
-        WATCHING/HEATING_UP/ARMED population rather than just open
-        positions: subscriptions only ever grow for the life of the
-        process, one entry per symbol BroadScanner has ever surfaced --
-        see docs/ARCHITECTURE.md's "Streaming market data" section for
-        whether Webull's per-session subscription count/rate has a
-        practical ceiling this could approach over a long trading day
-        (not yet confirmed either way)."""
+        Only ever subscribes symbols not already in
+        self._streaming_requested_symbols -- callers that want a bounded
+        total subscription count (i.e. every caller except the two eager
+        adoption call sites) go through _reconcile_streaming_subscriptions
+        instead, which computes the add-list this method receives AND
+        handles evicting (broker.unsubscribe_quotes) whatever fell out of
+        the top streaming_subscription_budget first. This method itself
+        stays a pure "add these, best-effort" primitive with no eviction
+        logic of its own -- see TradingLoopConfig.streaming_subscription_budget's
+        docstring for the 2026-08-14 incident that made eviction necessary
+        at all (subscriptions used to only ever grow for the life of the
+        process, one entry per symbol BroadScanner had ever surfaced,
+        which silently overflowed Webull's real cumulative-per-session
+        cap once total tracked candidates passed it)."""
         if self._streaming_supported is False:
             return
         new_symbols = [s for s in symbols if s not in self._streaming_requested_symbols]
@@ -1096,6 +1232,59 @@ class TradingLoop:
             return
         self._streaming_supported = True
         self._streaming_requested_symbols.update(new_symbols)
+
+    def _reconcile_streaming_subscriptions(self, candidates: list[Candidate], now: datetime) -> None:
+        """Keeps the broker's live-streamed subscription set within
+        TradingLoopConfig.streaming_subscription_budget, evicting the
+        lowest-priority currently-subscribed symbols (broker.unsubscribe_quotes)
+        before subscribing new, higher-priority ones -- see that config
+        field's docstring and brokers/webull/client.py's corrected
+        _STREAMING_SUBSCRIBE_BATCH_SIZE comment for the 2026-08-14 incident
+        this replaces (streaming subscriptions only ever grew, with no cap
+        enforcement at all, silently overflowing Webull's real cumulative-
+        per-session limit once total tracked candidates passed it).
+
+        Ranking: see _STREAMING_PRIORITY_TIERS' docstring for the tier
+        order. Within a tier, the most recently updated candidates keep
+        their slot over stale ones -- an approximation of "hottest first"
+        using data already on hand (Candidate.last_updated_at) rather than
+        adding a new ranking metric just for this.
+
+        A no-op in steady state once the desired top-N set stops changing
+        tick to tick: only the diff (symbols newly in the top N, symbols
+        that fell out of it) results in any real subscribe/unsubscribe
+        call, exactly like _ensure_streaming_subscribed's own existing
+        membership-check no-op for symbols already subscribed."""
+        eligible = [c for c in candidates if c.state in self._STREAMING_ELIGIBLE_STATES]
+        if not eligible:
+            return
+        ranked = sorted(
+            eligible,
+            key=lambda c: (self._STREAMING_PRIORITY_TIERS.get(c.state, 9), -c.last_updated_at.timestamp()),
+        )
+        desired = {c.symbol for c in ranked[: self.config.streaming_subscription_budget]}
+        currently_subscribed = set(self._streaming_requested_symbols)
+        to_drop = currently_subscribed - desired
+        to_add = [symbol for symbol in (c.symbol for c in ranked) if symbol in desired and symbol not in currently_subscribed]
+
+        if to_drop:
+            dropped_sorted = sorted(to_drop)
+            try:
+                self.broker.unsubscribe_quotes(dropped_sorted)
+            except Exception:
+                logger.warning(
+                    "unsubscribe_quotes failed while making room in the streaming budget for %s; "
+                    "those symbols stay counted as subscribed for now and will be retried next tick.",
+                    dropped_sorted, exc_info=True,
+                )
+            else:
+                self._streaming_requested_symbols -= to_drop
+                with self._live_snapshots_lock:
+                    for symbol in to_drop:
+                        self._live_snapshots.pop(symbol, None)
+
+        if to_add:
+            self._ensure_streaming_subscribed(to_add)
 
     # -- per-candidate processing ---------------------------------------------
 
@@ -3087,25 +3276,33 @@ class TradingLoop:
                 self._cached_account_summary_error = str(exc)
                 logger.warning("Failed to refresh cached account equity/buying power this cycle.", exc_info=True)
 
+        # Drop candidates that have gone stale (no state transition for
+        # candidate_stale_after_seconds) BEFORE taking this tick's
+        # candidates snapshot, so a just-pruned symbol isn't processed
+        # again this pass -- see _prune_stale_candidates' docstring for
+        # the 2026-08-14 incident this fixes.
+        try:
+            self._prune_stale_candidates(now)
+        except Exception:
+            logger.exception("Unhandled error pruning stale candidates this cycle.")
+
         candidates = self._snapshot_candidates()
 
         # Keep every candidate in a streaming-eligible state subscribed to
-        # live prices -- cheap to call every tick: _ensure_streaming_subscribed
-        # already no-ops for a symbol already requested this process's
-        # lifetime, so in steady state this is just a membership check per
-        # candidate, not a real subscribe call. ENTERED/MANAGING positions
-        # also get an eager first attempt right when they start being
-        # tracked (see _confirm_entry_filled and
-        # reconcile_positions_from_broker) so they don't wait a full tick
-        # for their first subscription -- this sweep is what RETRIES that
-        # attempt on every subsequent tick if it failed (subscribe_quotes
-        # raising leaves a symbol out of self._streaming_requested_symbols,
-        # so it's picked up again here rather than silently never
-        # streaming for the rest of the process -- see
-        # _ensure_streaming_subscribed's docstring).
-        streaming_eligible_symbols = [c.symbol for c in candidates if c.state in self._STREAMING_ELIGIBLE_STATES]
-        if streaming_eligible_symbols:
-            self._ensure_streaming_subscribed(streaming_eligible_symbols)
+        # live prices, within a bounded budget -- cheap to call every tick
+        # in steady state (a no-op once the desired top-N set stops
+        # changing). ENTERED/MANAGING positions also get an eager first
+        # attempt right when they start being tracked (see
+        # _confirm_entry_filled and reconcile_positions_from_broker) so
+        # they don't wait a full tick for their first subscription -- this
+        # sweep is what RETRIES that attempt on every subsequent tick if it
+        # failed, and also what EVICTS lower-priority symbols to make room
+        # once the budget is full -- see
+        # _reconcile_streaming_subscriptions' docstring.
+        try:
+            self._reconcile_streaming_subscriptions(candidates, now)
+        except Exception:
+            logger.exception("Unhandled error reconciling streaming subscriptions this cycle.")
 
         # Batch-fetch snapshots for every candidate that will actually need
         # one this cycle (mirrors _process_candidate_inner's own REJECTED/

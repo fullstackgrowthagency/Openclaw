@@ -202,6 +202,7 @@ class _FakeBroker(BrokerClient):
 
     def get_bars(self, symbol, interval, lookback): raise NotImplementedError
     def subscribe_quotes(self, symbols, on_update): raise NotImplementedError
+    def unsubscribe_quotes(self, symbols): raise NotImplementedError
 
     def place_order(self, order: Order) -> Order:
         order.status = OrderStatus.SUBMITTED
@@ -315,8 +316,10 @@ class _StreamingBroker(_FakeBroker):
     way WebullBrokerClient._on_quotes_message would call it from the
     MQTT client's own background thread in production."""
     subscribe_calls: list = field(default_factory=list)
+    unsubscribe_calls: list = field(default_factory=list)
     individual_calls: list = field(default_factory=list)
     fail_subscribe_times: int = 0
+    fail_unsubscribe_times: int = 0
     _stream_callback: object = None
 
     def subscribe_quotes(self, symbols, on_update):
@@ -325,6 +328,12 @@ class _StreamingBroker(_FakeBroker):
             self.fail_subscribe_times -= 1
             raise RuntimeError("simulated transient streaming failure")
         self._stream_callback = on_update
+
+    def unsubscribe_quotes(self, symbols):
+        self.unsubscribe_calls.append(list(symbols))
+        if self.fail_unsubscribe_times > 0:
+            self.fail_unsubscribe_times -= 1
+            raise RuntimeError("simulated transient unsubscribe failure")
 
     def push_stream_snapshot(self, snapshot):
         assert self._stream_callback is not None, "subscribe_quotes was never called"
@@ -4400,3 +4409,180 @@ def test_process_all_candidates_retries_a_previously_failed_subscribe():
 
     assert broker.subscribe_calls == [["TEST"], ["TEST"]]  # failed once, then succeeded
     assert loop._streaming_requested_symbols == {"TEST"}
+
+
+# -- candidate cleanup / streaming subscription budget (2026-08-14) --------
+# Real incident: self.candidates had no removal path since this codebase's
+# first version, growing to 184 tracked candidates by mid-day. That blew
+# past Webull's real cumulative-per-session streaming-subscribe cap, whose
+# REST-polling fallback then saturated the shared rate limiter badly
+# enough that BroadScanner's own BACKGROUND-priority discovery calls
+# appear to have been starved out entirely for the whole trading day. See
+# TradingLoopConfig.candidate_stale_after_seconds' and
+# .streaming_subscription_budget's docstrings for the full write-up.
+
+def _candidate_in_state(symbol, state, last_updated_at):
+    """Builds a Candidate that has walked the real state machine to reach
+    `state`, with every transition (including the final one) timestamped
+    at last_updated_at -- mirrors how _prune_stale_candidates/
+    _reconcile_streaming_subscriptions actually read Candidate.last_updated_at
+    off a real object, rather than constructing one directly and setting
+    the field by hand."""
+    from webull_bot.state_machine import new_candidate, transition
+    from webull_bot.enums import CandidateState as CS
+
+    path = {
+        CS.WATCHING: [CS.WATCHING],
+        CS.HEATING_UP: [CS.WATCHING, CS.HEATING_UP],
+        CS.ARMED: [CS.WATCHING, CS.HEATING_UP, CS.ARMED],
+        CS.CONFIRMING: [CS.WATCHING, CS.HEATING_UP, CS.ARMED, CS.CONFIRMING],
+        CS.ENTERED: [CS.WATCHING, CS.HEATING_UP, CS.ARMED, CS.CONFIRMING, CS.TRIGGERED, CS.ENTERED],
+        CS.MANAGING: [CS.WATCHING, CS.HEATING_UP, CS.ARMED, CS.CONFIRMING, CS.TRIGGERED, CS.ENTERED, CS.MANAGING],
+        CS.REJECTED: [CS.WATCHING, CS.REJECTED],
+        CS.COOLDOWN: [CS.WATCHING, CS.HEATING_UP, CS.COOLDOWN],
+    }[state]
+    candidate = new_candidate(symbol, now=last_updated_at)
+    for step in path:
+        transition(candidate, step, now=last_updated_at)
+    return candidate
+
+
+def test_prune_stale_candidates_drops_a_long_cold_watching_symbol():
+    broker = _StreamingBroker()
+    loop, _ = _watching_candidate_setup(broker)
+    loop.config.candidate_stale_after_seconds = 60.0
+    loop.candidates["TEST"] = _candidate_in_state("TEST", CandidateState.WATCHING, _IN_HOURS_NOW)
+    loop._streaming_requested_symbols.add("TEST")  # simulates an already-active subscription
+
+    loop._prune_stale_candidates(_IN_HOURS_NOW + timedelta(seconds=120))
+
+    assert "TEST" not in loop.candidates
+    assert "TEST" not in loop._streaming_requested_symbols
+    assert broker.unsubscribe_calls == [["TEST"]]
+
+
+def test_prune_stale_candidates_leaves_a_recently_active_candidate():
+    broker = _StreamingBroker()
+    loop, _ = _watching_candidate_setup(broker)
+    loop.config.candidate_stale_after_seconds = 60.0
+    loop.candidates["TEST"] = _candidate_in_state("TEST", CandidateState.WATCHING, _IN_HOURS_NOW)
+
+    loop._prune_stale_candidates(_IN_HOURS_NOW + timedelta(seconds=30))  # under the threshold
+
+    assert "TEST" in loop.candidates
+    assert broker.unsubscribe_calls == []
+
+
+@pytest.mark.parametrize("state", [CandidateState.ARMED, CandidateState.CONFIRMING, CandidateState.ENTERED, CandidateState.MANAGING])
+def test_prune_stale_candidates_never_drops_an_active_or_open_position_state(state):
+    broker = _StreamingBroker()
+    loop, _ = _watching_candidate_setup(broker)
+    loop.config.candidate_stale_after_seconds = 60.0
+    loop.candidates["TEST"] = _candidate_in_state("TEST", state, _IN_HOURS_NOW)
+
+    loop._prune_stale_candidates(_IN_HOURS_NOW + timedelta(hours=10))  # far past the threshold
+
+    assert "TEST" in loop.candidates
+    assert broker.unsubscribe_calls == []
+
+
+def test_prune_stale_candidates_unsubscribe_failure_does_not_prevent_the_drop():
+    broker = _StreamingBroker(fail_unsubscribe_times=1)
+    loop, _ = _watching_candidate_setup(broker)
+    loop.config.candidate_stale_after_seconds = 60.0
+    loop.candidates["TEST"] = _candidate_in_state("TEST", CandidateState.WATCHING, _IN_HOURS_NOW)
+
+    loop._prune_stale_candidates(_IN_HOURS_NOW + timedelta(seconds=120))  # must not raise
+
+    assert "TEST" not in loop.candidates  # dropped from tracking regardless
+
+
+def test_reconcile_streaming_subscriptions_evicts_lowest_priority_to_stay_within_budget():
+    broker = _StreamingBroker()
+    loop, _ = _watching_candidate_setup(broker)
+    loop.candidates.clear()
+    loop.config.streaming_subscription_budget = 2
+    t0 = _IN_HOURS_NOW
+
+    old1 = _candidate_in_state("OLD1", CandidateState.WATCHING, t0)
+    old2 = _candidate_in_state("OLD2", CandidateState.WATCHING, t0 + timedelta(seconds=1))
+    hot = _candidate_in_state("HOT", CandidateState.ARMED, t0)
+    loop._streaming_requested_symbols = {"OLD1", "OLD2"}
+
+    loop._reconcile_streaming_subscriptions([old1, old2, hot], t0 + timedelta(seconds=5))
+
+    # HOT (ARMED, higher priority tier) always gets a slot; between the two
+    # same-tier WATCHING candidates, the more recently active one (OLD2)
+    # keeps its slot over the staler one (OLD1), which gets evicted.
+    assert broker.unsubscribe_calls == [["OLD1"]]
+    assert broker.subscribe_calls == [["HOT"]]
+    assert loop._streaming_requested_symbols == {"HOT", "OLD2"}
+
+
+def test_reconcile_streaming_subscriptions_never_evicts_an_open_position_for_a_newer_watch_candidate():
+    broker = _StreamingBroker()
+    loop, _ = _watching_candidate_setup(broker)
+    loop.candidates.clear()
+    loop.config.streaming_subscription_budget = 1
+    t0 = _IN_HOURS_NOW
+
+    held = _candidate_in_state("HELD", CandidateState.MANAGING, t0)  # oldest, but an open position
+    newer_watch = _candidate_in_state("NEWER", CandidateState.WATCHING, t0 + timedelta(seconds=100))
+    loop._streaming_requested_symbols = {"HELD"}
+
+    loop._reconcile_streaming_subscriptions([held, newer_watch], t0 + timedelta(seconds=200))
+
+    assert broker.unsubscribe_calls == []  # HELD keeps its slot despite being the oldest
+    assert broker.subscribe_calls == []  # NEWER never gets a slot -- budget is full of a higher-priority symbol
+    assert loop._streaming_requested_symbols == {"HELD"}
+
+
+def test_reconcile_streaming_subscriptions_is_a_noop_when_nothing_is_eligible():
+    broker = _StreamingBroker()
+    loop, candidate = _watching_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.REJECTED)
+
+    loop._reconcile_streaming_subscriptions([candidate], _IN_HOURS_NOW)
+
+    assert broker.subscribe_calls == []
+    assert broker.unsubscribe_calls == []
+
+
+def test_reconcile_streaming_subscriptions_eviction_failure_keeps_the_symbol_counted_as_subscribed():
+    broker = _StreamingBroker(fail_unsubscribe_times=1)
+    loop, _ = _watching_candidate_setup(broker)
+    loop.candidates.clear()
+    loop.config.streaming_subscription_budget = 1
+    t0 = _IN_HOURS_NOW
+
+    old = _candidate_in_state("OLD", CandidateState.WATCHING, t0)
+    hot = _candidate_in_state("HOT", CandidateState.ARMED, t0)
+    loop._streaming_requested_symbols = {"OLD"}
+
+    loop._reconcile_streaming_subscriptions([old, hot], t0 + timedelta(seconds=5))
+
+    # Eviction failed, so OLD stays counted as subscribed -- but HOT (this
+    # tick's higher-priority winner) still gets subscribed regardless,
+    # rather than blocking its forward progress on a clean eviction. The
+    # budget is a soft target with headroom below Webull's real cap (see
+    # TradingLoopConfig.streaming_subscription_budget's docstring), so a
+    # transient one-tick overage here is an acceptable, self-correcting
+    # cost -- OLD gets evicted (or ages out via _prune_stale_candidates)
+    # on a future tick instead.
+    assert loop._streaming_requested_symbols == {"OLD", "HOT"}
+    assert broker.subscribe_calls == [["HOT"]]
+
+
+def test_process_all_candidates_prunes_before_reconciling_streaming_subscriptions():
+    broker = _StreamingBroker()
+    loop, _ = _watching_candidate_setup(broker)
+    loop.config.candidate_stale_after_seconds = 60.0
+    loop.candidates["TEST"] = _candidate_in_state("TEST", CandidateState.WATCHING, _IN_HOURS_NOW)
+    loop._streaming_requested_symbols.add("TEST")
+
+    loop._process_all_candidates(_IN_HOURS_NOW + timedelta(seconds=120))
+
+    assert "TEST" not in loop.candidates
+    assert broker.subscribe_calls == []  # never re-subscribed a candidate that was just pruned

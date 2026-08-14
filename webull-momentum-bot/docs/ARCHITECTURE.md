@@ -2896,6 +2896,132 @@ fixes:
    subscribe also self-heals on the very next tick -- a "short wait" in
    wall-clock terms (`poll_interval_seconds`), not a separate retry timer.
 
+## Zero-trades incident and the three-part scaling fix (2026-08-14)
+
+Real incident: on 2026-08-14 the bot attempted trades on LBGJ/HCTI/FRGT/
+ONFO/MGRX/FFAI/DARE/AKAN/FGI/AACG -- all of which failed confirmation, most
+at the identical 168s mark (`MIS faded`) despite `confirmation_window_seconds`
+being only 10s -- and never even flagged the day's actual biggest movers
+(CGTL, SURG, BOXL, VWAV, SXTC, STKH, CAPR), which the user traded manually
+for a 62% gain. The user's first read was that entry selection needed a
+"complete rehaul." Live-log diagnosis (VPS journalctl, since this session
+has no direct shell access -- see "VPS access model" elsewhere in this
+doc) told a different story: MIS/strategy selection wasn't the problem
+(LBGJ and AKAN were both correctly flagged, just far too slowly) -- this
+was an infrastructure/scaling bug with a five-step causal chain:
+
+1. **`self.candidates` had no removal path at all**, since this
+   codebase's very first version -- every symbol `BroadScanner` ever
+   surfaced stayed tracked and re-processed every tick for the rest of
+   the process's life. `curl /api/candidates` showed 184 tracked
+   candidates by mid-day.
+2. That blew past Webull's real streaming-subscribe cap. The
+   `_STREAMING_SUBSCRIBE_BATCH_SIZE` fix from 2026-08-13 (see above) was
+   based on a wrong diagnosis: it assumed the 100-symbol
+   `TOO_MANY_SYMBOLS` limit was per-call, so chunking each `.subscribe()`
+   call's argument list to <=100 would fix it. Live evidence the same day
+   contradicted that: a batch of only ~36 *new* symbols was still
+   rejected wholesale once the session's running total was already near
+   100. The limit is **cumulative across the whole MQTT session**
+   (`self._streaming_subscribed_symbols`), not a per-call argument-count
+   cap -- chunking the argument list never addressed the real ceiling at
+   all, it just avoided one specific way of hitting it.
+3. Every symbol that failed to stream fell back to REST polling (an
+   explicit, existing log line: `"these symbols fall back to REST polling
+   instead."`), which shares the same globally-paced, account-wide
+   `webull_limiter` used for order placement. 184 REST-polled symbols
+   saturated it: `grep -icE "rate limit|429|TOO_MANY_SYMBOLS|Batch
+   get_snapshots failed|get_snapshot failed"` against that day's log
+   counted 9,515 hits since 04:00.
+4. That saturation appears to have starved `BroadScanner`'s own
+   `BACKGROUND`-priority discovery calls out completely --
+   `grep -c "passed broad scanner filters"` (the discovery-success
+   transition reason string) returned **0** for the entire day. `CallPriority`
+   already let a single `CRITICAL` call win against a single `BACKGROUND`
+   call, but nothing bounded how long `BACKGROUND` could be starved when
+   `CRITICAL`/`NORMAL` traffic never let up -- strict priority order alone
+   provides no fairness guarantee over time, only per-contention ordering.
+5. The same degraded tick cadence explains LBGJ/AKAN's confirmation
+   windows taking 90-168s against a configured 10s: `_poll_confirmation`
+   runs once per candidate per tick, and ticks themselves were arriving
+   far slower than `poll_interval_seconds` under the rate-limit backlog.
+
+**Fix, three independent parts (see each config field's own docstring in
+`runtime/trading_loop.py` for the full reasoning):**
+
+1. **Candidate cleanup.** `TradingLoop._prune_stale_candidates`, called
+   once per tick from `_process_all_candidates` before that tick's
+   candidates snapshot is taken. Drops any candidate in `WATCHING`/
+   `HEATING_UP`/`REJECTED`/`COOLDOWN` (`_PRUNABLE_STATES`) whose
+   `last_updated_at` hasn't moved in over `candidate_stale_after_seconds`
+   (1 hour, not backtested). `last_updated_at` only advances on a real
+   state transition (`state_machine.transition`), never on a tick's score
+   recompute -- so this measures "how long has nothing interesting
+   happened for this symbol," not "how long since it was last polled," and
+   a name that cools off and reheats within a normal move's timeframe is
+   never lost. `ARMED`/`CONFIRMING`/`TRIGGERED` (actively working toward
+   an entry) and `ENTERED`/`MANAGING` (an open position) are never
+   eligible, regardless of age. A pruned symbol also has its streaming
+   subscription released via the new `unsubscribe_quotes` (below), freeing
+   a slot for a genuinely active candidate. See
+   `tests/test_trading_loop.py::test_prune_stale_candidates_drops_a_long_cold_watching_symbol`
+   and the `test_prune_stale_candidates_never_drops_an_active_or_open_position_state`
+   parametrized case.
+
+2. **A real, bounded streaming-subscription budget with priority
+   eviction**, replacing argument-list chunking as the actual fix for
+   point 2 above. `BrokerClient` gained a new required `unsubscribe_quotes`
+   method (mirroring `subscribe_quotes`'s required-but-may-raise-
+   `NotImplementedError` contract -- `PaperBrokerClient` raises it, exactly
+   like `subscribe_quotes`). `WebullBrokerClient.unsubscribe_quotes` calls
+   `DataStreamingClient.unsubscribe()`, chunked through the same batch size
+   as subscribe for the same defensive reason, and always drops local
+   bookkeeping (`_streaming_subscribed_symbols`, both caches) regardless of
+   whether the broker-side call succeeds -- a failed unsubscribe just
+   leaves a phantom subscription that self-corrects on a later attempt,
+   never a correctness problem for this process. `TradingLoop` replaced
+   its old uncapped per-tick subscribe sweep with
+   `_reconcile_streaming_subscriptions`: ranks every `_STREAMING_ELIGIBLE_STATES`
+   candidate by `_STREAMING_PRIORITY_TIERS` (`ENTERED`/`MANAGING` = 0,
+   `ARMED`/`CONFIRMING` = 1, `WATCHING`/`HEATING_UP` = 2, ties broken by
+   most-recently-updated first), keeps only the top
+   `streaming_subscription_budget` (90 -- 10 below Webull's confirmed
+   cumulative cap of 100, headroom against the eager single-symbol
+   subscribe calls made outside this reconcile pass at position-adoption
+   time), and evicts (`unsubscribe_quotes`) whatever fell out of that set
+   before subscribing whatever's newly in it. An open position can never
+   lose its slot to a WATCHING candidate, however stale the position or
+   however fresh the candidate. See
+   `tests/test_trading_loop.py::test_reconcile_streaming_subscriptions_evicts_lowest_priority_to_stay_within_budget`
+   and `::test_reconcile_streaming_subscriptions_never_evicts_an_open_position_for_a_newer_watch_candidate`,
+   and `tests/test_webull_broker_client.py`'s `test_unsubscribe_quotes_*` group.
+
+3. **An anti-starvation floor on the rate limiter**, fixing point 4 above.
+   `RateLimiter` gained `max_wait_seconds` (default 30s): normally the
+   next available slot still goes to the heap's priority-order minimum
+   exactly as before, but once ANY waiting ticket has been queued for at
+   least `max_wait_seconds`, `_select_winner` hands it the next slot
+   regardless of priority. This bounds every call's worst-case wait to
+   `max_wait_seconds`, so `BroadScanner`'s `BACKGROUND`-priority discovery
+   calls can never again be starved out entirely by sustained
+   `CRITICAL`/`NORMAL` trading traffic the way they appear to have been
+   for the whole of 2026-08-14 -- only per-contention ordering changes;
+   the underlying ~1 req/s pacing itself is untouched. A losing waiter's
+   condition-variable timeout was changed from unbounded (`None`, "wait
+   until notified") to `max_wait_seconds` specifically so the eventual
+   winner still wakes up to claim its slot even in the pathological case
+   where nothing else happens to notify it -- see
+   `RateLimiter.wait`'s inline comment for why that matters. See
+   `tests/test_retry.py::test_rate_limiter_bounds_background_starvation_under_sustained_critical_load`.
+
+**What deliberately was NOT changed:** the 10s `confirmation_window_seconds`
+introduced by the entry-selectivity rework (see above) is unchanged --
+diagnosis point 5 traced LBGJ/AKAN's 90-168s confirmation times to
+degraded tick cadence under rate-limit saturation, not to the window
+itself being too short; fixing the underlying saturation (parts 1-3
+above) is the correct fix, not loosening a value that was working as
+designed once the bot can actually tick at its configured cadence again.
+
 ## Structural vs. temporary disqualification
 
 Two conceptually different kinds of "this candidate isn't tradeable right

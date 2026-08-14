@@ -1306,9 +1306,11 @@ class _FakeDataStreamingClient:
         self.on_quotes_message = None
         self.connect_calls = 0
         self.subscribe_calls = []
+        self.unsubscribe_calls = []
         self.loop_stop_calls = 0
         self.disconnect_calls = 0
         self.raise_on_subscribe: Optional[Exception] = None
+        self.raise_on_unsubscribe: Optional[Exception] = None
         # Mirrors the REAL SDK's own (misleadingly-named) behavior,
         # confirmed live 2026-08-11: get_connect_success() flips True the
         # instant on_connect_success is *assigned* -- no network activity
@@ -1338,6 +1340,11 @@ class _FakeDataStreamingClient:
         self.subscribe_calls.append((list(symbols), category, list(sub_types)))
         if self.raise_on_subscribe is not None:
             raise self.raise_on_subscribe
+
+    def unsubscribe(self, symbols, category, sub_types):
+        self.unsubscribe_calls.append((list(symbols), category, list(sub_types)))
+        if self.raise_on_unsubscribe is not None:
+            raise self.raise_on_unsubscribe
 
     def loop_stop(self):
         self.loop_stop_calls += 1
@@ -1717,6 +1724,89 @@ def test_subscribe_quotes_does_not_reconnect_before_the_delay_elapses(monkeypatc
     assert stale_fake.disconnect_calls == 0
     assert len(instances) == 1  # still waiting on the original connection
     assert stale_fake.subscribe_calls == []
+
+
+# -- unsubscribe_quotes (2026-08-14, streaming-subscription-budget fix) ----
+# See TradingLoopConfig.streaming_subscription_budget's docstring for the
+# real incident this exists to fix: subscribe_quotes only ever grew
+# self._streaming_subscribed_symbols, with no way to release a symbol, so
+# once total tracked candidates passed Webull's real cumulative-per-
+# session subscribe cap, every later subscribe failed wholesale forever.
+
+def test_unsubscribe_quotes_releases_a_connected_symbol(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL", "MSFT"], lambda snap: None)
+    fake = instances[0]
+    fake.on_connect_success(fake, None, "session-1")
+    client._streaming_snapshot_cache["AAPL"] = "snapshot-placeholder"
+    client._streaming_quote_cache["AAPL"] = (1.0, 1.1, 10, 10)
+
+    client.unsubscribe_quotes(["AAPL"])
+
+    assert fake.unsubscribe_calls == [(["AAPL"], "US_STOCK", ["QUOTE", "SNAPSHOT"])]
+    assert client._streaming_subscribed_symbols == {"MSFT"}
+    assert "AAPL" not in client._streaming_snapshot_cache
+    assert "AAPL" not in client._streaming_quote_cache
+
+
+def test_unsubscribe_quotes_is_a_noop_for_a_symbol_never_subscribed(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+    fake.on_connect_success(fake, None, "session-1")
+
+    client.unsubscribe_quotes(["NEVER-SUBSCRIBED"])
+
+    assert fake.unsubscribe_calls == []
+    assert client._streaming_subscribed_symbols == {"AAPL"}
+
+
+def test_unsubscribe_quotes_skips_the_real_call_when_not_yet_connected(monkeypatch):
+    # A symbol optimistically recorded as subscribed while the connection
+    # is still coming up (see subscribe_quotes' docstring) has no real
+    # server-side subscription to release yet -- only local bookkeeping
+    # needs to be dropped.
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+    assert client._streaming_connected is False
+
+    client.unsubscribe_quotes(["AAPL"])
+
+    assert fake.unsubscribe_calls == []
+    assert client._streaming_subscribed_symbols == set()
+
+
+def test_unsubscribe_quotes_chunks_a_large_symbol_list(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    many_symbols = [f"SYM{i}" for i in range(150)]
+    client.subscribe_quotes(many_symbols, lambda snap: None)
+    fake = instances[0]
+    fake.on_connect_success(fake, None, "session-1")
+    fake.unsubscribe_calls.clear()
+
+    client.unsubscribe_quotes(many_symbols)
+
+    assert len(fake.unsubscribe_calls) == 2  # chunked at 100, same as subscribe
+    assert sum(len(call[0]) for call in fake.unsubscribe_calls) == 150
+    assert client._streaming_subscribed_symbols == set()
+
+
+def test_unsubscribe_quotes_drops_local_bookkeeping_even_when_the_broker_call_fails(monkeypatch):
+    instances = _patch_streaming_client_factory(monkeypatch)
+    client = _streaming_client()
+    client.subscribe_quotes(["AAPL"], lambda snap: None)
+    fake = instances[0]
+    fake.on_connect_success(fake, None, "session-1")
+    fake.raise_on_unsubscribe = RuntimeError("simulated unsubscribe failure")
+
+    client.unsubscribe_quotes(["AAPL"])  # must not raise
+
+    assert client._streaming_subscribed_symbols == set()
 
 
 def test_disconnect_stops_the_streaming_client():
