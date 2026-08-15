@@ -32,6 +32,24 @@
 <main>
 
   <section class="panel full-width">
+    <h2>Ticker Scanner <button class="info-btn" data-info="score-history" aria-label="What is this?">i</button></h2>
+    <p class="hint">Scans any ticker through the broad scanner's structural gates right now and adds it to the live candidate list if it passes -- no need to wait for the next full universe rescan.</p>
+    <form id="score-history-form" class="inline-form">
+      <input type="text" id="score-history-symbol" placeholder="Symbol (e.g. GME)" autocomplete="off">
+      <button type="submit">Scan &amp; Add</button>
+    </form>
+    <div class="status-bar" id="scan-result"></div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Time</th><th>Score</th><th>Weights Version</th><th>Top Contributing Components (raw score)</th></tr>
+        </thead>
+        <tbody id="score-history-body"><tr class="empty-row"><td colspan="4">Enter a symbol above to scan it</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel full-width">
     <div class="panel-header-row">
       <h2>Chart</h2>
       <button class="guide-btn" id="chart-toggle-btn" aria-expanded="false">Show Chart</button>
@@ -111,24 +129,6 @@
           <tr><th>Component</th><th>Weight</th><th id="score-breakdown-th-raw">Avg Raw Score</th><th id="score-breakdown-th-contribution">Avg Weighted Contribution</th><th id="score-breakdown-th-pct">% of Avg Score</th><th id="score-breakdown-th-samples">Samples</th></tr>
         </thead>
         <tbody id="score-breakdown-body"></tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class="panel full-width">
-    <h2>Ticker Scanner <button class="info-btn" data-info="score-history" aria-label="What is this?">i</button></h2>
-    <p class="hint">Scans any ticker through the broad scanner's structural gates right now and adds it to the live candidate list if it passes -- no need to wait for the next full universe rescan.</p>
-    <form id="score-history-form" class="inline-form">
-      <input type="text" id="score-history-symbol" placeholder="Symbol (e.g. GME)" autocomplete="off">
-      <button type="submit">Scan &amp; Add</button>
-    </form>
-    <div class="status-bar" id="scan-result"></div>
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr><th>Time</th><th>Score</th><th>Weights Version</th><th>Top Contributing Components (raw score)</th></tr>
-        </thead>
-        <tbody id="score-history-body"><tr class="empty-row"><td colspan="4">Enter a symbol above to scan it</td></tr></tbody>
       </table>
     </div>
   </section>
