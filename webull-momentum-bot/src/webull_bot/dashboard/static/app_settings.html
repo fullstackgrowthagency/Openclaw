@@ -31,18 +31,18 @@
       not a shared one. Start in <strong>sandbox</strong> mode.
     </p>
     <div class="status-bar" id="credential-status"></div>
-    <form id="credential-form">
+    <form id="credential-form" autocomplete="off">
       <label class="settings-field">
         <span>App Key</span>
-        <input type="text" id="cred-app-key" autocomplete="off" required>
+        <input type="text" id="cred-app-key" name="webull-app-key" autocomplete="off" required>
       </label>
       <label class="settings-field">
         <span>App Secret</span>
-        <input type="password" id="cred-app-secret" autocomplete="off" required>
+        <input type="password" id="cred-app-secret" name="webull-app-secret" autocomplete="new-password" required>
       </label>
       <label class="settings-field">
         <span>Account ID <span class="muted">(from account_v2.get_account_list -- see your Webull developer dashboard)</span></span>
-        <input type="text" id="cred-account-id" autocomplete="off" required>
+        <input type="text" id="cred-account-id" name="webull-account-id" autocomplete="off" required>
       </label>
       <label class="settings-field">
         <span>Trading mode</span>
