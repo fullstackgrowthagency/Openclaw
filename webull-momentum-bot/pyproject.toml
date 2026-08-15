@@ -13,6 +13,10 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "yfinance>=0.2",
+    "bcrypt>=4.0",
+    "itsdangerous>=2.1",
+    "cryptography>=42.0",
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Broker Account - Day Trading Quant</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <div class="header-top">
+    <a href="/app"><img src="/logo.png" alt="FS Trading" class="header-logo"></a>
+    <div class="header-top-actions">
+      <a class="header-link" href="/app">Back to dashboard</a>
+      <a class="header-link" href="#" id="logout-link">Log out</a>
+    </div>
+  </div>
+  <div class="header-bottom">
+    <h1>Broker Account</h1>
+  </div>
+</header>
+
+<main>
+
+  <section class="panel">
+    <h2>Connect Your Webull Account</h2>
+    <p class="hint">
+      Your own Webull OpenAPI app key/secret -- kept encrypted at rest, never shown back to you
+      in full once saved. This is what runs your trades under your own account's rate limit,
+      not a shared one. Start in <strong>sandbox</strong> mode.
+    </p>
+    <div class="status-bar" id="credential-status"></div>
+    <form id="credential-form">
+      <label class="settings-field">
+        <span>App Key</span>
+        <input type="text" id="cred-app-key" autocomplete="off" required>
+      </label>
+      <label class="settings-field">
+        <span>App Secret</span>
+        <input type="password" id="cred-app-secret" autocomplete="off" required>
+      </label>
+      <label class="settings-field">
+        <span>Account ID <span class="muted">(from account_v2.get_account_list -- see your Webull developer dashboard)</span></span>
+        <input type="text" id="cred-account-id" autocomplete="off" required>
+      </label>
+      <label class="settings-field">
+        <span>Base URL</span>
+        <input type="text" id="cred-base-url" value="api.sandbox.webull.com" autocomplete="off" required>
+      </label>
+      <label class="settings-field">
+        <span>Trading mode</span>
+        <select id="cred-trading-mode">
+          <option value="sandbox" selected>Sandbox (fake money)</option>
+          <option value="paper">Paper (local simulator)</option>
+          <option value="live">Live (real money)</option>
+        </select>
+      </label>
+      <div class="status-bar" id="credential-result"></div>
+      <div class="settings-actions">
+        <button type="button" class="secondary" id="credential-test-btn">Test Connection</button>
+        <button type="button" class="danger" id="credential-delete-btn">Disconnect</button>
+        <button type="submit">Save &amp; Verify</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Live Trading</h2>
+    <p class="hint">
+      Off by default. Turning this on routes real orders to a real account with real money --
+      only available once your connection above is verified. This dashboard's own risk
+      settings (stop-loss, position sizing, daily loss limit, kill switch) still apply exactly
+      the same in live mode as they do in sandbox.
+    </p>
+    <div class="status-bar" id="live-trading-status"></div>
+    <label class="settings-field settings-field-checkbox">
+      <span>Enable live trading for my account</span>
+      <input type="checkbox" id="live-trading-toggle" disabled>
+    </label>
+    <div class="status-bar" id="live-trading-result"></div>
+  </section>
+
+</main>
+
+<footer>Trading involves risk, especially in live mode. Verify your connection in sandbox first.</footer>
+
+<div class="info-modal-overlay" id="live-trading-confirm-overlay">
+  <div class="info-modal-card" role="dialog" aria-modal="true">
+    <div class="info-modal-header">
+      <h3 style="color: var(--red);">Enable Live Trading?</h3>
+      <button class="info-modal-close" id="live-trading-confirm-close" aria-label="Close">&times;</button>
+    </div>
+    <p>This routes real orders to your real Webull account with real money, using the risk settings currently configured on your dashboard. This is not reversible for any order that has already filled.</p>
+    <div class="status-bar" id="live-trading-confirm-result"></div>
+    <div class="settings-actions">
+      <button type="button" class="secondary" id="live-trading-confirm-cancel">Cancel</button>
+      <button type="button" class="danger" id="live-trading-confirm-yes">Yes, enable live trading</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app_settings.js"></script>
+</body>
+</html>

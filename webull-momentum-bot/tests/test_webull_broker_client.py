@@ -14,25 +14,23 @@ import pytest
 
 from webull_bot.brokers.webull import retry as retry_module
 from webull_bot.brokers.webull.client import WebullBrokerClient
+from webull_bot.brokers.webull.retry import RateLimiter
 from webull_bot.enums import OrderSide, OrderStatus, OrderType, TimeInForce, TradeSide
 from webull_bot.models import MarketSnapshot, Order, TickRecord
 
 
 @pytest.fixture(autouse=True)
-def _no_rate_limit_delay(monkeypatch):
-    """Every WebullBrokerClient method that talks to the SDK now goes
-    through the shared, real, 1.0s-interval `retry.webull_limiter`
-    singleton (see client.py's 2026-08-11 "Priority-tiered rate limiting"
-    note) -- fine and correct for production, but these tests fake the SDK
-    client entirely, so waiting out real pacing here would only slow the
-    suite down for no reason (and, since it's a process-wide singleton,
-    make this file's timing depend on whatever other tests happened to run
-    before it). Patch the interval to 0 for the duration of each test
-    instead of swapping in a different limiter instance -- these tests
-    call `client._require_trade_client()`/etc. directly, with no way to
-    inject a substitute limiter into client.py's hardcoded
-    `call_with_retry(..., priority=...)` call sites."""
-    monkeypatch.setattr(retry_module.webull_limiter, "min_interval_seconds", 0.0)
+def _no_rate_limit_delay():
+    """Every WebullBrokerClient method that talks to the SDK goes through
+    a real RateLimiter (client.py's own self._limiter, one per instance
+    since the 2026-08-15 multi-tenant conversion -- see __init__) -- fine
+    and correct for production, but these tests fake the SDK client
+    entirely, so waiting out real pacing here would only slow the suite
+    down for no reason. _client() below constructs that per-instance
+    limiter with min_interval_seconds=0.0 for exactly this reason; this
+    fixture is now a no-op placeholder kept so `autouse` call sites/history
+    don't need touching, but real zero-delay setup lives in _client()."""
+    yield
 
 
 def _client() -> WebullBrokerClient:
@@ -44,6 +42,13 @@ def _client() -> WebullBrokerClient:
     # reassign client.settings themselves, which simply overwrites this.
     client = WebullBrokerClient.__new__(WebullBrokerClient)
     client.settings = SimpleNamespace(webull_support_trading_session="CORE")
+    # Zero-interval instance limiter (2026-08-15) -- __init__ is bypassed
+    # above, so this must be set explicitly for every place_order/
+    # place_oco_bracket/place_bracket_entry .exclusive() call and every
+    # call_with_retry(..., limiter=self._limiter,...) call site to work at
+    # all, and 0.0 (not the real 1.0s) so these hermetic tests don't pay
+    # real pacing delay against a limiter nothing else shares.
+    client._limiter = RateLimiter(min_interval_seconds=0.0)
     return client
 
 
@@ -902,13 +907,25 @@ def test_place_order_uses_critical_priority(monkeypatch):
 
 def test_place_order_never_overlaps_across_different_symbols():
     # Real request (2026-08-13): orders for two or more different symbols
-    # must never be placed at the broker at the same time. Already
-    # guaranteed by webull_limiter.exclusive() being a single process-wide
-    # lock -- not scoped per symbol, per client instance, or per thread --
-    # so any two place_order calls anywhere in the process serialize
-    # regardless of which symbol they're for. Proven here directly at the
-    # WebullBrokerClient level (not just the abstract RateLimiter level --
-    # see test_retry.py's test_exclusive_serializes_concurrent_holders).
+    # on the SAME account must never be placed at the broker at the same
+    # time. Guaranteed by self._limiter.exclusive() -- not scoped per
+    # symbol or per thread, so any two place_order calls through the SAME
+    # WebullBrokerClient instance serialize regardless of which symbol
+    # they're for. Proven here directly at the WebullBrokerClient level
+    # (not just the abstract RateLimiter level -- see test_retry.py's
+    # test_exclusive_serializes_concurrent_holders).
+    #
+    # 2026-08-15 UPDATE (multi-tenant conversion): the lock moved from a
+    # single process-wide `webull_limiter` singleton to one instance PER
+    # WebullBrokerClient (see client.py's __init__) -- correct, since each
+    # user's own client now paces against their own account's rate limit,
+    # not a shared one. This test uses ONE client instance across all
+    # three threads (matching real production: TradingLoop builds exactly
+    # one WebullBrokerClient per account and every symbol for that account
+    # goes through it), which is exactly the scope self._limiter needs to
+    # cover -- unlike the old singleton, it's no longer expected (or
+    # correct) for two DIFFERENT client instances/accounts to serialize
+    # against each other at all.
     import threading
     import time
 
@@ -931,13 +948,14 @@ def test_place_order_never_overlaps_across_different_symbols():
     class _FakeTradeClient:
         order_v3 = _SlowOrderV3()
 
+    client = _client()
+    client.settings = SimpleNamespace(
+        trading_mode=None, is_live_trading_authorized=lambda: True, webull_support_trading_session="CORE",
+    )
+    client.account_id = "test-account"
+    client._require_trade_client = lambda: _FakeTradeClient()
+
     def _place(symbol: str) -> None:
-        client = _client()
-        client.settings = SimpleNamespace(
-            trading_mode=None, is_live_trading_authorized=lambda: True, webull_support_trading_session="CORE",
-        )
-        client.account_id = "test-account"
-        client._require_trade_client = lambda: _FakeTradeClient()
         order = Order(symbol=symbol, side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=1)
         client.place_order(order)
 

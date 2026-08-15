@@ -169,6 +169,19 @@ class Settings:
         default_factory=lambda: os.environ.get("WEBULL_SUPPORT_TRADING_SESSION", "CORE")
     )
 
+    # --- Multi-tenant auth (2026-08-15). Both required once the dashboard's
+    # auth/broker-credential features are wired in (see auth/dependencies.py
+    # and auth/crypto.py) -- deliberately no baked-in default, so a
+    # deployment that forgets to set these fails loudly at startup instead
+    # of silently signing sessions/encrypting credentials with a
+    # predictable value. ---
+    session_secret_key: str = field(
+        default_factory=lambda: os.environ.get("SESSION_SECRET_KEY", "")
+    )
+    credential_encryption_key: str = field(
+        default_factory=lambda: os.environ.get("CREDENTIAL_ENCRYPTION_KEY", "")
+    )
+
     def is_live_trading_authorized(self) -> bool:
         """
         The single gate every code path must consult before an order can

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign up - Day Trading Quant</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <div class="header-top">
+    <a href="/"><img src="/logo.png" alt="FS Trading" class="header-logo"></a>
+  </div>
+</header>
+
+<main class="auth-main">
+  <section class="panel auth-card">
+    <h2>Create your account</h2>
+    <p class="hint">You'll connect your own Webull API key from the dashboard after signing up.</p>
+    <form id="signup-form">
+      <label class="settings-field">
+        <span>Email</span>
+        <input type="email" id="signup-email" autocomplete="email" required>
+      </label>
+      <label class="settings-field">
+        <span>Password <span class="muted">(at least 8 characters)</span></span>
+        <input type="password" id="signup-password" autocomplete="new-password" minlength="8" required>
+      </label>
+      <div class="status-bar" id="signup-result"></div>
+      <div class="settings-actions">
+        <button type="submit">Sign up</button>
+      </div>
+    </form>
+    <p class="hint auth-switch">Already have an account? <a href="/login">Log in</a></p>
+  </section>
+</main>
+
+<footer>Trading involves risk. Past performance of any strategy is not a guarantee of future results.</footer>
+
+<script src="/auth.js"></script>
+</body>
+</html>

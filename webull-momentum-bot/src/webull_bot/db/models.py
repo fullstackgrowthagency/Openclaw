@@ -105,6 +105,15 @@ class ScannerEvent(Base):
     __tablename__ = "scanner_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Nullable (2026-08-15 multi-tenant conversion): scanning/discovery now
+    # happens per-user (one TradingLoop per connected account -- see
+    # runtime/loop_registry.py), so this is who that discovery belongs to.
+    # Nullable rather than NOT NULL because existing single-tenant rows
+    # (written before this column existed) have no user to backfill to
+    # automatically -- see docs/ARCHITECTURE.md's "Multi-tenant auth"
+    # section for the production cutover that assigns them to the
+    # operator's own account.
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
     event_type: Mapped[str] = mapped_column(String(64))  # e.g. "discovered", "state_transition"
@@ -117,6 +126,9 @@ class MomentumScoreRecord(Base):
     __tablename__ = "momentum_scores"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # See ScannerEvent.user_id's comment -- same nullable-for-backfill
+    # rationale.
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
     score: Mapped[float] = mapped_column(Float)
@@ -155,6 +167,11 @@ class OrderRecord(Base):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # See ScannerEvent.user_id's comment -- same nullable-for-backfill
+    # rationale. client_order_id stays the natural key for the upsert in
+    # record_order (UUIDs, so no realistic cross-user collision), but
+    # every lookup is still scoped by user_id too -- see repository.py.
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     client_order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
@@ -206,6 +223,9 @@ class TradeRecord(Base):
     __tablename__ = "trades"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # See ScannerEvent.user_id's comment -- same nullable-for-backfill
+    # rationale.
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     strategy_name: Mapped[str] = mapped_column(String(64))
     side: Mapped[str] = mapped_column(String(16))
@@ -265,6 +285,50 @@ class PerformanceStat(Base):
     metadata_json: Mapped[dict | None] = mapped_column(_json_type(), nullable=True)
 
 
+class User(Base):
+    """A dashboard account (2026-08-15 multi-tenant conversion). One user
+    connects one Webull account (see BrokerCredential) and gets their own
+    TradingLoop/rate-limit budget -- see runtime/loop_registry.py.
+    password_hash is set at signup (auth/security.py); there is no email
+    verification or self-serve password reset in v1 -- see auth/routes.py's
+    docstring for why."""
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class BrokerCredential(Base):
+    """A user's own Webull API key/secret, encrypted at rest (see
+    auth/crypto.py) -- this is what gives each user their own independent
+    Webull rate-limit budget instead of sharing the operator's. `broker`
+    exists to leave room for a non-Webull broker later without a schema
+    change, though only "webull" is used today. `live_trading_enabled` is
+    the per-user self-serve live-trading toggle (the dashboard's Connect
+    Broker Account panel) -- Settings.is_live_trading_authorized()'s
+    process-wide env-var gate still applies underneath as a second,
+    deployment-level safety layer; this column is the per-user layer on
+    top of it, not a replacement for it."""
+    __tablename__ = "broker_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    broker: Mapped[str] = mapped_column(String(32), default="webull")
+    app_key_encrypted: Mapped[str] = mapped_column(Text)
+    app_secret_encrypted: Mapped[str] = mapped_column(Text)
+    account_id_encrypted: Mapped[str] = mapped_column(Text)
+    base_url: Mapped[str] = mapped_column(String(255))
+    trading_mode: Mapped[str] = mapped_column(String(16), default="sandbox")
+    live_trading_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_verify_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class MomentumEventRecord(Base):
     """
     Traded AND non-traded momentum events, with forward-looking outcome
@@ -274,6 +338,9 @@ class MomentumEventRecord(Base):
     __tablename__ = "momentum_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # See ScannerEvent.user_id's comment -- same nullable-for-backfill
+    # rationale.
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     trigger_reason: Mapped[str] = mapped_column(String(128))

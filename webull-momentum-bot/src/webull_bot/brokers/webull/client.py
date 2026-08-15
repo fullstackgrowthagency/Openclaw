@@ -112,9 +112,9 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     get_snapshot concurrently across many symbols at once.
   - Priority-tiered rate limiting (2026-08-11): every Webull call this
     client makes -- not just market_data.* -- now goes through the same
-    shared, priority-aware `retry.webull_limiter` (see retry.py's
-    docstring for the CRITICAL/NORMAL/BACKGROUND tiers and which call
-    sites use which). Previously order_v3.*/account_v2.* calls
+    priority-aware RateLimiter (see retry.py's docstring for the
+    CRITICAL/NORMAL/BACKGROUND tiers and which call sites use which).
+    Previously order_v3.*/account_v2.* calls
     (place_order, cancel_order, get_order_status, get_positions,
     get_account_balance, ...) had NO rate-limit protection at all despite
     sharing this exact same account-wide budget -- a burst of market-data
@@ -123,6 +123,15 @@ Verified live against the sandbox host (api.sandbox.webull.com) on 2026-08-08:
     calls win contention over discovery/resistance-refresh traffic
     instead of queuing behind it in plain arrival order, was the whole
     point of adding priority in the first place.
+
+    2026-08-15 UPDATE (multi-tenant conversion): this limiter moved from
+    a module-level singleton shared by every account to one instance PER
+    WebullBrokerClient -- see __init__'s self._limiter -- since multiple
+    accounts now run concurrently in one process and each needs its own
+    independent Webull rate-limit budget, not a shared one that would let
+    one account's traffic throttle another's. Every call site below
+    still passes CallPriority exactly the same way; only which limiter
+    instance paces them changed.
 
 Safety (unchanged from the skeleton this replaces):
   - `WebullBrokerClient.is_live` reflects the *configured* trading mode.
@@ -156,7 +165,7 @@ from ...enums import OrderSide, OrderStatus, OrderType, TimeInForce, TradeSide
 from ...interfaces.broker import BrokerClient
 from ...market_hours import is_within_core_trading_hours
 from ...models import Fill, MarketSnapshot, Order, Position, TickRecord
-from .retry import CallPriority, call_with_retry, webull_limiter
+from .retry import CallPriority, RateLimiter, call_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +388,18 @@ class WebullBrokerClient(BrokerClient):
             )
         self.settings = settings
         self.account_id = settings.webull.account_id
+        # One RateLimiter PER CLIENT INSTANCE (2026-08-15 multi-tenant
+        # conversion), not the module-level `retry.webull_limiter`
+        # singleton this used to share with every other account in the
+        # process -- each user connects their own Webull app key/secret
+        # (see auth/broker_credential_routes.py), which Webull paces
+        # against its OWN ~1 req/s account-wide ceiling (see retry.py's
+        # docstring for how that figure was measured), independent of
+        # every other account's traffic. 1.0s matches that measured rate,
+        # same as the old singleton's default. See this module's docstring
+        # for the fuller history of why every call below is paced through
+        # this at all.
+        self._limiter = RateLimiter(min_interval_seconds=1.0)
         self._api_client: Optional[ApiClient] = None
         self._trade_client: Optional[TradeClient] = None
         self._data_client: Optional[DataClient] = None
@@ -502,6 +523,7 @@ class WebullBrokerClient(BrokerClient):
         response = call_with_retry(
             lambda: self._require_trade_client().account_v2.get_account_balance(self.account_id),
             priority=CallPriority.NORMAL,
+            limiter=self._limiter,
         )
         response.raise_for_status()
         body = response.json()
@@ -584,6 +606,7 @@ class WebullBrokerClient(BrokerClient):
         response = call_with_retry(
             lambda: self._require_trade_client().account_v2.get_account_position(self.account_id),
             priority=CallPriority.CRITICAL,
+            limiter=self._limiter,
         )
         response.raise_for_status()
         positions = []
@@ -705,6 +728,7 @@ class WebullBrokerClient(BrokerClient):
                 [symbol], Category.US_STOCK.name, extend_hour_required=True,
             ),
             priority=CallPriority.NORMAL,
+            limiter=self._limiter,
         )
         response.raise_for_status()
         rows = response.json()
@@ -765,6 +789,7 @@ class WebullBrokerClient(BrokerClient):
                     chunk, Category.US_STOCK.name, extend_hour_required=True,
                 ),
                 priority=priority,
+                limiter=self._limiter,
             )
             response.raise_for_status()
             for row in response.json():
@@ -832,6 +857,7 @@ class WebullBrokerClient(BrokerClient):
                 symbol, Category.US_STOCK.name, timespan, count=str(lookback)
             ),
             priority=CallPriority.NORMAL,
+            limiter=self._limiter,
         )
         response.raise_for_status()
         return self._snapshots_from_bars(symbol, response.json())
@@ -901,6 +927,7 @@ class WebullBrokerClient(BrokerClient):
                 trading_sessions=["PRE", "RTH", "ATH"],
             ),
             priority=priority,
+            limiter=self._limiter,
         )
         response.raise_for_status()
         return response.json()
@@ -1519,7 +1546,7 @@ class WebullBrokerClient(BrokerClient):
         # nothing to catch it (see this module's docstring's "Priority
         # tiers" note and retry.py's for the fuller history).
         #
-        # webull_limiter.exclusive(): real incident (CYCU/SCKT/BIVI,
+        # self._limiter.exclusive(): real incident (CYCU/SCKT/BIVI,
         # 2026-08-12) showed CRITICAL priority alone isn't enough once
         # SEVERAL genuinely CRITICAL calls are in flight simultaneously
         # (a stuck exit retry, a bracket-attach retry, reconcile's
@@ -1532,10 +1559,11 @@ class WebullBrokerClient(BrokerClient):
         # other-order traffic for the same slots. See RateLimiter.
         # exclusive's docstring.
         payload = self._order_payload(order)
-        with webull_limiter.exclusive():
+        with self._limiter.exclusive():
             response = call_with_retry(
                 lambda: self._require_trade_client().order_v3.place_order(self.account_id, [payload]),
                 priority=CallPriority.CRITICAL,
+                limiter=self._limiter,
             )
         response.raise_for_status()
 
@@ -1600,14 +1628,15 @@ class WebullBrokerClient(BrokerClient):
 
         # CRITICAL priority: attaching/replacing a protective stop+target
         # bracket is a real trading action protecting an open position --
-        # same tier as place_order above. Same webull_limiter.exclusive()
+        # same tier as place_order above. Same self._limiter.exclusive()
         # rationale as place_order too -- see that method's comment.
-        with webull_limiter.exclusive():
+        with self._limiter.exclusive():
             response = call_with_retry(
                 lambda: self._require_trade_client().order_v3.place_order(
                     self.account_id, [stop_payload, target_payload]
                 ),
                 priority=CallPriority.CRITICAL,
+                limiter=self._limiter,
             )
         response.raise_for_status()
 
@@ -1698,10 +1727,11 @@ class WebullBrokerClient(BrokerClient):
         # this client makes (it's now BOTH the entry and its protection at
         # once), so it must never compete with concurrent discovery/
         # reconcile/other-order traffic for the same rate-limit slots.
-        with webull_limiter.exclusive():
+        with self._limiter.exclusive():
             response = call_with_retry(
                 lambda: self._require_trade_client().order_v3.place_order(self.account_id, payloads),
                 priority=CallPriority.CRITICAL,
+                limiter=self._limiter,
             )
         response.raise_for_status()
 
@@ -1736,6 +1766,7 @@ class WebullBrokerClient(BrokerClient):
         response = call_with_retry(
             lambda: self._require_trade_client().order_v3.cancel_order(self.account_id, broker_order_id),
             priority=CallPriority.CRITICAL,
+            limiter=self._limiter,
         )
         response.raise_for_status()
 
@@ -1753,6 +1784,7 @@ class WebullBrokerClient(BrokerClient):
         response = call_with_retry(
             lambda: self._require_trade_client().order_v3.replace_order(self.account_id, [modify_payload]),
             priority=CallPriority.NORMAL,
+            limiter=self._limiter,
         )
         response.raise_for_status()
         return self.get_order_status(broker_order_id)
@@ -1792,6 +1824,7 @@ class WebullBrokerClient(BrokerClient):
         response = call_with_retry(
             lambda: self._require_trade_client().order_v3.get_order_detail(self.account_id, broker_order_id),
             priority=CallPriority.CRITICAL,
+            limiter=self._limiter,
         )
         response.raise_for_status()
         body = response.json()
@@ -1810,6 +1843,7 @@ class WebullBrokerClient(BrokerClient):
                 self.account_id, start_date=start_date
             ),
             priority=CallPriority.NORMAL,
+            limiter=self._limiter,
         )
         response.raise_for_status()
         fills = []
@@ -1887,6 +1921,7 @@ class WebullBrokerClient(BrokerClient):
         response = call_with_retry(
             lambda: self._require_trade_client().order_v3.get_order_open(self.account_id),
             priority=priority,
+            limiter=self._limiter,
         )
         response.raise_for_status()
         body = response.json()

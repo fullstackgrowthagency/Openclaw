@@ -4273,3 +4273,228 @@ kill-switch flatten runs first, empties `self._positions`, and the
 auto-flatten check that follows finds nothing left to do -- a closed
 position is never attributed to the wrong `ExitReason` by a second flatten
 attempt re-processing it.
+
+## Multi-tenant auth (2026-08-15)
+
+**Motivation.** Originally single-tenant: one `.env` file's Webull app
+key/secret, one `TradingLoop`, one dashboard with zero authentication.
+The user asked for multiple people to be able to sign up, log in, and
+each connect their OWN Webull API key through the dashboard rather than
+sharing the operator's -- both a product requirement (real user accounts)
+and a scaling mechanism: Webull's ~1 req/s rate ceiling (see
+"Performance/rate-limit rehaul" above) is per-account, so giving every
+user their own key gives every user their own independent rate-limit
+budget instead of all users contending for one shared budget.
+
+**Design decisions made explicitly with the user before implementation:**
+live trading is self-serve (a verified user can flip their own account
+into live mode from the dashboard, no per-account operator approval
+step -- though the operator's own deployment-wide
+`LIVE_TRADING_ENABLED`/`LIVE_TRADING_CONFIRMATION` gate, see "Safety"
+above, still has to also be on for ANY live order to route at all --
+see `auth/broker_credential_routes.py`'s `_verify`/`build_settings_for_user`
+docstrings for exactly how the two layers combine); no email
+infrastructure in v1 (signup creates an account directly, no
+verification email; password resets for the small early user base are a
+manual VPS-shell operation, not a self-serve "forgot password" flow);
+market/reference data (`stocks`, `float_history`, `market_observations`,
+`strategy_versions`) stays a single shared/global table across every
+user, not duplicated per account, since it's facts about the market, not
+about a specific user, and keeping it shared avoids redundant per-user
+API calls for the same symbol's float data.
+
+**Auth mechanism: signed-cookie sessions, not JWT.** This is a
+same-origin app with a vanilla-JS frontend and no separate API domain or
+mobile client, so JWT's cross-domain/stateless benefits don't apply and
+just add cost (token storage in JS-reachable `localStorage`, hand-rolled
+expiry/refresh). `dashboard/app.py`'s `create_app` adds Starlette's
+`SessionMiddleware` (a signed httpOnly cookie, 30-day fixed expiry --
+re-login after, no sliding window or DB-backed revocable session table,
+since the user base is small enough that "logout everywhere" isn't a v1
+requirement) whenever `Settings.session_secret_key` is set. `auth/routes.py`
+(`/api/auth/signup`, `/login`, `/logout`, `/me`) and `auth/dependencies.py`
+(`build_get_current_user`, a factory the same DI pattern as `create_app`
+itself uses, so tests can inject an in-memory SQLite session factory) are
+the whole mechanism. Passwords are hashed via the `bcrypt` library
+directly (`auth/security.py`), not `passlib` -- `passlib` 1.7.4 (its last
+release) is unmaintained and its bcrypt backend crashes outright against
+`bcrypt>=4.1` (removed the `__about__` attribute passlib's version probe
+reads), discovered while wiring this up.
+
+**Per-user Webull credential storage, encrypted at rest.** New `User`
+and `BrokerCredential` tables (`db/models.py`) -- one verified
+`BrokerCredential` row per user, `app_key`/`app_secret`/`account_id`
+encrypted via `cryptography.fernet.Fernet` (`auth/crypto.py`), keyed by
+a new `CREDENTIAL_ENCRYPTION_KEY` env var. Fernet (not a full KMS/Vault
+integration) is the deliberately right-sized choice for a single small
+VPS with one operator -- the actual requirement is "not plaintext at
+rest, tamper-evident, rotatable," which Fernet gives directly, and a KMS
+would add real operational surface (a second service, IAM policy,
+network dependency) for no benefit at this scale.
+`auth/broker_credential_routes.py`'s `POST /api/broker-credential`
+attempts a real, cheap Webull call (`get_account_equity`) with the
+submitted credentials before persisting success -- `last_verified_at`
+only gets set on an actual confirmed connection, never on "the fields
+were non-empty." A failed verification still stores the (encrypted) row
+so `POST /api/broker-credential/test` can retry without the user
+re-typing their secret, but returns 400 and leaves `last_verified_at`
+unset so nothing downstream ever treats it as a working connection.
+`trading_mode="live"` can never verify through this endpoint by design:
+`WebullBrokerClient.__init__` calls
+`Settings.require_non_live_or_authorized()`, which the throwaway
+verification `Settings` object never satisfies -- the deployment-wide
+gate is still doing its job underneath the per-user
+`live_trading_enabled` column, not being bypassed by it. The dashboard
+page (`/app/settings`, `static/app_settings.html`/`app_settings.js`)
+gates its own live-trading checkbox behind a confirmation modal whose
+"Yes, enable" button sends `confirm: true` -- the self-serve equivalent
+of `config.py`'s typed `LIVE_TRADING_CONFIRMATION` phrase, a deliberate
+second explicit signal distinct from the enabled flag itself, required
+only to turn live trading ON, never to turn it off.
+
+**Process model: one `TradingLoop` thread per user, in a shared
+process** (`runtime/loop_registry.py`'s `LoopRegistry`, a thread-safe
+`{user_id: TradingLoop}` map), not one OS process per user. Chosen over a
+subprocess-per-user model because `TradingLoop`/`RiskEngine`/
+`PositionManager`/`WebullBrokerClient` are already fully separate object
+graphs per `build_trading_loop()` call -- most of subprocess-level
+isolation is already free -- while a real subprocess split would require
+rewriting `dashboard/app.py`'s entire live-state read path (today it
+reads a `TradingLoop`'s in-memory attributes directly, no DB round-trip)
+into cross-process RPC, a much bigger change than justified running on
+one small VPS. `LoopRegistry.start_for_user`/`stop_for_user` mirror
+`scripts/run_dashboard.py`'s original single-loop daemon-thread pattern
+exactly, just keyed per user; a crash inside one user's `run_forever()`
+is caught and logged loudly (`logger.exception`, not
+`threading.Thread`'s default silent-stderr-then-die) and only removes
+that one user's entry from the registry -- every other user's loop is
+unaffected, confirmed in `tests/test_loop_registry.py`.
+`auth/broker_credential_routes.py`'s mutation endpoints (verify success,
+the live-trading toggle, disconnect) call `LoopRegistry.stop_for_user`/
+`start_for_user` directly so a credential change takes effect
+immediately, not only on the next process restart;
+`scripts/run_dashboard.py`'s own startup sweep
+(`_start_multi_tenant`) additionally starts a loop for every user who
+already has a verified `BrokerCredential` from a previous run.
+
+**Per-user rate limiter.** `WebullBrokerClient` used to pace every call
+through `retry.webull_limiter`, a true module-level singleton shared by
+the whole process. Now each `WebullBrokerClient` instance owns its own
+`RateLimiter` (`self._limiter`, set in `__init__`) -- correct once
+multiple Webull accounts run concurrently in one process, since each
+account's own ~1 req/s ceiling must not throttle any other account's
+calls. All ~18 call sites in `brokers/webull/client.py` (every
+`call_with_retry(...)` call, plus the 3 `place_order`/`place_oco_bracket`/
+`place_bracket_entry` `.exclusive()` blocks) were swept to pass
+`limiter=self._limiter` explicitly instead of relying on
+`call_with_retry`'s old implicit fallback to the shared singleton --
+verified via `grep -n "call_with_retry(" client.py` against every match,
+not a visual pass, since a missed site would be a silent bug (that one
+call type quietly stays cross-user-throttled) rather than a loud
+failure. `retry.webull_limiter` itself was left in place, unused by
+`client.py` now but still available as `call_with_retry`'s default for
+any other caller (tests, the backtest engine) that constructs a bare
+call with no limiter of its own.
+
+**Database scoping.** `User`/`BrokerCredential` are brand-new tables.
+`orders`/`trades`/`scanner_events`/`momentum_scores`/`momentum_events`
+(the only tables `db/repository.py` actually reads/writes today --
+`positions`/`fills`/`risk_events`/`signals`/`backtest_results`/
+`performance_stats` exist as models but have no repository functions
+using them yet, so they were deliberately left untouched rather than
+adding a column nothing reads) each gained a nullable `user_id` FK.
+Nullable, not `NOT NULL`: every row written before this column existed
+has no user to backfill to automatically here -- that backfill (to the
+operator's own account) is a production-cutover-specific step, not a
+generic schema change (see "Production cutover" below). Every
+`db/repository.py` function that touches those tables now takes an
+optional `user_id` param and filters/sets by it; `user_id=None` matches
+every legacy row (SQLAlchemy's `Column == None` compiles to `IS NULL`),
+which is exactly what keeps the single-tenant/no-auth deployment mode
+working unchanged -- it just never sets or filters by a real user_id at
+all. `dashboard/app.py`'s `_resolve_loop`/`_current_user_id` (private
+helpers inside `create_app`) are what feed the right value in: `None` in
+single-tenant/no-auth mode, the logged-in user's id once
+`session_secret_key` is set.
+
+No Alembic migration was written for any of this schema, on purpose:
+every change here is additive (new tables, new NULLABLE columns), which
+is exactly what `db/session.py`'s `sync_schema()` already does
+automatically on every process startup (see `db/models.py`'s module
+docstring) -- confirmed by deliberately trying to also run it through
+Alembic and hitting a real conflict (`create_all()` creates a brand-new
+table, then a migration trying to `CREATE TABLE` it again fails
+outright). Alembic (`alembic.ini`, `migrations/`, starting from a
+`0001` no-op baseline revision) stays in the repo for the one change
+`sync_schema()` genuinely cannot do: eventually making `user_id`
+`NOT NULL` with a real backfill of existing rows, which is a real
+structural migration, written when the production cutover below actually
+happens.
+
+**Dashboard gating** (`dashboard/app.py`'s `create_app`): a new
+`loop_registry` parameter. When provided, `_resolve_loop(request)`
+resolves the CALLING request's own authenticated user's `TradingLoop`
+from the registry (404, not a blank or someone-else's loop, if that user
+has no verified broker connection yet) instead of the single closed-over
+`trading_loop` every endpoint used to read directly; `_current_user(request)`
+raises 401 the moment `session_secret_key` is set and the request has no
+valid session, so every `/api/*` endpoint becomes login-gated
+automatically the instant an operator opts in, with no per-endpoint
+`Depends(...)` boilerplate needed. `loop_registry` requires
+`session_secret_key` to also be set -- `create_app` raises `RuntimeError`
+otherwise, since there would be no way to know which user's loop to
+serve. `tests/test_multi_tenant_dashboard.py` proves full isolation:
+two users' candidates/kill-switch/trades never leak into each other's
+view of the dashboard.
+
+**Landing/signup/login pages** (`static/landing.html`, `signup.html`,
+`login.html`, `auth.js`) live in the SAME FastAPI app/static dir as the
+existing dashboard (now `static/app.html`, renamed from `index.html`)
+rather than a separate site/service -- avoids a second deploy target and
+sidesteps CORS entirely (same-origin cookie session). Explicit routes
+(`GET /`, `/signup`, `/login`, `/app`, `/app/settings`) are registered
+before the `/`-mounted `StaticFiles` (Starlette matches routes in
+registration order), so they take priority over that mount's `html=True`
+auto-serving behavior. `/app`/`/app/settings` redirect to `/login`
+(not a JSON 401 -- these are full-page navigations) when auth is
+configured and the request has no valid session, via the shared
+`_require_login_page` helper, which reuses the exact same `_current_user`
+check every `/api/*` endpoint uses. `app.js`'s `fetchJSON` helper
+redirects to `/login` on any 401 from its polling calls, so an expired
+session degrades to a redirect instead of silently showing frozen/zeroed
+data.
+
+**Deployment mode switch** (`scripts/run_dashboard.py`): entirely
+determined by whether `SESSION_SECRET_KEY` is set. Unset -- the exact
+pre-multi-tenant behavior: one `TradingLoop` built from this process's
+own `.env` credentials, one shared unauthenticated dashboard. Set --
+`_start_multi_tenant` boots a `LoopRegistry` and starts a loop for every
+user with a verified `BrokerCredential` already on file, then
+`create_app` is called with `trading_loop=None` and the registry
+instead. Both modes share one `_build_loop_for_user(user_id, settings,
+session_factory)` helper for wiring up the trade/order/state-transition/
+score persistence hooks (`db/repository.py`), parameterized only by
+whose `user_id`/`Settings` to use, so the two paths can never drift
+apart in what they persist.
+
+**Production cutover (not yet performed).** The currently-deployed VPS
+account (`root@srv1660268`, `TRADING_MODE=sandbox`) is still running in
+single-tenant/no-auth mode as of this writing. Migrating it to
+multi-tenant "user 1" needs, in order: a `pg_dump` backup; setting
+`SESSION_SECRET_KEY`/`CREDENTIAL_ENCRYPTION_KEY` on the VPS (the app
+fails fast at startup if either is unset once code that needs them is
+live -- matching this codebase's existing fail-loud-not-silent
+philosophy for security-sensitive settings); seeding a `users` row for
+the operator and a `broker_credentials` row from the current `.env`'s
+Webull credentials (encrypted) so the already-running sandbox account
+keeps working with zero re-entry; a real Alembic migration to backfill
+`user_id` on every existing row to that seeded user and only then make
+the column `NOT NULL`; setting the operator's password (manually, via
+VPS shell -- no email flow to lean on, per the no-email-in-v1 decision
+above); and restarting `webull-dashboard` so the multi-tenant startup
+path picks up the seeded, already-verified account automatically. No
+trade history or open-position state is lost by any of this (same DB
+rows, now `user_id`-tagged; position state lives in the broker + DB,
+untouched by the migration) -- this is a deliberate, separate,
+confirmed-with-the-user step, not something this conversion did
+automatically.

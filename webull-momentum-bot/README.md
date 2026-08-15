@@ -1254,6 +1254,34 @@ placeholder watchlist (`main.py`'s `_PAPER_MODE_PLACEHOLDER_WATCHLIST`)
 that won't do anything useful until you feed it snapshots yourself via
 `PaperBrokerClient.feed_snapshot()`.
 
+## Multi-tenant accounts (2026-08-15)
+
+By default (no `SESSION_SECRET_KEY` set) the dashboard runs exactly as
+described above: one shared `TradingLoop` from this process's own `.env`
+credentials, no login. Set two env vars to turn on multi-user mode --
+separate logins, each connecting their own Webull API key from the
+dashboard, each with their own independent rate-limit budget and running
+`TradingLoop`:
+
+```bash
+# In .env (see .env.example for the full explanation of each):
+SESSION_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+CREDENTIAL_ENCRYPTION_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+```
+
+With those set, `python scripts/run_dashboard.py` serves a public landing
+page at `/`, `/signup` and `/login` forms, and an authenticated dashboard
+at `/app` (redirects to `/login` if you're not signed in). After signing
+up, connect a Webull API key from `/app/settings` -- your account starts
+sandbox-only; live trading is a separate opt-in toggle on that same page
+(still gated behind the operator-level `LIVE_TRADING_ENABLED`/
+`LIVE_TRADING_CONFIRMATION` from the Safety model below -- both layers
+have to be on for a live order to ever route). See
+`docs/ARCHITECTURE.md`'s "Multi-tenant auth" section for the full design
+(auth mechanism, encrypted credential storage, per-user rate limiting,
+database scoping) and the production cutover steps for migrating an
+existing single-tenant deployment.
+
 ## Development order
 
 Following the project outline: architecture -> Webull integration ->

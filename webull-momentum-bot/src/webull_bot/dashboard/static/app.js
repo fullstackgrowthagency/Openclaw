@@ -288,6 +288,15 @@ function emptyRow(colspan, label) {
 
 async function fetchJSON(path) {
   const res = await fetch(path);
+  if (res.status === 401) {
+    // Session expired/missing -- a stale polling loop showing frozen or
+    // zeroed data with no visible error is worse than just sending the
+    // user back to log in (see docs/ARCHITECTURE.md's "Multi-tenant
+    // auth" section). No-op when auth is disabled entirely (session
+    // middleware isn't mounted, so this endpoint never 401s in that case).
+    window.location.href = "/login";
+    throw new Error(`${path}: 401`);
+  }
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
   return res.json();
 }
@@ -908,5 +917,12 @@ initPositionsTable();
 initScoreHistoryForm();
 initCandidateSelection();
 initChartPanel();
+
+document.getElementById("logout-link")?.addEventListener("click", async (e) => {
+  e.preventDefault();
+  await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  window.location.href = "/login";
+});
+
 refreshAll();
 setInterval(refreshAll, REFRESH_MS);

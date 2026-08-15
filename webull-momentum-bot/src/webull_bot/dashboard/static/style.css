@@ -625,3 +625,75 @@ footer {
     flex: 1 1 auto;
   }
 }
+
+/* ---- Multi-tenant auth: header nav, landing page, signup/login (2026-08-15) ---- */
+
+.header-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.header-link {
+  color: var(--muted);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.header-link:hover, .header-link:focus {
+  color: var(--accent);
+}
+
+.settings-actions-link {
+  text-decoration: none;
+}
+
+.landing-main {
+  padding: 20px 24px 60px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.landing-hero {
+  text-align: left;
+}
+
+.landing-hero h2 {
+  font-size: 22px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+  margin: 0 0 10px;
+}
+
+.landing-hero-hint {
+  margin: 0 0 16px;
+  font-size: 14px;
+}
+
+.landing-cta {
+  justify-content: flex-start;
+}
+
+.auth-main {
+  padding: 40px 24px 60px;
+  display: flex;
+  justify-content: center;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+}
+
+.auth-switch {
+  margin-top: 14px;
+  margin-bottom: 0;
+}
+
+.auth-error {
+  color: var(--red);
+}

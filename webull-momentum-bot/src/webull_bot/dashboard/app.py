@@ -6,28 +6,58 @@ round-trip) plus historical data (trades, performance) from the database.
 `create_app()` takes the TradingLoop and a DB session factory as explicit
 arguments rather than importing globals, so tests can pass fakes/an
 in-memory SQLite session factory without running a real bot or DB.
+
+Multi-tenant (2026-08-15, see docs/ARCHITECTURE.md's "Multi-tenant auth"
+section): `create_app` also accepts an optional `loop_registry`
+(runtime/loop_registry.py) -- when provided, every /api/* endpoint reads
+from THIS REQUEST'S authenticated user's own TradingLoop instead of a
+single shared one (see `_resolve_loop`), and every DB-backed endpoint
+scopes its query to that user's own rows (see `_current_user_id`). Both
+require `settings.session_secret_key` to be set; with it unset, the
+dashboard behaves exactly as it did before multi-tenant auth existed --
+one shared `trading_loop`, no login, no per-user scoping -- which is what
+scripts/run_dashboard.py still does for any deployment that hasn't opted
+in yet.
 """
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
+from ..auth.broker_credential_routes import build_broker_credential_router
+from ..auth.dependencies import build_get_current_user
+from ..auth.routes import build_auth_router
+from ..config import Settings, get_settings
+from ..db.models import User
 from ..db.repository import (
     get_momentum_score_component_summary,
     get_momentum_scores,
     get_performance_summary,
     get_recent_trades,
 )
+from ..runtime.loop_registry import LoopRegistry
 from ..runtime.trading_loop import TradingLoop
 from ..scoring.momentum_ignition_score import MISConfig
+
+logger = logging.getLogger(__name__)
+
+# 30 days -- matches this project's plan doc: a signed-cookie session with a
+# fixed expiry (re-login after) rather than a sliding window or a DB-backed
+# revocable session table, since v1's user base is small enough that
+# "logout everywhere" isn't a requirement yet (see auth/routes.py's
+# docstring for the same simplicity tradeoff on email/password-reset).
+_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -134,33 +164,110 @@ class KillSwitchUpdate(BaseModel):
     active: bool
 
 
-def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session], trading_mode: str) -> FastAPI:
+def create_app(
+    trading_loop: Optional[TradingLoop],
+    session_factory: Callable[[], Session],
+    trading_mode: str,
+    settings: Optional[Settings] = None,
+    loop_registry: Optional[LoopRegistry] = None,
+) -> FastAPI:
+    """`trading_loop`: the single shared loop used in single-tenant/no-auth
+    mode (pass None once `loop_registry` is provided -- see below).
+    `loop_registry` (2026-08-15 multi-tenant conversion, runtime/
+    loop_registry.py): when provided, every `/api/*` endpoint below reads
+    from THIS request's authenticated user's own TradingLoop instead of
+    the single shared one -- see `_resolve_loop`. Requires
+    `settings.session_secret_key` to be set (auth configured); passing a
+    `loop_registry` with auth disabled is a caller error, since there
+    would be no way to know which user's loop to read."""
+    settings = settings or get_settings()
     app = FastAPI(title="Webull Momentum Bot Dashboard")
     app.add_middleware(_NoCacheMiddleware)
 
+    # Auth (2026-08-15 multi-tenant conversion). Guarded on
+    # session_secret_key being set rather than failing startup outright:
+    # this lets the existing single-tenant deployment keep running
+    # unchanged (see docs/ARCHITECTURE.md's "Multi-tenant auth" section)
+    # until an operator opts in by setting SESSION_SECRET_KEY, at which
+    # point signup/login become live AND every /api/* endpoint below
+    # starts requiring a valid session (see _current_user).
+    _get_current_user = None
+    if settings.session_secret_key:
+        app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key, max_age=_SESSION_MAX_AGE_SECONDS)
+        app.include_router(build_auth_router(session_factory))
+        app.include_router(build_broker_credential_router(session_factory, settings, loop_registry))
+        _get_current_user = build_get_current_user(session_factory)
+    else:
+        if loop_registry is not None:
+            raise RuntimeError("loop_registry requires settings.session_secret_key to be set (auth configured).")
+        logger.warning(
+            "SESSION_SECRET_KEY is not set -- dashboard auth (signup/login) is disabled; "
+            "the dashboard runs exactly as it did before multi-tenant auth was added."
+        )
+
+    def _current_user(request: Request) -> Optional[User]:
+        """None when auth isn't configured at all (single-tenant/no-auth
+        mode -- every endpoint below then reads/writes user_id=NULL,
+        matching every row written before this column existed). Raises
+        401 (via get_current_user) when auth IS configured and this
+        request has no valid session -- every /api/* endpoint becomes
+        login-gated the moment an operator sets SESSION_SECRET_KEY,
+        without each endpoint needing its own Depends(...)."""
+        if _get_current_user is None:
+            return None
+        return _get_current_user(request)
+
+    def _current_user_id(request: Request) -> Optional[int]:
+        user = _current_user(request)
+        return user.id if user else None
+
+    def _resolve_loop(request: Request) -> TradingLoop:
+        """The TradingLoop this request's data should come from: the
+        single shared `trading_loop` in single-tenant/no-auth mode, or
+        (once `loop_registry` is wired in) this request's own
+        authenticated user's own loop. 404s -- not a blank/someone-else's
+        loop -- if that user hasn't connected+verified a broker account
+        yet, since LoopRegistry only ever has an entry for a verified
+        account (see auth/broker_credential_routes.py)."""
+        user = _current_user(request)
+        if loop_registry is None:
+            return trading_loop
+        loop = loop_registry.get(user.id if user else None)
+        if loop is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No trading loop is running for your account yet -- connect and verify a broker "
+                    "account first (see Broker Account in the header)."
+                ),
+            )
+        return loop
+
     @app.get("/api/status")
-    def get_status():
+    def get_status(request: Request):
+        loop = _resolve_loop(request)
         # Reads TradingLoop's own periodically-refreshed cache
         # (get_account_summary) instead of calling the broker live on
         # every request -- see that method's docstring for the 504
         # incident (2026-08-12) this fixes: a live call here shared the
         # same rate-limiter queue as order placement, including its
         # exclusive() hold during a real order submission.
-        account_summary = trading_loop.get_account_summary()
+        account_summary = loop.get_account_summary()
         return {
             "trading_mode": trading_mode,
             "equity": account_summary["equity"],
             "buying_power": account_summary["buying_power"],
             "equity_error": account_summary["equity_error"],
-            "candidate_count": len(trading_loop.get_candidates()),
-            "open_position_count": len(trading_loop.get_open_positions()),
-            "kill_switch_active": trading_loop.risk_engine.kill_switch_active,
+            "candidate_count": len(loop.get_candidates()),
+            "open_position_count": len(loop.get_open_positions()),
+            "kill_switch_active": loop.risk_engine.kill_switch_active,
         }
 
     @app.get("/api/candidates")
-    def get_candidates():
+    def get_candidates(request: Request):
+        loop = _resolve_loop(request)
         rows = []
-        for candidate in trading_loop.get_candidates().values():
+        for candidate in loop.get_candidates().values():
             last_reason = _last_transition_reason(candidate.notes)
             rows.append({
                 "symbol": candidate.symbol,
@@ -195,17 +302,17 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         return {"weights_version": config.version, "weights": config.weights}
 
     @app.get("/api/risk-settings")
-    def get_risk_settings():
+    def get_risk_settings(request: Request):
         """Live values of the RiskConfig fields the dashboard's Settings modal
         exposes -- read straight off the running RiskEngine.config, so this
         always reflects what's actually gating trades right now (including
         any change made through POST /api/risk-settings below), not a static
         default."""
-        config = trading_loop.risk_engine.config
+        config = _resolve_loop(request).risk_engine.config
         return {field: getattr(config, field) for field in _ADJUSTABLE_RISK_FIELDS}
 
     @app.post("/api/risk-settings")
-    def update_risk_settings(update: RiskSettingsUpdate):
+    def update_risk_settings(update: RiskSettingsUpdate, request: Request):
         """Mutates the live RiskEngine.config in place -- takes effect on the
         very next Signal it evaluates, no restart needed. Only fields present
         (non-None) in the request body are changed; omitted fields keep their
@@ -221,7 +328,7 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         it does not by itself make the broker accept an extended-hours
         order; see WebullBrokerClient._order_payload's support_trading_
         session note for that still-separate, still-unverified half."""
-        config = trading_loop.risk_engine.config
+        config = _resolve_loop(request).risk_engine.config
         updates = update.model_dump(exclude_none=True)
         errors = []
         for field, value in updates.items():
@@ -242,22 +349,22 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         return {field: getattr(config, field) for field in _ADJUSTABLE_RISK_FIELDS}
 
     @app.get("/api/position-settings")
-    def get_position_settings():
+    def get_position_settings(request: Request):
         """Live values of the two PositionManagementConfig fields the
         Settings modal exposes -- read straight off the running
         PositionManager.config, distinct from RiskConfig above."""
-        config = trading_loop.position_manager.config
+        config = _resolve_loop(request).position_manager.config
         return {field: getattr(config, field) for field in _ADJUSTABLE_POSITION_FIELDS}
 
     @app.post("/api/position-settings")
-    def update_position_settings(update: PositionSettingsUpdate):
+    def update_position_settings(update: PositionSettingsUpdate, request: Request):
         """Mutates the live PositionManager.config in place -- takes effect
         on the very next check_exit() call for every open position, no
         restart needed. Only fields present (non-None) in the request body
         are changed. Both are percentages that must be positive and not
         exceed 100 (a trailing stop or breakeven trigger beyond 100% of
         price is meaningless)."""
-        config = trading_loop.position_manager.config
+        config = _resolve_loop(request).position_manager.config
         updates = update.model_dump(exclude_none=True)
         errors = [f"{field} must be greater than 0." for field, value in updates.items() if value <= 0]
         errors += [f"{field} must not exceed 100." for field, value in updates.items() if value > 100]
@@ -268,7 +375,7 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         return {field: getattr(config, field) for field in _ADJUSTABLE_POSITION_FIELDS}
 
     @app.post("/api/kill-switch")
-    def update_kill_switch(update: KillSwitchUpdate):
+    def update_kill_switch(update: KillSwitchUpdate, request: Request):
         """Toggles the kill switch from the dashboard's header button.
 
         Engaging (`active=true`) calls
@@ -283,22 +390,24 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         flatten for that position). Disengaging (`active=false`) releases
         the switch, which also stops that retry -- any position still
         open at that point is left exactly as it is."""
+        loop = _resolve_loop(request)
         if update.active:
-            trading_loop.engage_kill_switch_and_flatten("Kill switch engaged from dashboard")
+            loop.engage_kill_switch_and_flatten("Kill switch engaged from dashboard")
         else:
-            trading_loop.risk_engine.release_kill_switch()
-        return {"kill_switch_active": trading_loop.risk_engine.kill_switch_active}
+            loop.risk_engine.release_kill_switch()
+        return {"kill_switch_active": loop.risk_engine.kill_switch_active}
 
     @app.get("/api/positions")
-    def get_positions():
+    def get_positions(request: Request):
+        loop = _resolve_loop(request)
         rows = []
-        for symbol, position in trading_loop.get_open_positions().items():
+        for symbol, position in loop.get_open_positions().items():
             # Reads TradingLoop's own per-tick price cache
             # (get_last_known_price) instead of calling broker.get_snapshot()
             # live, once per position, on every request -- see that
             # method's docstring for the 504 incident (2026-08-12) this
             # fixes.
-            current_price = trading_loop.get_last_known_price(symbol)
+            current_price = loop.get_last_known_price(symbol)
             unrealized_pnl = (
                 (current_price - position.avg_entry_price) * position.quantity
                 if current_price is not None else None
@@ -328,7 +437,7 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         return rows
 
     @app.post("/api/positions/{symbol}/close")
-    def close_position(symbol: str):
+    def close_position(symbol: str, request: Request):
         """Per-position "Close" button in the Open Positions table --
         force-closes exactly this one symbol, unlike the kill switch above
         (which closes everything and requires a manual disengage
@@ -342,14 +451,14 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         confirms the request was recorded, not that the position is
         already closed by the time it returns."""
         symbol = symbol.strip().upper()
-        accepted = trading_loop.request_manual_close(symbol)
+        accepted = _resolve_loop(request).request_manual_close(symbol)
         if not accepted:
             raise HTTPException(status_code=404, detail=f"{symbol} is not a currently open position.")
         return {"symbol": symbol, "close_requested": True}
 
     @app.get("/api/risk-events")
-    def get_risk_events(limit: int = 50):
-        events = trading_loop.risk_engine.events[-limit:]
+    def get_risk_events(request: Request, limit: int = 50):
+        events = _resolve_loop(request).risk_engine.events[-limit:]
         return [
             {
                 "event_type": e.event_type,
@@ -361,9 +470,10 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         ]
 
     @app.get("/api/trades")
-    def get_trades(limit: int = 100):
+    def get_trades(request: Request, limit: int = 100):
+        user_id = _current_user_id(request)
         with session_factory() as session:
-            rows = get_recent_trades(session, limit=limit)
+            rows = get_recent_trades(session, user_id=user_id, limit=limit)
             return [
                 {
                     "symbol": t.symbol,
@@ -382,23 +492,26 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
             ]
 
     @app.get("/api/performance")
-    def get_performance():
+    def get_performance(request: Request):
+        user_id = _current_user_id(request)
         with session_factory() as session:
-            return get_performance_summary(session)
+            return get_performance_summary(session, user_id=user_id)
 
     @app.get("/api/score-breakdown")
-    def get_score_breakdown():
+    def get_score_breakdown(request: Request):
         """Sanity-check aid for the MIS weighting: which components are
         actually driving scores up in practice, averaged over recent
         history for the current weights_version -- see
         db/repository.py's get_momentum_score_component_summary."""
+        user_id = _current_user_id(request)
         with session_factory() as session:
-            return get_momentum_score_component_summary(session)
+            return get_momentum_score_component_summary(session, user_id=user_id)
 
     @app.get("/api/score-history")
-    def get_score_history(symbol: str, limit: int = 50):
+    def get_score_history(symbol: str, request: Request, limit: int = 50):
+        user_id = _current_user_id(request)
         with session_factory() as session:
-            rows = get_momentum_scores(session, symbol=symbol.upper(), limit=limit)
+            rows = get_momentum_scores(session, symbol=symbol.upper(), limit=limit, user_id=user_id)
             return [
                 {
                     "timestamp": r.timestamp.isoformat(),
@@ -410,7 +523,7 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
             ]
 
     @app.post("/api/scan-symbol")
-    def scan_symbol(symbol: str):
+    def scan_symbol(symbol: str, request: Request):
         """Manually runs one ticker through BroadScanner's structural
         gates right now and adds it to the live candidate list if it
         passes -- the on-demand, single-symbol equivalent of waiting for
@@ -427,7 +540,8 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
         running in the background rather than being abandoned; the
         dashboard should just let the user retry the request shortly."""
         symbol = symbol.strip().upper()
-        future = _scan_symbol_executor.submit(trading_loop.scan_and_add_candidate, symbol)
+        loop = _resolve_loop(request)
+        future = _scan_symbol_executor.submit(loop.scan_and_add_candidate, symbol)
         try:
             candidate, reason, was_newly_added = future.result(timeout=_SCAN_SYMBOL_TIMEOUT_SECONDS)
         except concurrent.futures.TimeoutError:
@@ -460,6 +574,48 @@ def create_app(trading_loop: TradingLoop, session_factory: Callable[[], Session]
             "reason": _last_transition_reason(candidate.notes),
             "score": candidate.latest_score.score if candidate.latest_score else None,
         }
+
+    # Landing/signup/login/app pages (2026-08-15 multi-tenant conversion).
+    # Registered as explicit routes -- Starlette matches routes in
+    # registration order, so these take priority over the "/" StaticFiles
+    # mount below (which still serves style.css/app.js/auth.js/logo.png
+    # etc.) rather than that mount's html=True auto-serving app.html for
+    # every unmatched path the way it used to serve index.html.
+
+    @app.get("/", response_class=FileResponse)
+    def landing_page():
+        return FileResponse(_STATIC_DIR / "landing.html")
+
+    @app.get("/signup", response_class=FileResponse)
+    def signup_page():
+        return FileResponse(_STATIC_DIR / "signup.html")
+
+    @app.get("/login", response_class=FileResponse)
+    def login_page():
+        return FileResponse(_STATIC_DIR / "login.html")
+
+    def _require_login_page(request: Request, page_filename: str):
+        """Shared guard for every page under /app: redirects to /login when
+        auth is configured and the request has no valid session, otherwise
+        serves the page unchanged -- including when auth isn't configured
+        at all, so the existing single-tenant deployment keeps working
+        with no login step until an operator opts in (see create_app's
+        session_secret_key guard above). Reuses _current_user (the same
+        auth check every /api/* endpoint uses above) rather than a
+        second, separate get_current_user instance."""
+        try:
+            _current_user(request)
+        except HTTPException:
+            return RedirectResponse(url="/login")
+        return FileResponse(_STATIC_DIR / page_filename)
+
+    @app.get("/app")
+    def app_page(request: Request):
+        return _require_login_page(request, "app.html")
+
+    @app.get("/app/settings")
+    def app_settings_page(request: Request):
+        return _require_login_page(request, "app_settings.html")
 
     if _STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
