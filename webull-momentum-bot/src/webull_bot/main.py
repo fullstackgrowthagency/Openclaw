@@ -1,9 +1,14 @@
 """
 Entrypoint: builds the full pipeline and runs the poll-based TradingLoop.
 
-Run with `python -m webull_bot.main`. Account/market-data calls work in both
-PAPER mode (fully local, see brokers/paper/client.py) and SANDBOX mode
-(real Webull sandbox account, verified live -- see brokers/webull/client.py).
+Run with `python -m webull_bot.main`. TRADING_MODE selects SANDBOX (real
+Webull sandbox account, verified live -- see brokers/webull/client.py) or
+LIVE; there is no PAPER trading mode reachable from here or from the
+dashboard's broker-connect page. PaperBrokerClient (brokers/paper/client.py)
+still exists as a fully local, no-network execution simulator, but only as
+an internal tool -- always used by the backtest engine regardless of
+TRADING_MODE, and as a test double throughout tests/ -- not as something an
+operator or dashboard user can select.
 
 Streaming (broker.subscribe_quotes) IS implemented for Webull (confirmed
 live 2026-08-11 against the sandbox MQTT host) -- TradingLoop
@@ -13,12 +18,6 @@ back to broker.get_snapshot() only when nothing supports streaming
 (PaperBrokerClient) or the last pushed update has gone stale -- see that
 module's docstring for the full lifecycle, including how it copes with
 WebullBrokerClient.place_order returning SUBMITTED rather than FILLED.
-
-PAPER mode has no real market universe of its own (PaperBrokerClient is a
-pure execution simulator with no live quotes) -- it falls back to a small
-static watchlist here, meant for exercising the pipeline against snapshots
-you feed it yourself (see brokers/paper/client.py's feed_snapshot), not for
-autonomous discovery.
 """
 from __future__ import annotations
 

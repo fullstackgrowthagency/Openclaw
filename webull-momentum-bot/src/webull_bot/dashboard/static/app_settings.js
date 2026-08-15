@@ -35,10 +35,10 @@ function renderCredentialStatus(cred) {
   statusEl.innerHTML = `
     <div class="stat"><span class="label">App Key</span><span class="value">${cred.masked_app_key ?? "?"}</span></div>
     <div class="stat"><span class="label">Trading Mode</span><span class="value">${cred.trading_mode}</span></div>
+    <div class="stat"><span class="label">Endpoint</span><span class="value">${cred.base_url}</span></div>
     <div class="stat"><span class="label">Verified</span><span class="value ${verified ? "pos" : "neg"}">${verified ? "Yes" : "No"}</span></div>
     ${cred.last_verify_error ? `<div class="stat"><span class="label">Last Error</span><span class="value neg">${cred.last_verify_error}</span></div>` : ""}
   `;
-  document.getElementById("cred-base-url").value = cred.base_url;
   document.getElementById("cred-trading-mode").value = cred.trading_mode;
   toggle.disabled = !verified;
   toggle.checked = !!cred.live_trading_enabled;
@@ -61,7 +61,6 @@ function initCredentialForm() {
       app_key: document.getElementById("cred-app-key").value,
       app_secret: document.getElementById("cred-app-secret").value,
       account_id: document.getElementById("cred-account-id").value,
-      base_url: document.getElementById("cred-base-url").value,
       trading_mode: document.getElementById("cred-trading-mode").value,
     };
     const { ok, data } = await postJSON("/api/broker-credential", body, "POST");

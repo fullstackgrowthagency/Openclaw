@@ -115,11 +115,6 @@ def main() -> None:
         qty = int(sys.argv[sys.argv.index("--qty") + 1])
 
     settings = get_settings()
-    if settings.trading_mode.value == "paper":
-        print("TRADING_MODE=paper -- PaperBrokerClient has no real Webull API to test against.")
-        print("Run this from an environment configured for sandbox (or live) instead.")
-        sys.exit(1)
-
     broker = get_broker_client(settings)
     broker.connect()
     print(f"trading_mode={settings.trading_mode.value}  symbol={symbol}  qty={qty}\n")

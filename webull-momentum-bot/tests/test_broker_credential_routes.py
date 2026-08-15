@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 from webull_bot.auth import broker_credential_routes
 from webull_bot.brokers.paper.client import PaperBrokerClient
-from webull_bot.config import Settings
+from webull_bot.config import WEBULL_BASE_URL_BY_TRADING_MODE, Settings, TradingMode
 from webull_bot.dashboard.app import create_app
 from webull_bot.data.universe import StaticUniverseProvider
 from webull_bot.db.models import Base
@@ -82,7 +82,6 @@ _VALID_CREDENTIAL_BODY = {
     "app_key": "key123",
     "app_secret": "secret456",
     "account_id": "ACCT789",
-    "base_url": "api.sandbox.webull.com",
     "trading_mode": "sandbox",
 }
 
@@ -133,6 +132,27 @@ def test_saving_credentials_rejects_missing_fields(client):
 def test_saving_credentials_rejects_unknown_trading_mode(client):
     resp = client.post("/api/broker-credential", json={**_VALID_CREDENTIAL_BODY, "trading_mode": "yolo"})
     assert resp.status_code == 422
+
+
+def test_saving_credentials_rejects_paper_trading_mode(client):
+    # PAPER used to be a selectable trading mode on this route; it's been
+    # removed (PaperBrokerClient remains an internal backtest/test-only
+    # tool, no longer reachable via the dashboard's connect-account flow),
+    # so it must now be rejected exactly like any other unknown mode.
+    resp = client.post("/api/broker-credential", json={**_VALID_CREDENTIAL_BODY, "trading_mode": "paper"})
+    assert resp.status_code == 422
+
+
+def test_saving_credentials_derives_base_url_from_trading_mode(client, monkeypatch):
+    # base_url is no longer accepted from the client -- it's derived
+    # server-side from trading_mode, so the caller can't request one that
+    # doesn't match (e.g. a sandbox host while trading_mode="live").
+    monkeypatch.setattr(broker_credential_routes, "_verify", lambda *a, **k: (True, None))
+
+    resp = client.post("/api/broker-credential", json=_VALID_CREDENTIAL_BODY)
+    assert resp.status_code == 200
+    assert resp.json()["base_url"] == WEBULL_BASE_URL_BY_TRADING_MODE[TradingMode.SANDBOX]
+    assert "base_url" not in _VALID_CREDENTIAL_BODY
 
 
 def test_test_endpoint_reverifies_stored_credentials_without_resubmitting_secrets(client, monkeypatch):

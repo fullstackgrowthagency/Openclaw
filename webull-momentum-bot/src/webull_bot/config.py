@@ -34,8 +34,19 @@ _LIVE_CONFIRMATION_PHRASE = "I_UNDERSTAND_LIVE_TRADING_RISK"
 
 class TradingMode(str, Enum):
     SANDBOX = "sandbox"  # Webull sandbox/dev environment, fake money
-    PAPER = "paper"       # Local simulated broker, no external orders at all
     LIVE = "live"         # Real Webull account, real money
+
+
+# Webull OpenAPI REST hosts, sandbox vs production -- from Webull's official
+# SDK docs "API Environments" table (this single host also serves Market
+# Data's server-to-server calls). Re-verify against those docs if Webull
+# ever changes them; this is what lets the broker-account connect page
+# (auth/broker_credential_routes.py) derive the right base_url from just
+# the trading mode a user picks, instead of asking them to type a host.
+WEBULL_BASE_URL_BY_TRADING_MODE: dict[TradingMode, str] = {
+    TradingMode.SANDBOX: "api.sandbox.webull.com",
+    TradingMode.LIVE: "api.webull.com",
+}
 
 
 class Environment(str, Enum):
@@ -202,7 +213,7 @@ class Settings:
                 "Refusing to start in LIVE mode: live trading is not authorized. "
                 "Set TRADING_MODE, LIVE_TRADING_ENABLED=true, and "
                 "LIVE_TRADING_CONFIRMATION=I_UNDERSTAND_LIVE_TRADING_RISK explicitly, "
-                "and only after the system has been validated in sandbox/paper mode."
+                "and only after the system has been validated extensively in sandbox mode."
             )
 
 

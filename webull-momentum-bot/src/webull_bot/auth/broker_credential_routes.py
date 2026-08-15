@@ -34,7 +34,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..brokers.webull.client import WebullBrokerClient
-from ..config import Settings, TradingMode, WebullCredentials
+from ..config import WEBULL_BASE_URL_BY_TRADING_MODE, Settings, TradingMode, WebullCredentials
 from ..db.models import BrokerCredential, User
 from ..runtime.loop_registry import LoopRegistry
 from .crypto import CredentialEncryptionError, decrypt_secret, encrypt_secret
@@ -86,7 +86,6 @@ class BrokerCredentialUpdate(BaseModel):
     app_key: str
     app_secret: str
     account_id: str
-    base_url: str
     trading_mode: str = "sandbox"
 
 
@@ -116,9 +115,9 @@ def _verify(app_key: str, app_secret: str, account_id: str, base_url: str, tradi
     live_trading_enabled column (see this module's docstring) -- a user
     can only ever reach real live trading if the OPERATOR has also
     enabled it for the whole deployment via LIVE_TRADING_ENABLED/
-    LIVE_TRADING_CONFIRMATION. Connect with trading_mode="sandbox" or
-    "paper" to verify a key; live-order routing is wired in Phase D's
-    per-user Settings construction, not exercised by this verify call."""
+    LIVE_TRADING_CONFIRMATION. Connect with trading_mode="sandbox" to
+    verify a key; live-order routing is wired in Phase D's per-user
+    Settings construction, not exercised by this verify call."""
     trial_settings = Settings(
         trading_mode=TradingMode(trading_mode),
         webull=WebullCredentials(app_key=app_key, app_secret=app_secret, account_id=account_id, base_url=base_url),
@@ -185,10 +184,11 @@ def build_broker_credential_router(
     def set_credential(body: BrokerCredentialUpdate, user: User = Depends(get_current_user)):
         if body.trading_mode not in _TRADING_MODES:
             raise HTTPException(status_code=422, detail=f"trading_mode must be one of {sorted(_TRADING_MODES)}.")
-        if not (body.app_key and body.app_secret and body.account_id and body.base_url):
-            raise HTTPException(status_code=422, detail="app_key, app_secret, account_id, and base_url are all required.")
+        if not (body.app_key and body.app_secret and body.account_id):
+            raise HTTPException(status_code=422, detail="app_key, app_secret, and account_id are all required.")
 
-        verified, error = _verify(body.app_key, body.app_secret, body.account_id, body.base_url, body.trading_mode)
+        base_url = WEBULL_BASE_URL_BY_TRADING_MODE[TradingMode(body.trading_mode)]
+        verified, error = _verify(body.app_key, body.app_secret, body.account_id, base_url, body.trading_mode)
 
         with session_factory() as session:
             cred = session.query(BrokerCredential).filter(BrokerCredential.user_id == user.id).one_or_none()
@@ -198,7 +198,7 @@ def build_broker_credential_router(
             cred.app_key_encrypted = encrypt_secret(body.app_key, settings)
             cred.app_secret_encrypted = encrypt_secret(body.app_secret, settings)
             cred.account_id_encrypted = encrypt_secret(body.account_id, settings)
-            cred.base_url = body.base_url
+            cred.base_url = base_url
             cred.trading_mode = body.trading_mode
             cred.updated_at = datetime.utcnow()
             if verified:
