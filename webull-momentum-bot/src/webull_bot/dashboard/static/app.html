@@ -15,6 +15,10 @@
       <a class="header-link" href="/app/settings">Broker Account</a>
       <a class="header-link" href="#" id="logout-link">Log out</a>
       <button class="settings-btn" id="settings-btn" aria-label="Risk settings" title="Risk settings">&#9881;</button>
+      <div class="bot-nav">
+        <button class="settings-btn" id="bot-nav-btn" aria-label="Switch bot" title="Switch bot" aria-expanded="false">&#9776;</button>
+        <div class="bot-nav-dropdown" id="bot-nav-dropdown"></div>
+      </div>
     </div>
   </div>
   <div class="header-bottom">
@@ -243,6 +247,7 @@
   </div>
 </div>
 
+<script src="/bot_nav.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

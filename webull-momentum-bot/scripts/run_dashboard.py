@@ -55,6 +55,7 @@ from webull_bot.dashboard.app import create_app
 from webull_bot.db.models import BrokerCredential, User
 from webull_bot.db.repository import (
     DBBackedEventRecorder,
+    get_or_create_default_bot,
     record_momentum_score,
     record_order,
     record_scanner_event,
@@ -68,12 +69,12 @@ from webull_bot.runtime.trading_loop import TradingLoop
 logger = logging.getLogger(__name__)
 
 
-def _make_trade_persister(session_factory, trading_mode: str, user_id: Optional[int] = None):
+def _make_trade_persister(session_factory, trading_mode: str, user_id: Optional[int] = None, bot_id: Optional[int] = None):
     def on_trade_closed(trade):
         print(f"TRADE CLOSED: {trade.symbol} pnl={trade.pnl:.2f} ({trade.exit_reason.value})")
         with session_factory() as session:
             try:
-                record_trade(session, trade, trading_mode=trading_mode, user_id=user_id)
+                record_trade(session, trade, trading_mode=trading_mode, user_id=user_id, bot_id=bot_id)
                 session.commit()
             except Exception:
                 session.rollback()
@@ -82,11 +83,11 @@ def _make_trade_persister(session_factory, trading_mode: str, user_id: Optional[
     return on_trade_closed
 
 
-def _make_order_persister(session_factory, trading_mode: str, user_id: Optional[int] = None):
+def _make_order_persister(session_factory, trading_mode: str, user_id: Optional[int] = None, bot_id: Optional[int] = None):
     def on_order_update(order):
         with session_factory() as session:
             try:
-                record_order(session, order, trading_mode=trading_mode, user_id=user_id)
+                record_order(session, order, trading_mode=trading_mode, user_id=user_id, bot_id=bot_id)
                 session.commit()
             except Exception:
                 session.rollback()
@@ -95,13 +96,14 @@ def _make_order_persister(session_factory, trading_mode: str, user_id: Optional[
     return on_order_update
 
 
-def _make_state_transition_persister(session_factory, user_id: Optional[int] = None):
+def _make_state_transition_persister(session_factory, user_id: Optional[int] = None, bot_id: Optional[int] = None):
     def on_state_transition(symbol, from_state, to_state, timestamp):
         with session_factory() as session:
             try:
                 record_scanner_event(
                     session, symbol=symbol, from_state=from_state, to_state=to_state,
-                    timestamp=timestamp, reason=f"{from_state.value} -> {to_state.value}", user_id=user_id,
+                    timestamp=timestamp, reason=f"{from_state.value} -> {to_state.value}",
+                    user_id=user_id, bot_id=bot_id,
                 )
                 session.commit()
             except Exception:
@@ -111,11 +113,11 @@ def _make_state_transition_persister(session_factory, user_id: Optional[int] = N
     return on_state_transition
 
 
-def _make_score_persister(session_factory, user_id: Optional[int] = None):
+def _make_score_persister(session_factory, user_id: Optional[int] = None, bot_id: Optional[int] = None):
     def on_score_computed(symbol, score):
         with session_factory() as session:
             try:
-                record_momentum_score(session, score, user_id=user_id)
+                record_momentum_score(session, score, user_id=user_id, bot_id=bot_id)
                 session.commit()
             except Exception:
                 session.rollback()
@@ -129,14 +131,26 @@ def _build_loop_for_user(user_id: Optional[int], user_settings: Settings, sessio
     (user_id=None) and every per-user loop in multi-tenant mode alike --
     just parameterized by whose settings/user_id to use. Shared here so
     the single-tenant path below and LoopRegistry's per-user path (see
-    _start_multi_tenant) can never drift apart."""
-    momentum_event_tracker = MomentumEventTracker(DBBackedEventRecorder(session_factory, user_id=user_id))
+    _start_multi_tenant) can never drift apart.
+
+    bot_id (2026-08-15 multi-bot framework): resolved once here, from
+    that user's default ("Day Trading Quant") bot -- None in
+    single-tenant/no-auth mode (user_id=None), matching every other
+    None-in-single-tenant-mode value threaded through this function."""
+    bot_id = None
+    if user_id is not None:
+        with session_factory() as session:
+            bot_id = get_or_create_default_bot(session, user_id).id
+            session.commit()
+    momentum_event_tracker = MomentumEventTracker(
+        DBBackedEventRecorder(session_factory, user_id=user_id, bot_id=bot_id)
+    )
     return build_trading_loop(
         settings=user_settings,
-        on_trade_closed=_make_trade_persister(session_factory, user_settings.trading_mode.value, user_id),
-        on_order_update=_make_order_persister(session_factory, user_settings.trading_mode.value, user_id),
-        on_state_transition=_make_state_transition_persister(session_factory, user_id),
-        on_score_computed=_make_score_persister(session_factory, user_id),
+        on_trade_closed=_make_trade_persister(session_factory, user_settings.trading_mode.value, user_id, bot_id),
+        on_order_update=_make_order_persister(session_factory, user_settings.trading_mode.value, user_id, bot_id),
+        on_state_transition=_make_state_transition_persister(session_factory, user_id, bot_id),
+        on_score_computed=_make_score_persister(session_factory, user_id, bot_id),
         momentum_event_tracker=momentum_event_tracker,
     )
 

@@ -21,6 +21,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from ..db.models import User
+from ..db.repository import get_or_create_default_bot
 from .security import hash_password, verify_password
 
 _MIN_PASSWORD_LENGTH = 8
@@ -73,6 +74,12 @@ def build_auth_router(session_factory: Callable[[], Session]) -> APIRouter:
                 raise HTTPException(status_code=409, detail="An account with this email already exists.")
             user = User(email=body.email, password_hash=hash_password(body.password))
             session.add(user)
+            session.flush()
+            # Every user starts with their "Day Trading Quant" bot already
+            # registered (2026-08-15 multi-bot framework) -- see
+            # db/repository.py's get_or_create_default_bot and its
+            # module-level constants for the exact name/slug/kind.
+            get_or_create_default_bot(session, user.id)
             session.commit()
             session.refresh(user)
             user_id = user.id

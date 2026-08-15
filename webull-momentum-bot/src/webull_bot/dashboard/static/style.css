@@ -648,6 +648,59 @@ footer {
   text-decoration: none;
 }
 
+/* ---- Multi-bot framework: hamburger nav (2026-08-15) ---- */
+
+.bot-nav {
+  position: relative;
+}
+
+.bot-nav-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 200px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 6px;
+  z-index: 20;
+}
+
+.bot-nav-dropdown.open {
+  display: block;
+}
+
+.bot-nav-item {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.bot-nav-item:hover, .bot-nav-item:focus {
+  background: var(--bg);
+}
+
+.bot-nav-item.active {
+  color: var(--accent);
+}
+
+.bot-nav-item.disabled {
+  color: var(--muted);
+  cursor: default;
+  pointer-events: none;
+}
+
+.bot-nav-item .bot-nav-badge {
+  float: right;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .landing-main {
   padding: 20px 24px 60px;
   display: grid;

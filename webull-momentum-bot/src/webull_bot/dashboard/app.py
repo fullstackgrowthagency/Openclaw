@@ -39,10 +39,11 @@ from ..auth.broker_credential_routes import build_broker_credential_router
 from ..auth.dependencies import build_get_current_user
 from ..auth.routes import build_auth_router
 from ..config import Settings, get_settings
-from ..db.models import User
+from ..db.models import Bot, User
 from ..db.repository import (
     get_momentum_score_component_summary,
     get_momentum_scores,
+    get_or_create_default_bot,
     get_performance_summary,
     get_recent_trades,
 )
@@ -220,6 +221,23 @@ def create_app(
     def _current_user_id(request: Request) -> Optional[int]:
         user = _current_user(request)
         return user.id if user else None
+
+    def _current_bot_id(request: Request) -> Optional[int]:
+        """This request's user's default ("Day Trading Quant") bot id
+        (2026-08-15 multi-bot framework) -- None in single-tenant/no-auth
+        mode, matching _current_user_id's own None there, so every
+        DB-backed endpoint below stays scoped to bot_id=NULL exactly like
+        it already scopes to user_id=NULL. get_or_create_default_bot is a
+        cheap indexed SELECT in the normal case (every real user already
+        has this row from signup or the 0003 migration's backfill) --
+        the create branch only matters as a safety net."""
+        user_id = _current_user_id(request)
+        if user_id is None:
+            return None
+        with session_factory() as session:
+            bot = get_or_create_default_bot(session, user_id)
+            session.commit()
+            return bot.id
 
     def _resolve_loop(request: Request) -> TradingLoop:
         """The TradingLoop this request's data should come from: the
@@ -472,8 +490,9 @@ def create_app(
     @app.get("/api/trades")
     def get_trades(request: Request, limit: int = 100):
         user_id = _current_user_id(request)
+        bot_id = _current_bot_id(request)
         with session_factory() as session:
-            rows = get_recent_trades(session, user_id=user_id, limit=limit)
+            rows = get_recent_trades(session, user_id=user_id, bot_id=bot_id, limit=limit)
             return [
                 {
                     "symbol": t.symbol,
@@ -494,8 +513,9 @@ def create_app(
     @app.get("/api/performance")
     def get_performance(request: Request):
         user_id = _current_user_id(request)
+        bot_id = _current_bot_id(request)
         with session_factory() as session:
-            return get_performance_summary(session, user_id=user_id)
+            return get_performance_summary(session, user_id=user_id, bot_id=bot_id)
 
     @app.get("/api/score-breakdown")
     def get_score_breakdown(request: Request):
@@ -504,14 +524,16 @@ def create_app(
         history for the current weights_version -- see
         db/repository.py's get_momentum_score_component_summary."""
         user_id = _current_user_id(request)
+        bot_id = _current_bot_id(request)
         with session_factory() as session:
-            return get_momentum_score_component_summary(session, user_id=user_id)
+            return get_momentum_score_component_summary(session, user_id=user_id, bot_id=bot_id)
 
     @app.get("/api/score-history")
     def get_score_history(symbol: str, request: Request, limit: int = 50):
         user_id = _current_user_id(request)
+        bot_id = _current_bot_id(request)
         with session_factory() as session:
-            rows = get_momentum_scores(session, symbol=symbol.upper(), limit=limit, user_id=user_id)
+            rows = get_momentum_scores(session, symbol=symbol.upper(), limit=limit, user_id=user_id, bot_id=bot_id)
             return [
                 {
                     "timestamp": r.timestamp.isoformat(),
@@ -574,6 +596,21 @@ def create_app(
             "reason": _last_transition_reason(candidate.notes),
             "score": candidate.latest_score.score if candidate.latest_score else None,
         }
+
+    @app.get("/api/bots")
+    def get_bots(request: Request):
+        """The current user's bots for the header's hamburger menu
+        (2026-08-15 multi-bot framework) -- today, always exactly one
+        ("Day Trading Quant"), created at signup (auth/routes.py) or by
+        the 0003 migration's backfill for any pre-existing user. Empty
+        list in single-tenant/no-auth mode (no user to look bots up
+        for), matching every other endpoint's behavior there."""
+        user_id = _current_user_id(request)
+        if user_id is None:
+            return []
+        with session_factory() as session:
+            rows = session.query(Bot).filter(Bot.user_id == user_id, Bot.is_active.is_(True)).all()
+            return [{"id": b.id, "slug": b.slug, "name": b.name} for b in rows]
 
     # Landing/signup/login/app pages (2026-08-15 multi-tenant conversion).
     # Registered as explicit routes -- Starlette matches routes in

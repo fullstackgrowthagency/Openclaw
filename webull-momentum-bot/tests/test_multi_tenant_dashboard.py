@@ -176,8 +176,14 @@ def test_trades_are_scoped_per_user(session_factory, settings):
         exit_reason=ExitReason.PROFIT_TARGET, pnl=10.0, pnl_pct=10.0,
         max_favorable_excursion=0.15, max_adverse_excursion=0.0,
     )
+    # bot_id (2026-08-15 multi-bot framework) is now part of /api/trades'
+    # scoping alongside user_id -- resolve Alice's default bot via the
+    # same /api/bots endpoint the dashboard's hamburger menu uses, rather
+    # than assuming bot_id=None, so this stays scoped exactly like a real
+    # persisted trade would be (see scripts/run_dashboard.py).
+    alice_bot_id = alice.get("/api/bots").json()[0]["id"]
     with session_factory() as session:
-        record_trade(session, trade, trading_mode="paper", user_id=alice_id)
+        record_trade(session, trade, trading_mode="paper", user_id=alice_id, bot_id=alice_bot_id)
         session.commit()
 
     alice_trades = alice.get("/api/trades").json()

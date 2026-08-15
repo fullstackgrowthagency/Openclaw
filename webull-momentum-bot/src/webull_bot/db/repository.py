@@ -19,12 +19,39 @@ from ..collection.event_recorder import EventRecorder
 from ..enums import CandidateState
 from ..models import MomentumEvent, MomentumScore, Order, Trade
 from ..scoring.momentum_ignition_score import MISConfig
-from .models import MomentumEventRecord, MomentumScoreRecord, OrderRecord, ScannerEvent, TradeRecord
+from .models import Bot, MomentumEventRecord, MomentumScoreRecord, OrderRecord, ScannerEvent, TradeRecord
+
+_DEFAULT_BOT_SLUG = "day-trading-quant"
+_DEFAULT_BOT_NAME = "Day Trading Quant"
+_DEFAULT_BOT_KIND = "momentum_quant"
 
 
-def record_trade(session: Session, trade: Trade, *, trading_mode: str, user_id: Optional[int] = None) -> TradeRecord:
+def get_or_create_default_bot(session: Session, user_id: int) -> Bot:
+    """Every user's first (today, only) bot -- the existing Day Trading
+    Quant momentum system, registered into the multi-bot framework
+    (2026-08-15). Idempotent (keyed on the (user_id, slug) unique
+    constraint -- see db/models.py's Bot) so signup-time creation
+    (auth/routes.py) and the run_dashboard.py startup sweep's lazy
+    fallback always land on the same row rather than racing to create
+    duplicates."""
+    bot = (
+        session.query(Bot)
+        .filter(Bot.user_id == user_id, Bot.slug == _DEFAULT_BOT_SLUG)
+        .one_or_none()
+    )
+    if bot is None:
+        bot = Bot(user_id=user_id, slug=_DEFAULT_BOT_SLUG, name=_DEFAULT_BOT_NAME, kind=_DEFAULT_BOT_KIND)
+        session.add(bot)
+        session.flush()
+    return bot
+
+
+def record_trade(
+    session: Session, trade: Trade, *, trading_mode: str, user_id: Optional[int] = None, bot_id: Optional[int] = None,
+) -> TradeRecord:
     record = TradeRecord(
         user_id=user_id,
+        bot_id=bot_id,
         symbol=trade.symbol,
         strategy_name=trade.strategy_name,
         side=trade.side.value,
@@ -45,7 +72,9 @@ def record_trade(session: Session, trade: Trade, *, trading_mode: str, user_id: 
     return record
 
 
-def record_order(session: Session, order: Order, *, trading_mode: str, user_id: Optional[int] = None) -> OrderRecord:
+def record_order(
+    session: Session, order: Order, *, trading_mode: str, user_id: Optional[int] = None, bot_id: Optional[int] = None,
+) -> OrderRecord:
     """Upsert by client_order_id: an order is written once on submission and
     again every time its status changes (SUBMITTED -> FILLED, etc.), so this
     must update the existing row rather than violate the unique constraint
@@ -53,17 +82,24 @@ def record_order(session: Session, order: Order, *, trading_mode: str, user_id: 
     (2026-08-15) -- client_order_id is a UUID (no realistic cross-user
     collision), but scoping the lookup is free insurance and keeps the
     query's intent explicit: "this user's order with this id," not just
-    "any order anywhere with this id.\""""
+    "any order anywhere with this id." bot_id (2026-08-15 multi-bot
+    framework) is the same free-insurance scoping one level deeper."""
     if not order.client_order_id:
         raise ValueError("Order.client_order_id is required to persist an order")
 
     existing = (
         session.query(OrderRecord)
-        .filter(OrderRecord.client_order_id == order.client_order_id, OrderRecord.user_id == user_id)
+        .filter(
+            OrderRecord.client_order_id == order.client_order_id,
+            OrderRecord.user_id == user_id,
+            OrderRecord.bot_id == bot_id,
+        )
         .one_or_none()
     )
     if existing is None:
-        existing = OrderRecord(client_order_id=order.client_order_id, trading_mode=trading_mode, user_id=user_id)
+        existing = OrderRecord(
+            client_order_id=order.client_order_id, trading_mode=trading_mode, user_id=user_id, bot_id=bot_id,
+        )
         session.add(existing)
 
     existing.broker_order_id = order.broker_order_id
@@ -80,18 +116,24 @@ def record_order(session: Session, order: Order, *, trading_mode: str, user_id: 
     return existing
 
 
-def get_recent_trades(session: Session, *, user_id: Optional[int] = None, limit: int = 100) -> list[TradeRecord]:
+def get_recent_trades(
+    session: Session, *, user_id: Optional[int] = None, bot_id: Optional[int] = None, limit: int = 100,
+) -> list[TradeRecord]:
     return (
         session.query(TradeRecord)
-        .filter(TradeRecord.user_id == user_id)
+        .filter(TradeRecord.user_id == user_id, TradeRecord.bot_id == bot_id)
         .order_by(TradeRecord.closed_at.desc())
         .limit(limit)
         .all()
     )
 
 
-def get_performance_summary(session: Session, *, user_id: Optional[int] = None) -> dict:
-    trades = session.query(TradeRecord).filter(TradeRecord.user_id == user_id).all()
+def get_performance_summary(session: Session, *, user_id: Optional[int] = None, bot_id: Optional[int] = None) -> dict:
+    trades = (
+        session.query(TradeRecord)
+        .filter(TradeRecord.user_id == user_id, TradeRecord.bot_id == bot_id)
+        .all()
+    )
     total_trades = len(trades)
     if total_trades == 0:
         return {"total_trades": 0, "win_rate": 0.0, "total_pnl": 0.0, "total_pnl_pct": 0.0, "avg_pnl_pct": 0.0}
@@ -124,9 +166,11 @@ def record_scanner_event(
     timestamp: datetime,
     reason: str,
     user_id: Optional[int] = None,
+    bot_id: Optional[int] = None,
 ) -> ScannerEvent:
     record = ScannerEvent(
         user_id=user_id,
+        bot_id=bot_id,
         symbol=symbol,
         timestamp=timestamp,
         event_type="state_transition",
@@ -140,10 +184,11 @@ def record_scanner_event(
 
 
 def record_momentum_score(
-    session: Session, score: MomentumScore, *, user_id: Optional[int] = None
+    session: Session, score: MomentumScore, *, user_id: Optional[int] = None, bot_id: Optional[int] = None,
 ) -> MomentumScoreRecord:
     record = MomentumScoreRecord(
         user_id=user_id,
+        bot_id=bot_id,
         symbol=score.symbol,
         timestamp=score.timestamp,
         score=score.score,
@@ -156,12 +201,15 @@ def record_momentum_score(
 
 
 def get_momentum_scores(
-    session: Session, *, symbol: Optional[str] = None, limit: int = 200, user_id: Optional[int] = None
+    session: Session, *, symbol: Optional[str] = None, limit: int = 200,
+    user_id: Optional[int] = None, bot_id: Optional[int] = None,
 ) -> list[MomentumScoreRecord]:
     """Most-recent-first raw history, optionally filtered to one symbol --
     for inspecting a specific candidate's score/component trajectory over
     time (e.g. dashboard/app.py's /api/score-history)."""
-    query = session.query(MomentumScoreRecord).filter(MomentumScoreRecord.user_id == user_id)
+    query = session.query(MomentumScoreRecord).filter(
+        MomentumScoreRecord.user_id == user_id, MomentumScoreRecord.bot_id == bot_id,
+    )
     if symbol is not None:
         query = query.filter(MomentumScoreRecord.symbol == symbol)
     return query.order_by(MomentumScoreRecord.timestamp.desc()).limit(limit).all()
@@ -169,7 +217,7 @@ def get_momentum_scores(
 
 def get_momentum_score_component_summary(
     session: Session, *, weights_version: Optional[str] = None, limit: int = 500,
-    mis_config: Optional[MISConfig] = None, user_id: Optional[int] = None,
+    mis_config: Optional[MISConfig] = None, user_id: Optional[int] = None, bot_id: Optional[int] = None,
 ) -> dict:
     """Sanity-check aid for tuning weights.yaml: averages each component's
     raw (0-100) sub-score across recent MomentumScoreRecord rows and
@@ -192,7 +240,7 @@ def get_momentum_score_component_summary(
     if weights_version is None:
         latest = (
             session.query(MomentumScoreRecord.weights_version)
-            .filter(MomentumScoreRecord.user_id == user_id)
+            .filter(MomentumScoreRecord.user_id == user_id, MomentumScoreRecord.bot_id == bot_id)
             .order_by(MomentumScoreRecord.timestamp.desc())
             .first()
         )
@@ -200,7 +248,11 @@ def get_momentum_score_component_summary(
 
     rows = (
         session.query(MomentumScoreRecord)
-        .filter(MomentumScoreRecord.weights_version == weights_version, MomentumScoreRecord.user_id == user_id)
+        .filter(
+            MomentumScoreRecord.weights_version == weights_version,
+            MomentumScoreRecord.user_id == user_id,
+            MomentumScoreRecord.bot_id == bot_id,
+        )
         .order_by(MomentumScoreRecord.timestamp.desc())
         .limit(limit)
         .all()
@@ -249,20 +301,22 @@ def _metrics_to_json(metrics) -> Optional[dict]:
 
 
 def record_momentum_event(
-    session: Session, event: MomentumEvent, *, existing_id: Optional[int] = None, user_id: Optional[int] = None
+    session: Session, event: MomentumEvent, *, existing_id: Optional[int] = None,
+    user_id: Optional[int] = None, bot_id: Optional[int] = None,
 ) -> MomentumEventRecord:
     """Upsert by `existing_id` (the DB row id) rather than a natural key --
     unlike orders (client_order_id) or trades, a momentum event has no
     natural unique identifier of its own. Callers that need to update the
     same row repeatedly (see DBBackedEventRecorder below) must remember the
     id returned by the first call and pass it back in on subsequent calls.
-    `user_id` is only applied on first insert -- existing_id already
-    uniquely (and privately, per-DBBackedEventRecorder-instance) identifies
-    the row, so there's nothing to re-scope on update."""
+    `user_id`/`bot_id` are only applied on first insert -- existing_id
+    already uniquely (and privately, per-DBBackedEventRecorder-instance)
+    identifies the row, so there's nothing to re-scope on update."""
     record = session.get(MomentumEventRecord, existing_id) if existing_id is not None else None
     if record is None:
         record = MomentumEventRecord(
             user_id=user_id,
+            bot_id=bot_id,
             symbol=event.symbol,
             detected_at=event.detected_at,
             trigger_reason=event.trigger_reason,
@@ -301,17 +355,20 @@ class DBBackedEventRecorder(EventRecorder):
     both wasteful and fragile across reconnects.
     """
 
-    def __init__(self, session_factory: Callable[[], Session], user_id: Optional[int] = None):
+    def __init__(
+        self, session_factory: Callable[[], Session], user_id: Optional[int] = None, bot_id: Optional[int] = None,
+    ):
         super().__init__()
         self.session_factory = session_factory
         self.user_id = user_id
+        self.bot_id = bot_id
         self._db_ids: dict[int, int] = {}  # in-memory event_id -> DB row id
 
     def save(self, event: MomentumEvent) -> int:
         event_id = super().save(event)
         with self.session_factory() as session:
             try:
-                record = record_momentum_event(session, event, user_id=self.user_id)
+                record = record_momentum_event(session, event, user_id=self.user_id, bot_id=self.bot_id)
                 session.commit()
                 self._db_ids[event_id] = record.id
             except Exception:

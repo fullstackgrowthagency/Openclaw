@@ -38,6 +38,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -114,6 +115,10 @@ class ScannerEvent(Base):
     # section for the production cutover that assigns them to the
     # operator's own account.
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    # Same nullable-for-backfill rationale as user_id above (2026-08-15
+    # multi-bot framework): which of that user's bots this event belongs
+    # to -- see db/models.py's Bot class.
+    bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
     event_type: Mapped[str] = mapped_column(String(64))  # e.g. "discovered", "state_transition"
@@ -129,6 +134,7 @@ class MomentumScoreRecord(Base):
     # See ScannerEvent.user_id's comment -- same nullable-for-backfill
     # rationale.
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
     score: Mapped[float] = mapped_column(Float)
@@ -172,6 +178,7 @@ class OrderRecord(Base):
     # record_order (UUIDs, so no realistic cross-user collision), but
     # every lookup is still scoped by user_id too -- see repository.py.
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), nullable=True, index=True)
     client_order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
@@ -226,6 +233,7 @@ class TradeRecord(Base):
     # See ScannerEvent.user_id's comment -- same nullable-for-backfill
     # rationale.
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     strategy_name: Mapped[str] = mapped_column(String(64))
     side: Mapped[str] = mapped_column(String(16))
@@ -329,6 +337,28 @@ class BrokerCredential(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class Bot(Base):
+    """One entry in a user's multi-bot dashboard (2026-08-15 multi-bot
+    framework) -- e.g. "Day Trading Quant", the existing momentum system,
+    registered as every user's first bot. All of a user's bots share that
+    same user's single BrokerCredential/capital (no per-bot broker
+    connection) -- what's independent per bot is trading history/P&L
+    only, via the bot_id column on TradeRecord/OrderRecord/ScannerEvent/
+    MomentumScoreRecord/MomentumEventRecord below. `kind` identifies which
+    engine backs this bot ("momentum_quant" today); `slug` is a stable,
+    URL/lookup-safe identifier distinct from the user-facing `name`."""
+    __tablename__ = "bots"
+    __table_args__ = (UniqueConstraint("user_id", "slug", name="uq_bots_user_slug"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    slug: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(128))
+    kind: Mapped[str] = mapped_column(String(32))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class MomentumEventRecord(Base):
     """
     Traded AND non-traded momentum events, with forward-looking outcome
@@ -341,6 +371,7 @@ class MomentumEventRecord(Base):
     # See ScannerEvent.user_id's comment -- same nullable-for-backfill
     # rationale.
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     trigger_reason: Mapped[str] = mapped_column(String(128))
