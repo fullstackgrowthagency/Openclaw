@@ -68,20 +68,29 @@ def sync_schema(settings: Settings | None = None) -> None:
 
     What this does: for every table create_all() finds already existing,
     compares its actual live columns (via SQLAlchemy's inspector) against
-    what the model expects, and ALTERs in whatever's missing. Deliberately
-    narrow, not a real migration tool:
-      - Additive only. Never drops/renames/retypes a column, never adds a
-        constraint (NOT NULL, a default, a foreign key) -- every added
-        column is bare and nullable, so this can never fail against
-        existing rows (they just get NULL for it) and can never be
-        destructive.
+    what the model expects, and ALTERs in whatever's missing -- then, as
+    of the multi-bot framework (2026-08-15), also checks every column the
+    model declares `index=True` on and CREATE INDEXes any that's missing,
+    whether that column was just added above or was added by an earlier
+    run of this same function before this index check existed (the real
+    incident this closes: bot_id was added this way to orders/trades/
+    scanner_events/momentum_scores/momentum_events with no index, and an
+    unindexed filter against momentum_scores -- written on every tick for
+    every watched candidate, so it grows huge -- is a full table scan;
+    that's what turned into the /api/score-breakdown 504 this fixes).
+    Deliberately narrow, not a real migration tool:
+      - Additive only. Never drops/renames/retypes a column or index,
+        never adds a constraint (NOT NULL, a default, a foreign key) --
+        every added column is bare and nullable, so this can never fail
+        against existing rows (they just get NULL for it) and can never
+        be destructive.
       - No data backfill. A newly-added column starts NULL for every
         existing row; callers that need real values there for old rows
         need their own one-off backfill, this won't attempt one.
       - Reach for a real migration tool (Alembic) the moment schema
         evolution needs anything this doesn't cover -- this exists to
-        close the specific "silent write failure" gap above cheaply, not
-        to be a permanent substitute."""
+        close the specific "silent write failure"/"silent full table
+        scan" gaps above cheaply, not to be a permanent substitute."""
     engine = get_engine(settings)
     inspector = inspect(engine)
     preparer = engine.dialect.identifier_preparer
@@ -98,11 +107,35 @@ def sync_schema(settings: Settings | None = None) -> None:
                     f"ALTER TABLE {preparer.quote(table.name)} "
                     f"ADD COLUMN {preparer.quote(column.name)} {column_type}"
                 ))
+                existing_columns.add(column.name)
                 logger.warning(
                     "sync_schema: %s.%s existed without column %r (schema drift against an "
                     "already-created table -- see this function's docstring) -- added it, "
                     "nullable, NULL for every existing row.",
                     table.name, column.name, column.name,
+                )
+
+            # Single-column indexes only -- every index=True column on
+            # this project's models is a single-column index (see
+            # db/models.py); a composite index would need its own
+            # explicit handling this doesn't attempt.
+            existing_indexed_columns = {
+                idx["column_names"][0]
+                for idx in inspector.get_indexes(table.name)
+                if len(idx["column_names"]) == 1
+            }
+            for column in table.columns:
+                if not column.index or column.name in existing_indexed_columns:
+                    continue
+                index_name = f"ix_{table.name}_{column.name}"
+                conn.execute(text(
+                    f"CREATE INDEX {preparer.quote(index_name)} "
+                    f"ON {preparer.quote(table.name)} ({preparer.quote(column.name)})"
+                ))
+                logger.warning(
+                    "sync_schema: %s.%s had no index despite the model declaring index=True "
+                    "(schema drift -- see this function's docstring) -- created %r.",
+                    table.name, column.name, index_name,
                 )
 
 

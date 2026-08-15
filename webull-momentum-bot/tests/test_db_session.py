@@ -139,6 +139,51 @@ def test_sync_schema_skips_a_table_that_does_not_exist_at_all(monkeypatch):
     assert inspect(engine).get_table_names() == []
 
 
+def test_sync_schema_creates_missing_index_for_an_existing_column(monkeypatch):
+    # The real incident this covers (2026-08-15): bot_id got added to
+    # orders/trades/scanner_events/momentum_scores/momentum_events via
+    # sync_schema's ADD COLUMN, but nothing ever created its index --
+    # an unindexed filter against the huge momentum_scores table (written
+    # on every tick for every watched candidate) is a full table scan,
+    # which is what turned into a 504 on /api/score-breakdown.
+    engine = _sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE trades ("
+            "id INTEGER PRIMARY KEY, symbol VARCHAR(16), strategy_name VARCHAR(64), "
+            "side VARCHAR(16), entry_price FLOAT, exit_price FLOAT, quantity FLOAT, "
+            "opened_at DATETIME, closed_at DATETIME, exit_reason VARCHAR(32), "
+            "pnl FLOAT, pnl_pct FLOAT, max_favorable_excursion FLOAT, "
+            "max_adverse_excursion FLOAT, trading_mode VARCHAR(16), "
+            "user_id INTEGER, bot_id INTEGER"
+            ")"
+        ))
+    monkeypatch.setattr(db_session, "_engine", engine)
+
+    db_session.sync_schema()
+
+    indexed_columns = {
+        idx["column_names"][0]
+        for idx in inspect(engine).get_indexes("trades")
+        if len(idx["column_names"]) == 1
+    }
+    assert "bot_id" in indexed_columns
+    assert "user_id" in indexed_columns
+    assert "symbol" in indexed_columns
+
+
+def test_sync_schema_index_check_is_a_noop_when_indexes_already_exist(monkeypatch):
+    engine = _sqlite_engine()
+    Base.metadata.create_all(engine)  # a fully up-to-date schema, indexes included
+    monkeypatch.setattr(db_session, "_engine", engine)
+
+    indexes_before = inspect(engine).get_indexes("trades")
+    db_session.sync_schema()  # must not raise, must not duplicate any index
+    indexes_after = inspect(engine).get_indexes("trades")
+
+    assert len(indexes_after) == len(indexes_before)
+
+
 def test_create_all_both_creates_new_tables_and_fixes_a_drifted_one(monkeypatch):
     engine = _sqlite_engine()
     _create_pre_2026_08_11_trades_table(engine)  # trades exists but is drifted
