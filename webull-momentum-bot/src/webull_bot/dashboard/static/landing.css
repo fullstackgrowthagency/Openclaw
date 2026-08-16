@@ -260,6 +260,7 @@ body.lp header.is-stuck .header-logo { height: 30px; }
 }
 
 .p-statement em { font-style: normal; color: var(--muted); }
+.p-statement-caps { text-transform: uppercase; }
 .p-accent { color: var(--accent); }
 
 .p-stack { display: flex; flex-direction: column; gap: 4px; align-items: center; margin: 32px 0; }
