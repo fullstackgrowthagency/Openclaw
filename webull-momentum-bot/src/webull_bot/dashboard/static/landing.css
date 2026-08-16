@@ -708,9 +708,49 @@ body.lp > header { position: fixed; z-index: 200; }
   align-items: center; justify-content: center; font-size: 10px; color: var(--muted);
 }
 
+.man-list[data-phase="scattered"] { --man-bounce: 6px; }
 .man-list[data-phase="scattered"] .man-item:nth-child(odd)  { transform: translateX(-12px); }
 .man-list[data-phase="scattered"] .man-item:nth-child(even) { transform: translateX(14px); }
 .man-list[data-phase="merged"] .man-item { opacity: .4; transform: scale(.98); }
+
+/* Manual steps bounce left-to-right while held -- reinforces "scattered,
+   done by hand" against panel 02b's calm merged list right after it.
+   Keyframes oscillate around the same -12px/+14px centers the resting
+   rules above already use, so the "scattered" look is unchanged at rest
+   (no-JS, reduced-motion) and the animation just adds motion on top --
+   necessary since a running CSS animation's transform keyframes replace
+   the whole property, so baking the existing offset in is the only way
+   to animate .man-item without the static scatter vanishing while held.
+   Odd/even start in opposite phase so items read as independently
+   drifting rather than one synced wave.
+   --man-bounce is redeclared smaller at each compact breakpoint below
+   (matching .stage's own shrinking padding: 22px -> 18px -> 14px ->
+   10px) so the swing always stays inside the card -- even's resting
+   center (+14px) already touches or exceeds the two tightest paddings
+   on its own, so --man-bounce drops to 0 there rather than add any
+   further reach past an edge that has no room left to give. */
+@keyframes lp-man-bounce-odd {
+  0%, 100% { transform: translateX(calc(-12px - var(--man-bounce))); }
+  50%      { transform: translateX(calc(-12px + var(--man-bounce))); }
+}
+@keyframes lp-man-bounce-even {
+  0%, 100% { transform: translateX(calc(14px + var(--man-bounce))); }
+  50%      { transform: translateX(calc(14px - var(--man-bounce))); }
+}
+
+.fs-panel.is-on .man-list[data-phase="scattered"] .man-item:nth-child(odd) {
+  animation: lp-man-bounce-odd 2.6s ease-in-out infinite;
+}
+.fs-panel.is-on .man-list[data-phase="scattered"] .man-item:nth-child(even) {
+  animation: lp-man-bounce-even 2.6s ease-in-out infinite;
+}
+.fs-panel.is-on .man-list[data-phase="scattered"] .man-item:nth-child(1) { animation-delay: 0ms; }
+.fs-panel.is-on .man-list[data-phase="scattered"] .man-item:nth-child(2) { animation-delay: 130ms; }
+.fs-panel.is-on .man-list[data-phase="scattered"] .man-item:nth-child(3) { animation-delay: 260ms; }
+.fs-panel.is-on .man-list[data-phase="scattered"] .man-item:nth-child(4) { animation-delay: 390ms; }
+.fs-panel.is-on .man-list[data-phase="scattered"] .man-item:nth-child(5) { animation-delay: 520ms; }
+.fs-panel.is-on .man-list[data-phase="scattered"] .man-item:nth-child(6) { animation-delay: 650ms; }
+.fs-panel.is-on .man-list[data-phase="scattered"] .man-item:nth-child(7) { animation-delay: 780ms; }
 
 .man-merged {
   margin-top: 14px; border: 1px solid var(--accent); border-radius: 10px;
@@ -1082,6 +1122,7 @@ body.lp > header { position: fixed; z-index: 200; }
   .p-title { font-size: clamp(21px, 2.8vw, 30px); }
   .p-body { font-size: 15px; }
   .stage { padding: 18px; max-width: 440px; }
+  .man-list[data-phase="scattered"] { --man-bounce: 2px; }
   .p-cards { gap: 12px; }
   .p-card { padding: 16px; }
   .p-stack { margin: 22px 0; }
@@ -1182,6 +1223,7 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
   .stage-head { margin-bottom: 10px; }
 
   .man-list { gap: 4px; }
+  .man-list[data-phase="scattered"] { --man-bounce: 0px; }
   .man-item { padding: 7px 10px; gap: 8px; }
   .man-item i { width: 16px; height: 16px; font-size: 9px; }
   .man-merged { margin-top: 8px; padding: 9px 11px; gap: 8px; }
@@ -1236,6 +1278,7 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
   .stage-head { margin-bottom: 6px; }
 
   .man-list { gap: 3px; }
+  .man-list[data-phase="scattered"] { --man-bounce: 0px; }
   .man-item { padding: 5px 8px; gap: 7px; }
   .man-item i { width: 14px; height: 14px; }
   .man-merged { margin-top: 4px; padding: 5px 8px; gap: 6px; }
