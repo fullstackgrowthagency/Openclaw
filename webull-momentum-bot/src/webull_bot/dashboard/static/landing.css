@@ -275,6 +275,27 @@ body.lp header.is-stuck .header-logo { height: 30px; }
   animation: lp-glow-pulse 2.2s var(--lp-panel-ease) infinite;
 }
 
+/* The list lines above the punchline take turns being highlighted --
+   color/opacity only, same fly-through-safety reasoning as the glow
+   above. One shared keyframe, staggered per line via nth-child so
+   exactly one is highlighted at a time as the delays cycle through. */
+@keyframes lp-stack-spotlight {
+  0%   { color: var(--muted); opacity: .55; }
+  4%   { color: var(--text);  opacity: 1;   }
+  16%  { color: var(--text);  opacity: 1;   }
+  22%  { color: var(--muted); opacity: .55; }
+  100% { color: var(--muted); opacity: .55; }
+}
+
+.fs-panel.is-on .p-stack span:not(.on) {
+  animation: lp-stack-spotlight 3.5s var(--lp-panel-ease) infinite;
+}
+.fs-panel.is-on .p-stack span:nth-child(1):not(.on) { animation-delay: 0ms; }
+.fs-panel.is-on .p-stack span:nth-child(2):not(.on) { animation-delay: 700ms; }
+.fs-panel.is-on .p-stack span:nth-child(3):not(.on) { animation-delay: 1400ms; }
+.fs-panel.is-on .p-stack span:nth-child(4):not(.on) { animation-delay: 2100ms; }
+.fs-panel.is-on .p-stack span:nth-child(5):not(.on) { animation-delay: 2800ms; }
+
 .p-cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 32px; }
 
 /* =========================================================================
