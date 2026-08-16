@@ -266,6 +266,15 @@ body.lp header.is-stuck .header-logo { height: 30px; }
 .p-stack span { font-size: clamp(16px, 2.1vw, 22px); color: var(--muted); font-weight: 600; }
 .p-stack span.on { color: var(--text); }
 
+/* The punchline line gets a continuous glow while held. Text-shadow only
+   -- no transform -- since .p-stack span is one of the elements the
+   scroll fly-through itself scales (see the FLY-THROUGH block further
+   down); a second transform source here would fight that scroll-driven
+   one and visibly break the arrival/departure animation. */
+.fs-panel.is-on .p-stack span.on {
+  animation: lp-glow-pulse 2.2s var(--lp-panel-ease) infinite;
+}
+
 .p-cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 32px; }
 
 /* =========================================================================
@@ -485,6 +494,33 @@ body.lp > header { position: fixed; z-index: 200; }
    where every panel renders at once.
    ========================================================================= */
 
+/* Shared "live" keyframe library (2026-08-16) -- reused across most of the
+   stage widgets below for their continuous, .is-on-gated looping motion.
+   Kept to a handful of shapes (breathing opacity, an expanding status-dot
+   ring, a text glow) so the whole deck reads as one consistent visual
+   language rather than ten unrelated effects. */
+@keyframes lp-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .4; }
+}
+
+@keyframes lp-ring-pulse {
+  0%   { box-shadow: 0 0 0 4px var(--lp-green-soft); }
+  60%  { box-shadow: 0 0 0 9px transparent; }
+  100% { box-shadow: 0 0 0 4px var(--lp-green-soft); }
+}
+
+@keyframes lp-ring-pulse-sm {
+  0%   { box-shadow: 0 0 0 0 var(--lp-green-soft); }
+  70%  { box-shadow: 0 0 0 5px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+@keyframes lp-glow-pulse {
+  0%, 100% { text-shadow: 0 0 0 transparent; }
+  50%      { text-shadow: 0 0 10px var(--lp-accent-line); }
+}
+
 /* ---- manual steps ---- */
 
 .man-list { display: flex; flex-direction: column; gap: 7px; }
@@ -517,6 +553,34 @@ body.lp > header { position: fixed; z-index: 200; }
 .man-dot {
   width: 8px; height: 8px; border-radius: 50%; background: var(--green);
   flex-shrink: 0; box-shadow: 0 0 0 4px var(--lp-green-soft);
+}
+
+/* Continuous "live" motion while the panel is held (2026-08-16) -- unlike
+   eval-bar/flow/scan-grid's one-shot arrival animation, these loop for as
+   long as .is-on is present and stop the instant the panel departs (the
+   rule simply no longer matches). Targets are all several levels inside
+   .panel-stage, never the elements the scroll fly-through itself
+   transforms (.panel-stage, .p-num, .p-title, .p-body, .p-terms, .p-cta,
+   .p-list, .p-cards, .p-chips, .p-stack span, .p-hint -- see the FLY-
+   THROUGH block above), so nothing here fights that scroll-driven
+   transform: scale(...). */
+
+.fs-panel.is-on .man-item i {
+  animation: lp-live-pulse 1.7s var(--lp-panel-ease) infinite;
+}
+
+.fs-panel.is-on .man-item:nth-child(1) i { animation-delay: 0ms; }
+.fs-panel.is-on .man-item:nth-child(2) i { animation-delay: 90ms; }
+.fs-panel.is-on .man-item:nth-child(3) i { animation-delay: 180ms; }
+.fs-panel.is-on .man-item:nth-child(4) i { animation-delay: 270ms; }
+.fs-panel.is-on .man-item:nth-child(5) i { animation-delay: 360ms; }
+.fs-panel.is-on .man-item:nth-child(6) i { animation-delay: 450ms; }
+.fs-panel.is-on .man-item:nth-child(7) i { animation-delay: 540ms; }
+
+/* The "Running" status dot (02b only) gets its own expanding-ring pulse --
+   a plain live-indicator, matching the label right next to it. */
+.fs-panel.is-on .man-merged .man-dot {
+  animation: lp-ring-pulse 1.8s var(--lp-panel-ease) infinite;
 }
 
 /* ---- market scan grid ----
@@ -614,12 +678,28 @@ body.lp > header { position: fixed; z-index: 200; }
   text-transform: uppercase; color: var(--accent);
 }
 
+/* Each "Defined" flag pulses -- reads as continuously enforced, not just
+   a static label. */
+.fs-panel.is-on .rule-flag { animation: lp-live-pulse 1.9s var(--lp-panel-ease) infinite; }
+.fs-panel.is-on .rule-row:nth-child(1) .rule-flag { animation-delay: 0ms; }
+.fs-panel.is-on .rule-row:nth-child(2) .rule-flag { animation-delay: 110ms; }
+.fs-panel.is-on .rule-row:nth-child(3) .rule-flag { animation-delay: 220ms; }
+.fs-panel.is-on .rule-row:nth-child(4) .rule-flag { animation-delay: 330ms; }
+.fs-panel.is-on .rule-row:nth-child(5) .rule-flag { animation-delay: 440ms; }
+.fs-panel.is-on .rule-row:nth-child(6) .rule-flag { animation-delay: 550ms; }
+
 .risk-out { border: 1px solid var(--panel-border); border-radius: 10px; background: var(--bg); padding: 13px 15px; }
 .risk-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; padding: 5px 0; }
 .risk-line span { color: var(--muted); }
 .risk-line b { color: var(--text); font-weight: 600; }
 .risk-line.is-key { border-top: 1px solid var(--panel-border); margin-top: 6px; padding-top: 10px; }
 .risk-line.is-key b { color: var(--accent); }
+
+/* The closing line ("Trade structure -- Determined automatically") gets a
+   continuous glow, marking it as the live conclusion the rest builds to. */
+.fs-panel.is-on .risk-line.is-key b {
+  animation: lp-glow-pulse 2.1s var(--lp-panel-ease) infinite;
+}
 
 /* ---- execution ---- */
 
@@ -632,7 +712,24 @@ body.lp > header { position: fixed; z-index: 200; }
 
 .exec-node strong { color: var(--text); font-size: 14px; font-weight: 600; }
 .exec-node em { font-style: normal; color: var(--muted); font-size: 12px; margin-left: auto; }
-.exec-link { width: 1px; height: 16px; background: var(--accent); margin: 0 auto; }
+
+/* A dashed line rather than a solid one so a looping background-position
+   shift reads as current continuously flowing down the chain -- the most
+   literal match for "Signal, risk, order -- automatically" this deck has. */
+.exec-link {
+  width: 2px; height: 16px; margin: 0 auto;
+  background: repeating-linear-gradient(180deg, var(--accent) 0 4px, transparent 4px 8px);
+  background-size: 100% 16px;
+}
+
+.fs-panel.is-on .exec-link { animation: lp-flow-dash .5s linear infinite; }
+
+@keyframes lp-flow-dash { to { background-position: 0 16px; } }
+
+.fs-panel.is-on .exec-node { animation: lp-live-pulse 2s var(--lp-panel-ease) infinite; }
+.fs-panel.is-on .exec-node:nth-child(1) { animation-delay: 0ms; }
+.fs-panel.is-on .exec-node:nth-child(3) { animation-delay: 220ms; }
+.fs-panel.is-on .exec-node:nth-child(5) { animation-delay: 440ms; }
 
 .manage-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
 
@@ -644,6 +741,18 @@ body.lp > header { position: fixed; z-index: 200; }
 
 .manage-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 
+/* Each safeguard's status dot pulses -- a bank of live monitors, not a
+   static checklist. */
+.fs-panel.is-on .manage-chip::before { animation: lp-ring-pulse-sm 1.6s var(--lp-panel-ease) infinite; }
+.fs-panel.is-on .manage-chip:nth-child(1)::before { animation-delay: 0ms; }
+.fs-panel.is-on .manage-chip:nth-child(2)::before { animation-delay: 80ms; }
+.fs-panel.is-on .manage-chip:nth-child(3)::before { animation-delay: 160ms; }
+.fs-panel.is-on .manage-chip:nth-child(4)::before { animation-delay: 240ms; }
+.fs-panel.is-on .manage-chip:nth-child(5)::before { animation-delay: 320ms; }
+.fs-panel.is-on .manage-chip:nth-child(6)::before { animation-delay: 400ms; }
+.fs-panel.is-on .manage-chip:nth-child(7)::before { animation-delay: 480ms; }
+.fs-panel.is-on .manage-chip:nth-child(8)::before { animation-delay: 560ms; }
+
 /* ---- strategy modules ---- */
 
 .mods { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
@@ -652,7 +761,26 @@ body.lp > header { position: fixed; z-index: 200; }
 .mod-name { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 9px; display: flex; align-items: center; gap: 8px; }
 .mod-name::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--panel-border); flex-shrink: 0; }
 .mod-bars { display: flex; gap: 3px; align-items: flex-end; height: 24px; }
-.mod-bars i { flex: 1; background: var(--panel-border); border-radius: 2px; height: 30%; }
+.mod-bars i { flex: 1; background: var(--panel-border); border-radius: 2px; height: 30%; transform-origin: bottom; }
+
+/* Live-ticking sparkline while the panel is held -- oscillates around
+   each bar's own height (set below per mod/bar), never replacing it, so
+   this works regardless of which bars a given mod has tall vs short.
+   Only the markup's active phase (data-phase="3", every mod running in
+   parallel) is ever actually rendered on this page. */
+@keyframes lp-bar-tick {
+  0%, 100% { transform: scaleY(1); }
+  50%      { transform: scaleY(.8); }
+}
+
+.fs-panel.is-on .mods[data-phase="3"] .mod-bars i { animation: lp-bar-tick 1.3s var(--lp-panel-ease) infinite; }
+.fs-panel.is-on .mods[data-phase="3"] .mod-bars i:nth-child(2) { animation-delay: 90ms; }
+.fs-panel.is-on .mods[data-phase="3"] .mod-bars i:nth-child(3) { animation-delay: 180ms; }
+.fs-panel.is-on .mods[data-phase="3"] .mod-bars i:nth-child(4) { animation-delay: 270ms; }
+.fs-panel.is-on .mods[data-phase="3"] .mod-bars i:nth-child(5) { animation-delay: 360ms; }
+.fs-panel.is-on .mods[data-phase="3"] .mod-bars i:nth-child(6) { animation-delay: 450ms; }
+.fs-panel.is-on .mods[data-phase="3"] .mod-bars i:nth-child(7) { animation-delay: 540ms; }
+.fs-panel.is-on .mods[data-phase="3"] .mod-bars i:nth-child(8) { animation-delay: 630ms; }
 
 .mods[data-phase="1"] .mod:nth-child(1),
 .mods[data-phase="2"] .mod:nth-child(-n+3),
@@ -720,12 +848,53 @@ body.lp > header { position: fixed; z-index: 200; }
 .p-card h3 { font-size: 16px; font-weight: 650; margin: 0 0 8px; color: var(--text); }
 .p-card p { margin: 0; color: var(--muted); font-size: 14px; }
 
+/* Individual .p-card (not the .p-cards container, which the fly-through
+   already scales) gets a continuous border-glow -- "always watching."
+   box-shadow only, so it composes cleanly under the container's own
+   scroll-driven scale rather than fighting it. */
+@keyframes lp-card-glow {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; border-color: var(--panel-border); }
+  50%      { box-shadow: 0 0 18px -4px var(--lp-accent-line); border-color: var(--accent); }
+}
+.fs-panel.is-on .p-card { animation: lp-card-glow 2.6s var(--lp-panel-ease) infinite; }
+.fs-panel.is-on .p-card:nth-child(2) { animation-delay: 300ms; }
+.fs-panel.is-on .p-card:nth-child(3) { animation-delay: 600ms; }
+
 .p-list { list-style: none; margin: 0; padding: 0; text-align: left; }
 .p-list li { position: relative; padding: 0 0 15px 28px; color: var(--muted); font-size: 16px; }
 .p-list li::before { content: ""; position: absolute; left: 4px; top: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
 .p-list li strong { color: var(--text); font-weight: 600; }
 
-.p-chips { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+/* Bullet dots pulse -- only the bullets, not .p-list itself (a fly-through
+   target). */
+.fs-panel.is-on .p-list li::before { animation: lp-ring-pulse-sm 1.8s var(--lp-panel-ease) infinite; }
+.fs-panel.is-on .p-list li:nth-child(1)::before { animation-delay: 0ms; }
+.fs-panel.is-on .p-list li:nth-child(2)::before { animation-delay: 120ms; }
+.fs-panel.is-on .p-list li:nth-child(3)::before { animation-delay: 240ms; }
+.fs-panel.is-on .p-list li:nth-child(4)::before { animation-delay: 360ms; }
+
+.p-chips { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; position: relative; overflow: hidden; }
+
+/* A soft light band loops across the chip row -- these represent the
+   always-running infrastructure pieces underneath a strategy, so a
+   continuous sweep (not a one-shot reveal) is the point. A pseudo-element
+   is a separate box, so this doesn't touch .p-chips' own scroll-driven
+   transform. */
+.p-chips::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--lp-accent-soft) 45%, transparent 88%);
+  transform: translateX(-120%); opacity: 0;
+}
+.fs-panel.is-on .p-chips::after {
+  animation: lp-chip-sweep 2.8s var(--lp-panel-ease) infinite;
+}
+@keyframes lp-chip-sweep {
+  0%   { transform: translateX(-120%); opacity: 0; }
+  12%  { opacity: .8; }
+  50%  { opacity: .8; }
+  62%  { transform: translateX(120%); opacity: 0; }
+  100% { transform: translateX(120%); opacity: 0; }
+}
 
 .p-chip {
   border: 1px solid var(--panel-border); background: var(--panel); border-radius: 999px;
