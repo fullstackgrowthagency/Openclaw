@@ -519,32 +519,64 @@ body.lp > header { position: fixed; z-index: 200; }
   flex-shrink: 0; box-shadow: 0 0 0 4px var(--lp-green-soft);
 }
 
-/* ---- market scan grid ---- */
+/* ---- market scan grid ----
+   Represents the universe being scanned: most cells are unmatched
+   (visible but dim, so the grid actually reads as a grid), a handful
+   are flagged matches (accent), and phase 3's single top-tier cell is
+   the confirmed candidate (green). Base state already shows the final
+   look with no JS/animation required -- .is-on below only adds a
+   one-time pulse-in + scan sweep on top, the same "base = resting
+   look, is-on = one-shot flourish" split .eval-bar already uses. */
 
-.scan-grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px; margin-bottom: 16px; }
+.scan-grid { position: relative; overflow: hidden; display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px; margin-bottom: 16px; }
 
 .scan-cell {
   aspect-ratio: 1; border-radius: 4px;
-  background: var(--bg); border: 1px solid var(--panel-border); opacity: .5;
+  background: var(--bg); border: 1px solid var(--panel-border); opacity: .3;
 }
 
-.scan-grid[data-phase="1"] .scan-cell { opacity: .14; }
-.scan-grid[data-phase="1"] .scan-cell[data-tier="1"],
-.scan-grid[data-phase="1"] .scan-cell[data-tier="2"],
-.scan-grid[data-phase="1"] .scan-cell[data-tier="3"] {
-  opacity: 1; border-color: var(--accent); background: var(--lp-accent-soft);
-}
+.scan-cell[data-tier] { opacity: 1; border-color: var(--accent); background: var(--lp-accent-soft); }
 
-.scan-grid[data-phase="2"] .scan-cell { opacity: .1; }
-.scan-grid[data-phase="2"] .scan-cell[data-tier="2"],
-.scan-grid[data-phase="2"] .scan-cell[data-tier="3"] {
-  opacity: 1; border-color: var(--accent); background: var(--lp-accent-soft);
-}
-
-.scan-grid[data-phase="3"] .scan-cell { opacity: .08; }
-.scan-grid[data-phase="3"] .scan-cell[data-tier="2"] { opacity: .45; }
 .scan-grid[data-phase="3"] .scan-cell[data-tier="3"] {
-  opacity: 1; border-color: var(--green); background: var(--lp-green-soft); transform: scale(1.15);
+  border-color: var(--green); background: var(--lp-green-soft); transform: scale(1.15);
+}
+
+/* One sweep band, not per-cell -- stays cheap regardless of grid size. */
+.scan-grid::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--lp-accent-soft) 45%, transparent 88%);
+  transform: translateX(-120%);
+}
+
+.fs-panel.is-on .scan-grid::after {
+  animation: lp-scan-sweep 1.6s var(--lp-panel-ease) .1s 1 both;
+}
+
+@keyframes lp-scan-sweep {
+  0%   { transform: translateX(-120%); opacity: .9; }
+  80%  { opacity: .9; }
+  100% { transform: translateX(120%); opacity: 0; }
+}
+
+/* Matches pulse in, staggered via each cell's own --seq (set inline in
+   the markup, same convention as .eval-bar's --w fill width). */
+.fs-panel.is-on .scan-cell[data-tier] {
+  animation: lp-cell-in .45s var(--lp-panel-ease) both;
+  animation-delay: calc(var(--seq, 0) * 55ms);
+}
+
+@keyframes lp-cell-in {
+  from { opacity: 0; transform: scale(.5); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.fs-panel.is-on .scan-grid[data-phase="3"] .scan-cell[data-tier="3"] {
+  animation-name: lp-cell-in-confirmed;
+}
+
+@keyframes lp-cell-in-confirmed {
+  from { opacity: 0; transform: scale(.5); }
+  to   { opacity: 1; transform: scale(1.15); }
 }
 
 .scan-legend { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--muted); }
