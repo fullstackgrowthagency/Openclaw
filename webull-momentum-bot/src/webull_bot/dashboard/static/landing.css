@@ -589,6 +589,16 @@ body.lp > header { position: fixed; z-index: 200; }
   color: var(--muted); font-size: 12px; letter-spacing: .1em; text-transform: uppercase;
 }
 
+/* On desktop widths the panel's centered content block (headline, body,
+   CTA row) can run tall enough on a short-but-wide browser window to
+   nudge into the hint's fixed 34px-from-bottom position -- the narrow-
+   viewport compacting rules below don't apply here since they're keyed
+   off width, not height. Sitting a little closer to the bottom edge
+   gives the CTA row more clearance without touching mobile at all. */
+@media (min-width: 901px) {
+  .p-hint { bottom: 14px; }
+}
+
 .p-hint span {
   width: 1px; height: 38px; background: linear-gradient(var(--accent), transparent);
   animation: lp-drop 1.9s var(--lp-ease) infinite;
