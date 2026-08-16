@@ -299,10 +299,13 @@
     return Math.round(dp * (panels.length - 1));
   }
 
-  // Ease in and out: starts gently, coasts, settles. A linear scroll reads
-  // as mechanical and makes the hold at each end hard to feel.
+  // Ease out only: full speed the instant a step starts (immediate
+  // response to the scroll that triggered it -- an ease-in start here
+  // read as a delay before anything happened), decelerating smoothly into
+  // the landing so the hold at the far end still reads as a settle, not
+  // an abrupt stop. A linear scroll would read as mechanical throughout.
   function ease(t) {
-    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    return 1 - Math.pow(1 - t, 3);
   }
 
   function goTo(i, ms) {
