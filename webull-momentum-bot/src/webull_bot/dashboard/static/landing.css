@@ -797,7 +797,15 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
    summary box is added (panel 02b). Same rule as always: spacing and
    sizing only, never font-size. */
 @media (max-width: 900px) and (max-height: 820px) {
-  .fs-panel { padding-top: 34px; padding-bottom: 18px; }
+  /* padding-top must clear the fixed header, not just look tight: header
+     is position:fixed and overlays panel content, so panel-inner's own
+     top padding is the ONLY thing keeping content out from under it.
+     header.is-stuck (true for any panel past the first, since scrolling
+     into the deck immediately passes the 24px is-stuck threshold) is
+     9px padding + 30px logo + 9px = 48px tall -- padding-top must stay
+     above that with a small margin, or the header clips the panel's
+     first line exactly as happened when this was tightened to 34px. */
+  .fs-panel { padding-top: 54px; padding-bottom: 18px; }
   .panel-split { gap: 8px; }
   .p-num { margin-bottom: 6px; }
   .p-title { margin-bottom: 6px; }
@@ -891,6 +899,28 @@ html:not(.js) .fs-panel .flow-rail::after { height: 100%; }
      the "COMPACT VISUALS" block, for the rest of the short-viewport
      tuning). */
   .mods, .manage-grid { grid-template-columns: 1fr; }
+
+  /* "Log in"/"Sign up" as bordered/filled buttons (2026-08-16) are wider
+     than the plain text links they replaced -- at this width the pair no
+     longer fits the logo + nav row on one line, so each button's text
+     wraps onto two lines. That's not just visually broken: it roughly
+     doubles the fixed header's real height, which every fs-panel's
+     top padding is sized to clear (see the COMPACT VISUALS blocks
+     above) -- an unaccounted-for taller header there means the header
+     overlaps the first line of panel content instead of sitting above
+     it. Tightening spacing here (never font-size) keeps both buttons on
+     one line, which keeps the header's height fixed and predictable. */
+  .lp-nav { gap: 10px; }
+  /* white-space:nowrap alone is the fix. flex-shrink:0 looks like it
+     should belong here too ("don't let this shrink below content size")
+     but Chromium resolves the shrink-0 flex-basis for these items to
+     something far wider than their actual content (~155px measured for
+     "Log in" vs. the ~68px it renders at with shrink left at its default
+     of 1) -- adding it re-breaks exactly what this rule fixes, just via
+     overflow past the viewport edge instead of wrapping. Confirmed via
+     direct measurement; leave shrink at its default. */
+  .lp-nav a { white-space: nowrap; }
+  .lp-nav .lp-btn-sm { padding: 7px 12px; }
 }
 
 /* =========================================================================
