@@ -38,6 +38,28 @@ body.lp { font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased
 .lp-wrap { max-width: var(--lp-max); margin: 0 auto; padding: 0 28px; position: relative; }
 .lp-narrow { max-width: 820px; }
 
+/* Hide the native scrollbar while the animated deck is actually running
+   (2026-08-16): every panel transition -- wheel, touch, or the
+   scroll-settle snap -- drives window.scrollTo() programmatically many
+   times a frame, which makes most browsers' auto-hide scrollbar flash in
+   and out on every single transition. .lp-progress is this page's own
+   scroll indicator already, so the native one is redundant here, not
+   load-bearing. Scoped to js + no-preference only: under reduced-motion
+   or no-JS the deck fully un-pins into an ordinary long page with real
+   user-driven scrolling, where the native scrollbar is genuinely useful
+   and there's no programmatic-scroll flashing to hide in the first place. */
+@media (prefers-reduced-motion: no-preference) {
+  html.js body.lp,
+  html.js body.lp .panel-inner {
+    scrollbar-width: none;       /* Firefox */
+    -ms-overflow-style: none;    /* legacy Edge */
+  }
+  html.js body.lp::-webkit-scrollbar,
+  html.js body.lp .panel-inner::-webkit-scrollbar {
+    display: none;               /* Chrome/Safari/Edge */
+  }
+}
+
 /* =========================================================================
    Header + progress
    ========================================================================= */
