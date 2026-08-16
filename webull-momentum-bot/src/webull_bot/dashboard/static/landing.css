@@ -336,7 +336,12 @@ body.lp > .deck,
 body.lp > .lp-section,
 body.lp > footer { position: relative; z-index: 1; }
 
-body.lp > header { position: fixed; }
+/* This selector ties in specificity with "body.lp header" above and wins by
+   source order, so it's the one that actually controls header stacking --
+   give it an explicit z-index well above the deck panels' inline JS-driven
+   range (~95-105 while a panel is held/clickable) so the header nav never
+   gets covered by an active panel. */
+body.lp > header { position: fixed; z-index: 200; }
 
 /* Very slight drift over the length of the page -- enough that the backdrop
    isn't dead still behind moving content, small enough not to read as a
