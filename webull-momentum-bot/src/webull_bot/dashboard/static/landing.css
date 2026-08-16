@@ -348,14 +348,19 @@ body.lp header.is-stuck .header-logo { height: 30px; }
    exact touching edge: two ups stack bottom-on-top (climbing
    staircase), two downs stack top-on-bottom (falling staircase), and
    an up/down pivot touches at the shared high or low between them.
-   Path: 64,76,62,50,58,66,32,54,14,32,52,72,38,4,24 -- four
+   Path: 64,76,62,50,58,66,32,54,14,32,52,98,70,2,24 -- four
    successive swing highs (candle 3's close at 50, candle 6's at 32,
-   candle 8's at 14, candles 12/13's shared close at 4), each one a
-   clear step higher than the last and evenly spread across the whole
-   0-100% range rather than bunched near the top, so the "the process
-   can be automated" rally reads as a real ascending trend, not just
-   noise -- reinforced by the taller .hero-chart box above (44-68px ->
-   54-82px) giving that separation more literal pixels to work with.
+   candle 8's at 14, candle 13's own close at 2), each one a clear step
+   higher than the last and evenly spread across the whole 0-100%
+   range rather than bunched near the top, so the "the process can be
+   automated" rally reads as a real ascending trend, not just noise --
+   reinforced by the taller .hero-chart box (44-68px -> 54-82px) giving
+   that separation more literal pixels to work with. Candle 13's own
+   height is exactly 2x its prior value (34 -> 68) -- reaching that
+   meant deepening candle 11's trough (p11: 72 -> 98) so candle 12 has
+   still has real room of its own (its height shrank 34 -> 28 as a
+   result, an unavoidable side effect of the fixed 0-100% range, not
+   an arbitrary choice) before candle 13's rally to the new high.
    Colors in the markup already match this path's up/down direction
    candle-to-candle.
    Each wick (::before) is still sized independently per candle (only
@@ -384,13 +389,13 @@ body.lp header.is-stuck .header-logo { height: 30px; }
 .hc:nth-child(9)::before { top: 2%;  bottom: 44%; }
 .hc:nth-child(10)::after { top: 32%; height: 20%; }
 .hc:nth-child(10)::before { top: 16%; bottom: 28%; }
-.hc:nth-child(11)::after { top: 52%; height: 20%; }
-.hc:nth-child(11)::before { top: 36%; bottom: 12%; }
-.hc:nth-child(12)::after { top: 38%; height: 34%; }
-.hc:nth-child(12)::before { top: 22%; bottom: 12%; }
-.hc:nth-child(13)::after { top: 4%;  height: 34%; }
-.hc:nth-child(13)::before { top: 0%;  bottom: 38%; }
-.hc:nth-child(14)::after { top: 4%;  height: 20%; }
+.hc:nth-child(11)::after { top: 52%; height: 46%; }
+.hc:nth-child(11)::before { top: 36%; bottom: 0%; }
+.hc:nth-child(12)::after { top: 70%; height: 28%; }
+.hc:nth-child(12)::before { top: 54%; bottom: 0%; }
+.hc:nth-child(13)::after { top: 2%;  height: 68%; }
+.hc:nth-child(13)::before { top: 0%;  bottom: 10%; }
+.hc:nth-child(14)::after { top: 2%;  height: 22%; }
 .hc:nth-child(14)::before { top: 0%;  bottom: 52%; }
 
 /* A dedicated keyframe rather than reusing .mod-bars' shared lp-bar-tick:
