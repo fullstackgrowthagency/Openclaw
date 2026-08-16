@@ -339,6 +339,19 @@
       if (!deckEngaged()) return;             // tail scrolls natively
       var dir = e.deltaY > 0 ? 1 : -1;
       var idx = currentIndex();
+
+      // If the held panel's own content is taller than its box, let native
+      // scrolling reach .panel-inner (overflow-y:auto, landing.css:196)
+      // before nav() snaps away from it -- otherwise wheel is fully
+      // captured below and anything below the fold is unreachable.
+      var activeInner = panels[idx].querySelector(".panel-inner");
+      if (activeInner) {
+        var atTop = activeInner.scrollTop <= 0;
+        var atBottom = activeInner.scrollTop + activeInner.clientHeight >= activeInner.scrollHeight - 1;
+        if (dir > 0 && !atBottom) return;
+        if (dir < 0 && !atTop) return;
+      }
+
       var r = deck.getBoundingClientRect();
       // Hand control back at the ends so the page can leave the deck.
       if (dir > 0 && idx >= panels.length - 1 && r.bottom <= window.innerHeight + 1) return;

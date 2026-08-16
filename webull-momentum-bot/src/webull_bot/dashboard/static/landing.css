@@ -264,28 +264,48 @@ body.lp header.is-stuck .header-logo { height: 30px; }
 .p-accent { color: var(--accent); }
 
 .p-stack { display: flex; flex-direction: column; gap: 4px; align-items: center; margin: 32px 0; }
-.p-stack span { font-size: clamp(16px, 2.1vw, 22px); color: var(--muted); font-weight: 600; }
+.p-stack span {
+  font-size: clamp(16px, 2.1vw, 22px); color: var(--muted); font-weight: 600;
+  padding: 4px 12px; border-radius: 8px;
+  box-shadow: 0 0 0 1px transparent; background: transparent;
+}
 .p-stack span.on { color: var(--text); }
 
-/* The punchline line gets a continuous glow while held. Text-shadow only
-   -- no transform -- since .p-stack span is one of the elements the
-   scroll fly-through itself scales (see the FLY-THROUGH block further
-   down); a second transform source here would fight that scroll-driven
-   one and visibly break the arrival/departure animation. */
+/* The punchline line gets a continuous blue flash + glow while held, plus
+   the same highlight container as the spotlight lines below. Color/
+   text-shadow/box-shadow/background only -- no transform -- since .p-stack
+   span is one of the elements the scroll fly-through itself scales (see
+   the FLY-THROUGH block further down); a second transform source here
+   would fight that scroll-driven one and visibly break the arrival/
+   departure animation. Its own keyframe, not the shared lp-glow-pulse --
+   that one's also used by .risk-line.is-key b, which must stay a static
+   accent blue and only pulse its text-shadow, not flip color. */
 .fs-panel.is-on .p-stack span.on {
-  animation: lp-glow-pulse 2.2s var(--lp-panel-ease) infinite;
+  animation: lp-stack-on-flash 2.2s var(--lp-panel-ease) infinite;
+}
+@keyframes lp-stack-on-flash {
+  0%, 100% {
+    color: var(--text); text-shadow: 0 0 0 transparent;
+    box-shadow: 0 0 0 1px transparent; background: transparent;
+  }
+  50% {
+    color: var(--accent); text-shadow: 0 0 10px var(--lp-accent-line);
+    box-shadow: 0 0 0 1px var(--accent); background: var(--lp-accent-soft);
+  }
 }
 
-/* The list lines above the punchline take turns being highlighted --
-   color/opacity only, same fly-through-safety reasoning as the glow
-   above. One shared keyframe, staggered per line via nth-child so
+/* The list lines above the punchline take turns being highlighted -- a
+   container (box-shadow + background, not border, so it doesn't add box
+   size beyond the padding already on .p-stack span -- same reasoning as
+   .p-card's glow above) fades in around whichever line is currently
+   spotlighted. One shared keyframe, staggered per line via nth-child so
    exactly one is highlighted at a time as the delays cycle through. */
 @keyframes lp-stack-spotlight {
-  0%   { color: var(--muted); opacity: .55; }
-  4%   { color: var(--text);  opacity: 1;   }
-  16%  { color: var(--text);  opacity: 1;   }
-  22%  { color: var(--muted); opacity: .55; }
-  100% { color: var(--muted); opacity: .55; }
+  0%   { color: var(--muted); opacity: .55; box-shadow: 0 0 0 1px transparent; background: transparent; }
+  4%   { color: var(--text);  opacity: 1;   box-shadow: 0 0 0 1px var(--accent); background: var(--lp-accent-soft); }
+  16%  { color: var(--text);  opacity: 1;   box-shadow: 0 0 0 1px var(--accent); background: var(--lp-accent-soft); }
+  22%  { color: var(--muted); opacity: .55; box-shadow: 0 0 0 1px transparent; background: transparent; }
+  100% { color: var(--muted); opacity: .55; box-shadow: 0 0 0 1px transparent; background: transparent; }
 }
 
 .fs-panel.is-on .p-stack span:not(.on) {
@@ -1138,6 +1158,7 @@ body.lp > header { position: fixed; z-index: 200; }
   .p-cards { gap: 12px; }
   .p-card { padding: 16px; }
   .p-stack { margin: 22px 0; }
+  .p-stack span { padding: 3px 10px; }
   .scan-grid { gap: 4px; }
 
   /* Width-agnostic, so this also covers a short-but-wide desktop
