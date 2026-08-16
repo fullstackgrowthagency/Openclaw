@@ -740,6 +740,106 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
 }
 
 /* =========================================================================
+   COMPACT VISUALS -- narrow AND short together, i.e. an actual phone in
+   portrait (2026-08-16). The max-height:920px block above already shrinks
+   text sizes; this block shrinks everything that ISN'T text -- icons, card
+   padding, list/grid gaps, the copy-to-stage gap -- so even the busiest
+   stage (the 7-item manual-steps list) fits one screen on its own, rather
+   than relying on .panel-inner's overflow-y:auto fallback to make the tail
+   of the content reachable. That fallback stays in place regardless, for
+   any device/zoom level this still isn't enough for.
+   ========================================================================= */
+@media (max-width: 900px) and (max-height: 920px) {
+  .fs-panel { padding-top: 60px; padding-bottom: 40px; }
+  .panel-split { gap: 16px; }
+  .panel-stage { gap: 10px; }
+  .p-num { margin-bottom: 10px; }
+  .p-title { margin-bottom: 10px; }
+  .p-body + .p-body { margin-top: 8px; }
+
+  .stage { padding: 14px; }
+  .stage-head { margin-bottom: 10px; }
+
+  .man-list { gap: 4px; }
+  .man-item { padding: 7px 10px; gap: 8px; }
+  .man-item i { width: 16px; height: 16px; font-size: 9px; }
+  .man-merged { margin-top: 8px; padding: 9px 11px; gap: 8px; }
+
+  .scan-grid { gap: 3px; margin-bottom: 10px; }
+  .eval-rows { gap: 5px; margin-bottom: 10px; }
+
+  .rule-block { gap: 4px; }
+  .rule-row { padding: 7px 10px; gap: 7px; }
+  .risk-out { padding: 9px 11px; }
+  .risk-line { padding: 3px 0; }
+
+  .exec-node { padding: 8px 11px; gap: 9px; }
+  .exec-link { height: 10px; }
+  .manage-grid { gap: 5px; }
+  .manage-chip { padding: 7px 9px; }
+
+  .mods { gap: 6px; }
+  .mod { padding: 9px; }
+  .mod-bars { height: 18px; }
+
+  .flow-node { padding: 3px 0; gap: 11px; }
+  .flow-dot { width: 24px; height: 24px; }
+
+  .p-cards { gap: 8px; }
+  .p-card { padding: 12px; }
+}
+
+/* One tier further for genuinely short screens (2026-08-16) -- an older or
+   smaller phone with the browser's address bar and nav buttons both
+   visible commonly lands in the 600-700px range. The block above already
+   covers the common case; this one exists for stages that are still tight
+   at that range, particularly the manual-steps list once its "merged"
+   summary box is added (panel 02b). Same rule as always: spacing and
+   sizing only, never font-size. */
+@media (max-width: 900px) and (max-height: 820px) {
+  .fs-panel { padding-top: 34px; padding-bottom: 18px; }
+  .panel-split { gap: 8px; }
+  .p-num { margin-bottom: 6px; }
+  .p-title { margin-bottom: 6px; }
+  .p-body + .p-body { margin-top: 6px; }
+
+  .stage { padding: 10px; }
+  .stage-head { margin-bottom: 6px; }
+
+  .man-list { gap: 3px; }
+  .man-item { padding: 5px 8px; gap: 7px; }
+  .man-item i { width: 14px; height: 14px; }
+  .man-merged { margin-top: 4px; padding: 5px 8px; gap: 6px; }
+
+  .panel-stage { gap: 6px; }
+  .scan-grid { gap: 2px; margin-bottom: 6px; }
+  .eval-rows { gap: 3px; margin-bottom: 6px; }
+  .stage-note { margin-top: 2px; }
+  .p-terms { margin-top: 10px; gap: 6px; }
+  .p-terms li { padding: 4px 10px; }
+
+  .rule-block { gap: 3px; }
+  .rule-row { padding: 6px 9px; gap: 6px; }
+  .risk-out { padding: 8px 10px; }
+  .risk-line { padding: 2px 0; }
+
+  .exec-node { padding: 7px 10px; gap: 8px; }
+  .exec-link { height: 8px; }
+  .manage-grid { gap: 4px; }
+  .manage-chip { padding: 6px 8px; }
+
+  .mods { gap: 5px; }
+  .mod { padding: 8px; }
+  .mod-bars { height: 16px; }
+
+  .flow-node { padding: 2px 0; gap: 9px; }
+  .flow-dot { width: 22px; height: 22px; }
+
+  .p-cards { gap: 6px; }
+  .p-card { padding: 10px; }
+}
+
+/* =========================================================================
    UN-PIN FALLBACKS -- load-bearing. Without these, a reader with reduced
    motion or with JS off sees panel one and nothing else. (A phone with JS
    and no reduced-motion preference now gets the full fly-through above,
@@ -783,7 +883,13 @@ html:not(.js) .fs-panel .flow-rail::after { height: 100%; }
   .lp-wrap { padding: 0 20px; }
   .p-cta { flex-direction: column; }
   .lp-btn { width: 100%; }
-  .scan-grid { grid-template-columns: repeat(8, 1fr); }
+  /* NOT reducing scan-grid to 8 columns here (2026-08-16): the grids in
+     the deck always hold a multiple of 10 cells (6 or 3 rows), so fewer
+     columns means MORE rows -- taller, not more compact -- which is the
+     opposite of what this breakpoint is for. 10 columns at this width
+     already renders comfortably sized cells (see .man-list's neighbors,
+     the "COMPACT VISUALS" block, for the rest of the short-viewport
+     tuning). */
   .mods, .manage-grid { grid-template-columns: 1fr; }
 }
 
