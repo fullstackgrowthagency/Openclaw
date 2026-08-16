@@ -301,15 +301,18 @@ body.lp header.is-stuck .header-logo { height: 30px; }
 
 /* =========================================================================
    Hero candlestick strip (panel 01) -- purely decorative, sits between the
-   header and the headline. Not one of the elements the fly-through below
-   scales (only .panel-stage/.p-num/.p-title/.p-statement/.p-body/
-   .p-stack span/.p-terms/.p-chips/.p-list/.p-cards/.p-cta/.p-hint are), so
-   it needs no entry there -- it still fades/blurs with the rest of the
-   panel since --o/--blur apply at the .fs-panel level, and its own
-   scaleY/background-position motion never touches anything the scroll
-   transform targets. Colors are all existing tokens (--green/--red/
-   --panel-border/--accent) so it reads as part of the same system as
-   every other widget in the deck, not a new palette. */
+   header and the headline. Grouped into the fly-through's --sa "stage
+   cards" depth band alongside .panel-stage (see the FLY-THROUGH block
+   below) so it arrives/departs with the same scroll-scrubbed scale+fade+
+   blur as the rest of panel 1's content, instead of staying static while
+   everything around it flies. Safe to add there because .hero-chart
+   itself carries no local transform-based animation of its own -- only
+   its children (.hc::after's scaleY tick, .hero-chart-trend's
+   background-position drift) animate, and neither touches .hero-chart's
+   own transform, so the scroll-driven scale(var(--sa)) on the container
+   never gets clobbered by anything inside it. Colors are all existing
+   tokens (--green/--red/--panel-border/--accent) so it reads as part of
+   the same system as every other widget in the deck, not a new palette. */
 .hero-chart {
   width: min(560px, 100%); height: clamp(54px, 9vw, 82px);
   margin: 0 auto 20px; position: relative;
@@ -484,11 +487,13 @@ body.lp header.is-stuck .header-logo { height: 30px; }
   html.js .fs-panel .p-chips,
   html.js .fs-panel .p-stack span,
   html.js .fs-panel .p-hint,
-  html.js .fs-panel .panel-stage {
+  html.js .fs-panel .panel-stage,
+  html.js .fs-panel .hero-chart {
     opacity: var(--o, 0);
   }
 
-  html.js .fs-panel .panel-stage  { transform: scale(var(--sa, .5)); }
+  html.js .fs-panel .panel-stage,
+  html.js .fs-panel .hero-chart   { transform: scale(var(--sa, .5)); }
   html.js .fs-panel .p-num        { transform: scale(var(--sb, .5)); }
   html.js .fs-panel .p-title,
   html.js .fs-panel .p-statement  { transform: scale(var(--sc, .5)); }
@@ -516,7 +521,8 @@ body.lp header.is-stuck .header-logo { height: 30px; }
   html.js .fs-panel[data-leaving="1"] .p-cards,
   html.js .fs-panel[data-leaving="1"] .p-chips,
   html.js .fs-panel[data-leaving="1"] .p-stack span,
-  html.js .fs-panel[data-leaving="1"] .panel-stage {
+  html.js .fs-panel[data-leaving="1"] .panel-stage,
+  html.js .fs-panel[data-leaving="1"] .hero-chart {
     filter: blur(calc(var(--blur, 0) * 1px));
   }
 }
@@ -1279,7 +1285,7 @@ html:not(.js) .fs-panel {
 html:not(.js) .fs-panel .p-num, html:not(.js) .fs-panel .p-title, html:not(.js) .fs-panel .p-body,
 html:not(.js) .fs-panel .p-terms, html:not(.js) .fs-panel .p-statement,
 html:not(.js) .fs-panel .p-stack span, html:not(.js) .fs-panel .p-cta,
-html:not(.js) .fs-panel .panel-stage { opacity: 1; transform: none; }
+html:not(.js) .fs-panel .panel-stage, html:not(.js) .fs-panel .hero-chart { opacity: 1; transform: none; }
 html:not(.js) .p-hint { display: none; }
 html:not(.js) .fs-panel .flow-rail::after { height: 100%; }
 
@@ -1295,7 +1301,7 @@ html:not(.js) .fs-panel .flow-rail::after { height: 100%; }
   .fs-panel * { transition: none !important; animation: none !important; }
   .fs-panel .p-num, .fs-panel .p-title, .fs-panel .p-body, .fs-panel .p-terms,
   .fs-panel .p-statement, .fs-panel .p-stack span, .fs-panel .p-cta,
-  .fs-panel .panel-stage { opacity: 1 !important; transform: none !important; }
+  .fs-panel .panel-stage, .fs-panel .hero-chart { opacity: 1 !important; transform: none !important; }
   [data-reveal] { opacity: 1 !important; transform: none !important; transition: none !important; }
   .p-hint { display: none !important; }
   .fs-panel .flow-rail::after { height: 100% !important; }
