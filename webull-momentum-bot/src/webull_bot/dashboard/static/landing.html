@@ -95,6 +95,54 @@
     <div class="p-hint">Scroll<span></span></div>
   </section>
 
+  <!-- ===== 01b (Webull integration) ===== -->
+  <section class="fs-panel" data-panel>
+    <div class="panel-inner panel-split">
+      <div class="panel-copy">
+        <h2 class="p-title">Trades through your own Webull account</h2>
+        <p class="p-body">
+          FSTrading isn't a broker. It connects to your own Webull account through
+          Webull's OpenAPI, using the app key, app secret, and account ID from your
+          own Webull developer dashboard &mdash; the same connection you'd use to build
+          anything else on top of your account.
+        </p>
+        <p class="p-body">
+          Your credentials are encrypted at rest and never shown back once saved.
+          <strong>Every order the system places is a real order in your own account</strong>
+          &mdash; your funds, your custody, your broker. FSTrading only automates the decisions.
+        </p>
+      </div>
+      <div class="panel-stage">
+        <div class="stage">
+          <div class="stage-head"><span class="stage-title">Webull integration</span><span class="stage-pill">Connected</span></div>
+          <div class="wb-link">
+            <div class="wb-node">
+              <img src="/logo.png" alt="FSTrading" class="wb-node-logo">
+              <span>FSTrading</span>
+            </div>
+            <div class="wb-rail"><div class="wb-rail-pulse"></div></div>
+            <div class="wb-node">
+              <svg class="wb-mark" viewBox="0 0 100 88" aria-hidden="true">
+                <mask id="wb-crescent">
+                  <rect x="0" y="0" width="100" height="88" fill="#000"/>
+                  <circle cx="50" cy="46" r="42" fill="#fff"/>
+                  <circle cx="50" cy="8" r="36" fill="#000"/>
+                </mask>
+                <rect x="0" y="0" width="100" height="88" fill="#1454ff" mask="url(#wb-crescent)"/>
+              </svg>
+              <span>Webull</span>
+            </div>
+          </div>
+          <div class="wb-meta">
+            <div class="wb-meta-row"><span>App key &amp; secret</span><b>Encrypted at rest</b></div>
+            <div class="wb-meta-row"><span>Orders</span><b>Placed in your account</b></div>
+            <div class="wb-meta-row is-key"><span>Connection</span><b>Live</b></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ===== 02a ===== -->
   <section class="fs-panel" data-panel>
     <div class="panel-inner panel-split">

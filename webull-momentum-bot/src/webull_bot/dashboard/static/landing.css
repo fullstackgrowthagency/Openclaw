@@ -712,6 +712,55 @@ body.lp > header { position: fixed; z-index: 200; }
   50%      { text-shadow: 0 0 10px var(--lp-accent-line); }
 }
 
+/* ---- webull integration ---- */
+
+.wb-link { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+
+.wb-node {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  flex-shrink: 0; font-size: 12px; font-weight: 600; color: var(--muted);
+}
+.wb-node-logo { height: 26px; width: auto; }
+.wb-mark { height: 26px; width: auto; display: block; }
+
+/* Same "current flowing" technique as .exec-link (a dashed line whose
+   background-position loops), just horizontal instead of vertical --
+   the literal illustration of orders moving from FSTrading into the
+   user's own Webull account. */
+.wb-rail { position: relative; flex: 1; height: 2px; }
+.wb-rail::before {
+  content: ""; position: absolute; inset: 0;
+  background: repeating-linear-gradient(90deg, var(--accent) 0 4px, transparent 4px 8px);
+  background-size: 16px 100%;
+}
+.fs-panel.is-on .wb-rail::before { animation: lp-wb-flow-dash .5s linear infinite; }
+@keyframes lp-wb-flow-dash { to { background-position: -16px 0; } }
+
+/* A small dot riding the rail, reading as a single order in transit. */
+.wb-rail-pulse {
+  position: absolute; top: 50%; left: 0; width: 8px; height: 8px; margin-top: -4px;
+  border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px 1px var(--lp-accent-line);
+  opacity: 0;
+}
+.fs-panel.is-on .wb-rail-pulse { animation: lp-wb-rail-pulse 2.2s var(--lp-panel-ease) infinite; }
+@keyframes lp-wb-rail-pulse {
+  0%   { left: 0; opacity: 0; }
+  8%   { opacity: 1; }
+  92%  { opacity: 1; }
+  100% { left: 100%; opacity: 0; }
+}
+
+/* Same fact-row pattern as .risk-out/.risk-line (panel 07), kept as its
+   own class rather than reused directly so this widget stays
+   self-contained. */
+.wb-meta { border: 1px solid var(--panel-border); border-radius: 10px; background: var(--bg); padding: 13px 15px; }
+.wb-meta-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; padding: 5px 0; }
+.wb-meta-row span { color: var(--muted); }
+.wb-meta-row b { color: var(--text); font-weight: 600; }
+.wb-meta-row.is-key { border-top: 1px solid var(--panel-border); margin-top: 6px; padding-top: 10px; }
+.wb-meta-row.is-key b { color: var(--accent); }
+.fs-panel.is-on .wb-meta-row.is-key b { animation: lp-glow-pulse 2.1s var(--lp-panel-ease) infinite; }
+
 /* ---- manual steps ---- */
 
 .man-list { display: flex; flex-direction: column; gap: 7px; }
@@ -1185,6 +1234,14 @@ body.lp > header { position: fixed; z-index: 200; }
   .stage-head { margin-bottom: 10px; }
   .flow-node { padding: 3px 0; gap: 11px; }
   .flow-dot { width: 24px; height: 24px; }
+
+  /* .wb-link (panel 01b, "Webull integration") is new alongside this
+     fix pass -- adding its compaction here up front rather than waiting
+     for the same short-but-wide-desktop clipping bug to resurface a
+     third time. Sized in between the two narrower tiers below. */
+  .wb-link { gap: 11px; margin-bottom: 13px; }
+  .wb-node-logo, .wb-mark { height: 24px; }
+  .wb-meta-row { padding: 4px 0; }
 }
 
 /* =========================================================================
@@ -1306,6 +1363,10 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
   .flow-node { padding: 3px 0; gap: 11px; }
   .flow-dot { width: 24px; height: 24px; }
 
+  .wb-link { gap: 9px; margin-bottom: 11px; }
+  .wb-node-logo, .wb-mark { height: 21px; }
+  .wb-meta-row { padding: 3px 0; }
+
   .p-cards { gap: 8px; }
   .p-card { padding: 12px; }
 }
@@ -1364,6 +1425,10 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
 
   .flow-node { padding: 2px 0; gap: 9px; }
   .flow-dot { width: 22px; height: 22px; }
+
+  .wb-link { gap: 7px; margin-bottom: 8px; }
+  .wb-node-logo, .wb-mark { height: 18px; }
+  .wb-meta-row { padding: 2px 0; }
 
   .p-cards { gap: 6px; }
   .p-card { padding: 10px; }
