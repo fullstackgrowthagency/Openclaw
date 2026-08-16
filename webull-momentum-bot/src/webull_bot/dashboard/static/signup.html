@@ -3,41 +3,80 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign up - Day Trading Quant</title>
-<link rel="stylesheet" href="/style.css">
-</head>
-<body>
+<title>Sign up - FSTrading</title>
+<meta name="description" content="Create your FSTrading account. Connect your own Webull API key from the dashboard and start in sandbox with fake money.">
+<link rel="icon" href="/logo.png">
+<meta name="robots" content="noindex">
 
-<header>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/landing.css">
+<script>document.documentElement.classList.add("js");</script>
+</head>
+<body class="lp lp-auth">
+
+<header data-header>
   <div class="header-top">
-    <a href="/"><img src="/logo.png" alt="FS Trading" class="header-logo"></a>
+    <a href="/"><img src="/logo.png" alt="FSTrading" class="header-logo"></a>
+    <nav class="lp-nav">
+      <a class="header-link" href="/login">Already have an account?</a>
+    </nav>
   </div>
 </header>
 
-<main class="auth-main">
-  <section class="panel auth-card">
-    <h2>Create your account</h2>
-    <p class="hint">You'll connect your own Webull API key from the dashboard after signing up.</p>
-    <form id="signup-form">
-      <label class="settings-field">
-        <span>Email</span>
-        <input type="email" id="signup-email" autocomplete="email" required>
-      </label>
-      <label class="settings-field">
-        <span>Password <span class="muted">(at least 8 characters)</span></span>
-        <input type="password" id="signup-password" autocomplete="new-password" minlength="8" required>
-      </label>
-      <div class="status-bar" id="signup-result"></div>
-      <div class="settings-actions">
-        <button type="submit">Sign up</button>
-      </div>
-    </form>
-    <p class="hint auth-switch">Already have an account? <a href="/login">Log in</a></p>
-  </section>
+<main class="lp-auth-main">
+  <div class="lp-auth-bg" aria-hidden="true">
+    <div class="lp-grid-layer"></div>
+    <div class="lp-glow"></div>
+  </div>
+
+  <div class="lp-auth-col">
+    <section class="lp-auth-card" data-reveal>
+      <h1>Create your account</h1>
+      <p class="lp-auth-sub">
+        You'll connect your own broker API key from the dashboard after signing up.
+      </p>
+
+      <form id="signup-form">
+        <label class="settings-field">
+          <span>Email</span>
+          <input type="email" id="signup-email" autocomplete="email" required>
+        </label>
+        <label class="settings-field">
+          <span>Password <span class="muted">(at least 8 characters)</span></span>
+          <input type="password" id="signup-password" autocomplete="new-password" minlength="8" required>
+        </label>
+
+        <!-- auth.js targets this by id and resets its className to
+             "status-bar" on every submit, then adds .auth-error on failure.
+             Don't add classes here -- they won't survive the first submit. -->
+        <div class="status-bar" id="signup-result"></div>
+
+        <button type="submit" class="lp-btn lp-btn-primary">Sign up</button>
+      </form>
+
+      <p class="lp-auth-switch">Already have an account? <a href="/login">Log in</a></p>
+    </section>
+
+    <ul class="lp-auth-trust" data-reveal>
+      <li>Your capital stays in your own brokerage account &mdash; we never take custody.</li>
+      <li>Every account starts in sandbox, trading fake money against real market data.</li>
+      <li>Free while the platform is in early access.</li>
+    </ul>
+  </div>
 </main>
 
-<footer>Trading involves risk. Past performance of any strategy is not a guarantee of future results.</footer>
+<footer>
+  <div class="lp-footer-inner">
+    <p>
+      Trading involves substantial risk of loss and is not suitable for every investor.
+      Nothing on this page is financial advice. Past performance of any strategy is not a
+      guarantee of future results.
+    </p>
+    <div class="lp-footer-by">Powered by Full Stack Growth Studio.</div>
+  </div>
+</footer>
 
+<script src="/landing.js"></script>
 <script src="/auth.js"></script>
 </body>
 </html>

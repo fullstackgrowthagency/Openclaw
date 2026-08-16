@@ -3,40 +3,70 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Log in - Day Trading Quant</title>
-<link rel="stylesheet" href="/style.css">
-</head>
-<body>
+<title>Log in - FSTrading</title>
+<meta name="description" content="Log in to your FSTrading dashboard.">
+<link rel="icon" href="/logo.png">
+<meta name="robots" content="noindex">
 
-<header>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/landing.css">
+<script>document.documentElement.classList.add("js");</script>
+</head>
+<body class="lp lp-auth">
+
+<header data-header>
   <div class="header-top">
-    <a href="/"><img src="/logo.png" alt="FS Trading" class="header-logo"></a>
+    <a href="/"><img src="/logo.png" alt="FSTrading" class="header-logo"></a>
+    <nav class="lp-nav">
+      <a class="lp-btn lp-btn-secondary lp-btn-sm" href="/signup">Sign up</a>
+    </nav>
   </div>
 </header>
 
-<main class="auth-main">
-  <section class="panel auth-card">
-    <h2>Log in</h2>
-    <form id="login-form">
-      <label class="settings-field">
-        <span>Email</span>
-        <input type="email" id="login-email" autocomplete="email" required>
-      </label>
-      <label class="settings-field">
-        <span>Password</span>
-        <input type="password" id="login-password" autocomplete="current-password" required>
-      </label>
-      <div class="status-bar" id="login-result"></div>
-      <div class="settings-actions">
-        <button type="submit">Log in</button>
-      </div>
-    </form>
-    <p class="hint auth-switch">Don't have an account? <a href="/signup">Sign up</a></p>
-  </section>
+<main class="lp-auth-main">
+  <div class="lp-auth-bg" aria-hidden="true">
+    <div class="lp-grid-layer"></div>
+    <div class="lp-glow"></div>
+  </div>
+
+  <div class="lp-auth-col">
+    <section class="lp-auth-card" data-reveal>
+      <h1>Log in</h1>
+      <p class="lp-auth-sub">Welcome back. Your strategies kept running.</p>
+
+      <form id="login-form">
+        <label class="settings-field">
+          <span>Email</span>
+          <input type="email" id="login-email" autocomplete="email" required>
+        </label>
+        <label class="settings-field">
+          <span>Password</span>
+          <input type="password" id="login-password" autocomplete="current-password" required>
+        </label>
+
+        <!-- See signup.html: auth.js owns this element's className. -->
+        <div class="status-bar" id="login-result"></div>
+
+        <button type="submit" class="lp-btn lp-btn-primary">Log in</button>
+      </form>
+
+      <p class="lp-auth-switch">Don't have an account? <a href="/signup">Sign up</a></p>
+    </section>
+  </div>
 </main>
 
-<footer>Trading involves risk. Past performance of any strategy is not a guarantee of future results.</footer>
+<footer>
+  <div class="lp-footer-inner">
+    <p>
+      Trading involves substantial risk of loss and is not suitable for every investor.
+      Nothing on this page is financial advice. Past performance of any strategy is not a
+      guarantee of future results.
+    </p>
+    <div class="lp-footer-by">Powered by Full Stack Growth Studio.</div>
+  </div>
+</footer>
 
+<script src="/landing.js"></script>
 <script src="/auth.js"></script>
 </body>
 </html>
