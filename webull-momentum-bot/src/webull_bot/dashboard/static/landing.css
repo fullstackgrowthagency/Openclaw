@@ -1175,6 +1175,16 @@ body.lp > header { position: fixed; z-index: 200; }
   .man-item { padding: 7px 10px; gap: 8px; }
   .man-item i { width: 16px; height: 16px; font-size: 9px; }
   .man-merged { margin-top: 8px; padding: 9px 11px; gap: 8px; }
+
+  /* Same gap as above, this time in panel 11's 9-node trading-lifecycle
+     list (.flow): .stage-head/.flow-node/.flow-dot were only compacted at
+     the narrower max-width:900px tiers below, so a short-but-wide desktop
+     window got .stage's reduced padding without the matching content
+     compaction here, risking the same clipping panel 02b had. Reusing the
+     exact values already proven at the narrower tier just below. */
+  .stage-head { margin-bottom: 10px; }
+  .flow-node { padding: 3px 0; gap: 11px; }
+  .flow-dot { width: 24px; height: 24px; }
 }
 
 /* =========================================================================
