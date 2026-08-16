@@ -299,6 +299,79 @@ body.lp header.is-stuck .header-logo { height: 30px; }
 .p-cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 32px; }
 
 /* =========================================================================
+   Hero candlestick strip (panel 01) -- purely decorative, sits between the
+   header and the headline. Not one of the elements the fly-through below
+   scales (only .panel-stage/.p-num/.p-title/.p-statement/.p-body/
+   .p-stack span/.p-terms/.p-chips/.p-list/.p-cards/.p-cta/.p-hint are), so
+   it needs no entry there -- it still fades/blurs with the rest of the
+   panel since --o/--blur apply at the .fs-panel level, and its own
+   scaleY/background-position motion never touches anything the scroll
+   transform targets. Colors are all existing tokens (--green/--red/
+   --panel-border/--accent) so it reads as part of the same system as
+   every other widget in the deck, not a new palette. */
+.hero-chart {
+  width: min(560px, 100%); height: clamp(44px, 8vw, 68px);
+  margin: 0 auto 20px; position: relative;
+}
+
+.hero-chart-trend {
+  position: absolute; left: 6%; right: 6%; top: 38%; height: 2px;
+  background: repeating-linear-gradient(90deg, var(--lp-accent-line) 0 6px, transparent 6px 12px);
+  background-size: 16px 100%; transform: rotate(-3deg); opacity: .8;
+}
+
+.fs-panel.is-on .hero-chart-trend { animation: lp-flow-dash-x .6s linear infinite; }
+@keyframes lp-flow-dash-x { to { background-position: -16px 0; } }
+
+.hero-chart-candles { display: flex; align-items: center; gap: clamp(4px, 1vw, 7px); height: 100%; position: relative; }
+
+.hc { position: relative; flex: 1; height: 100%; }
+.hc::before {
+  content: ""; position: absolute; left: 50%; top: 2%; bottom: 2%; width: 1px;
+  transform: translateX(-50%); background: var(--muted); opacity: .55;
+}
+.hc::after {
+  content: ""; position: absolute; left: 50%; width: 34%; min-width: 3px; border-radius: 1px;
+  transform: translate(-50%, -50%); transform-origin: center;
+}
+.hc.up::after { background: var(--green); }
+.hc.down::after { background: var(--red); }
+
+.hc:nth-child(1)::after  { top: 62%; height: 26%; }
+.hc:nth-child(2)::after  { top: 46%; height: 34%; }
+.hc:nth-child(3)::after  { top: 30%; height: 30%; }
+.hc:nth-child(4)::after  { top: 40%; height: 22%; }
+.hc:nth-child(5)::after  { top: 26%; height: 32%; }
+.hc:nth-child(6)::after  { top: 42%; height: 40%; }
+.hc:nth-child(7)::after  { top: 18%; height: 36%; }
+.hc:nth-child(8)::after  { top: 32%; height: 24%; }
+.hc:nth-child(9)::after  { top: 20%; height: 30%; }
+.hc:nth-child(10)::after { top: 34%; height: 38%; }
+.hc:nth-child(11)::after { top: 44%; height: 26%; }
+.hc:nth-child(12)::after { top: 22%; height: 34%; }
+.hc:nth-child(13)::after { top: 12%; height: 28%; }
+.hc:nth-child(14)::after { top: 8%;  height: 32%; }
+
+/* Same shared tick keyframe .mod-bars uses (scaleY breathing), staggered
+   per candle so it reads as a left-to-right ripple ticking through live
+   prices rather than everything pulsing in lockstep. */
+.fs-panel.is-on .hc::after { animation: lp-bar-tick 1.2s var(--lp-panel-ease) infinite; }
+.fs-panel.is-on .hc:nth-child(1)::after  { animation-delay: 0ms; }
+.fs-panel.is-on .hc:nth-child(2)::after  { animation-delay: 70ms; }
+.fs-panel.is-on .hc:nth-child(3)::after  { animation-delay: 140ms; }
+.fs-panel.is-on .hc:nth-child(4)::after  { animation-delay: 210ms; }
+.fs-panel.is-on .hc:nth-child(5)::after  { animation-delay: 280ms; }
+.fs-panel.is-on .hc:nth-child(6)::after  { animation-delay: 350ms; }
+.fs-panel.is-on .hc:nth-child(7)::after  { animation-delay: 420ms; }
+.fs-panel.is-on .hc:nth-child(8)::after  { animation-delay: 490ms; }
+.fs-panel.is-on .hc:nth-child(9)::after  { animation-delay: 560ms; }
+.fs-panel.is-on .hc:nth-child(10)::after { animation-delay: 630ms; }
+.fs-panel.is-on .hc:nth-child(11)::after { animation-delay: 700ms; }
+.fs-panel.is-on .hc:nth-child(12)::after { animation-delay: 770ms; }
+.fs-panel.is-on .hc:nth-child(13)::after { animation-delay: 840ms; }
+.fs-panel.is-on .hc:nth-child(14)::after { animation-delay: 910ms; }
+
+/* =========================================================================
    THE FLY-THROUGH -- scroll-scrubbed, 2D scale only
    -------------------------------------------------------------------------
    No perspective, no translateZ, no preserve-3d, no backface-visibility.
