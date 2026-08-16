@@ -460,4 +460,27 @@
       t.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   });
+
+  /* ---- header hamburger menu (2026-08-16) ------------------------------
+     Mirrors the dashboard's own bot-switcher hamburger (app.html's
+     bot_nav.js): click to toggle, click-outside to close. No fetch here --
+     unlike the dashboard's per-user bot list, this menu's five links are
+     fixed markup. Guarded on both elements existing so this is a no-op on
+     login.html/signup.html, which load landing.js but don't have this
+     header piece. */
+  var menuBtn = document.getElementById("lp-menu-btn");
+  var menuDropdown = document.getElementById("lp-menu-dropdown");
+  if (menuBtn && menuDropdown) {
+    menuBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var isOpen = menuDropdown.classList.toggle("open");
+      menuBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    });
+    document.addEventListener("click", function (e) {
+      if (!menuDropdown.classList.contains("open")) return;
+      if (menuDropdown.contains(e.target) || e.target === menuBtn) return;
+      menuDropdown.classList.remove("open");
+      menuBtn.setAttribute("aria-expanded", "false");
+    });
+  }
 })();

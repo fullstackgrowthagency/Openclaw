@@ -631,6 +631,14 @@ def create_app(
     def login_page():
         return FileResponse(_STATIC_DIR / "login.html")
 
+    @app.get("/pricing", response_class=FileResponse)
+    def pricing_page():
+        return FileResponse(_STATIC_DIR / "pricing.html")
+
+    @app.get("/features", response_class=FileResponse)
+    def features_page():
+        return FileResponse(_STATIC_DIR / "features.html")
+
     def _require_login_page(request: Request, page_filename: str):
         """Shared guard for every page under /app: redirects to /login when
         auth is configured and the request has no valid session, otherwise
