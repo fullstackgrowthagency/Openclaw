@@ -348,13 +348,18 @@ body.lp header.is-stuck .header-logo { height: 30px; }
    exact touching edge: two ups stack bottom-on-top (climbing
    staircase), two downs stack top-on-bottom (falling staircase), and
    an up/down pivot touches at the shared high or low between them.
-   Path: 58,72,55,38,50,60,10,40,4,25,45,68,48,32,50 -- a moderate
-   swing (1-5), sharp rally into the tallest body (candle 6, the
-   standout of the row), a deeper pullback (7) into a second strong
-   up-leg (candle 8 -- the second-tallest body, a clear uptrend
-   continuation), the deepest trough (9-11), then a smaller recovery
-   into the close (12-14). Colors in the markup already match this
-   path's up/down direction candle-to-candle.
+   Path: 58,72,55,38,50,60,10,76,4,34,64,94,48,2,20 -- a moderate
+   swing (1-5), sharp rally into candle 6 (50), a deep pullback (7)
+   into a doubled-height rally (candle 8, height 72 -- now the single
+   tallest body in the row), a decline through the deepest trough of
+   the whole chart (9-11) that leaves just enough room for candles 12
+   and 13 -- both up/green and directly adjacent -- to each reach the
+   largest height two same-direction stacked candles can share in a
+   0-100% range (46 each; two same-direction candles can't both hit a
+   literal 72 -- that would need 144% of vertical room, impossible
+   regardless of layout), then a modest pullback into the close (14).
+   Colors in the markup already match this path's up/down direction
+   candle-to-candle.
    Each wick (::before) is still sized independently per candle (only
    this candle's own high/low excursion -- wicks never need to touch
    neighbors, only bodies do) so a trail visibly pokes out both ends
@@ -373,22 +378,22 @@ body.lp header.is-stuck .header-logo { height: 30px; }
 .hc:nth-child(5)::before { top: 38%; bottom: 24%; }
 .hc:nth-child(6)::after  { top: 10%; height: 50%; }
 .hc:nth-child(6)::before { top: 2%;  bottom: 26%; }
-.hc:nth-child(7)::after  { top: 10%; height: 30%; }
-.hc:nth-child(7)::before { top: 2%;  bottom: 40%; }
-.hc:nth-child(8)::after  { top: 4%;  height: 36%; }
-.hc:nth-child(8)::before { top: 0%;  bottom: 42%; }
-.hc:nth-child(9)::after  { top: 4%;  height: 21%; }
-.hc:nth-child(9)::before { top: 0%;  bottom: 51%; }
-.hc:nth-child(10)::after { top: 25%; height: 20%; }
-.hc:nth-child(10)::before { top: 11%; bottom: 37%; }
-.hc:nth-child(11)::after { top: 45%; height: 23%; }
-.hc:nth-child(11)::before { top: 29%; bottom: 18%; }
-.hc:nth-child(12)::after { top: 48%; height: 20%; }
-.hc:nth-child(12)::before { top: 34%; bottom: 20%; }
-.hc:nth-child(13)::after { top: 32%; height: 16%; }
-.hc:nth-child(13)::before { top: 18%; bottom: 32%; }
-.hc:nth-child(14)::after { top: 32%; height: 18%; }
-.hc:nth-child(14)::before { top: 18%; bottom: 32%; }
+.hc:nth-child(7)::after  { top: 10%; height: 66%; }
+.hc:nth-child(7)::before { top: 2%;  bottom: 6%; }
+.hc:nth-child(8)::after  { top: 4%;  height: 72%; }
+.hc:nth-child(8)::before { top: 0%;  bottom: 6%; }
+.hc:nth-child(9)::after  { top: 4%;  height: 30%; }
+.hc:nth-child(9)::before { top: 0%;  bottom: 42%; }
+.hc:nth-child(10)::after { top: 34%; height: 30%; }
+.hc:nth-child(10)::before { top: 18%; bottom: 18%; }
+.hc:nth-child(11)::after { top: 64%; height: 30%; }
+.hc:nth-child(11)::before { top: 48%; bottom: 0%; }
+.hc:nth-child(12)::after { top: 48%; height: 46%; }
+.hc:nth-child(12)::before { top: 34%; bottom: 0%; }
+.hc:nth-child(13)::after { top: 2%;  height: 46%; }
+.hc:nth-child(13)::before { top: 0%;  bottom: 32%; }
+.hc:nth-child(14)::after { top: 2%;  height: 18%; }
+.hc:nth-child(14)::before { top: 0%;  bottom: 56%; }
 
 /* A dedicated keyframe rather than reusing .mod-bars' shared lp-bar-tick:
    a CSS animation's transform keyframes replace the element's whole
