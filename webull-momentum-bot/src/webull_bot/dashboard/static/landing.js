@@ -56,6 +56,25 @@
     return;
   }
 
+  /* ---- real viewport height (2026-08-16, mobile fly-through) ----------
+     100vh is unreliable on mobile: iOS Safari's address bar collapses and
+     expands as you scroll, changing 100vh mid-scroll and fighting both
+     position:sticky pinning and anything sized off vh. --vh is set from
+     window.innerHeight instead, and kept live via resize/orientationchange
+     plus the Visual Viewport API's own resize event where available --
+     that one fires more reliably than window's for the toolbar show/hide
+     specifically, which is the case that matters here. landing.css uses
+     calc(var(--vh, 1vh) * 100) wherever it used to assume a stable 100vh. */
+  function setVh() {
+    root.style.setProperty("--vh", window.innerHeight * 0.01 + "px");
+  }
+  setVh();
+  window.addEventListener("resize", setVh);
+  window.addEventListener("orientationchange", setVh);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", setVh);
+  }
+
   if (deck) deck.style.setProperty("--panels", panels.length);
 
   // Rail is generated from the panel count so it can't drift out of sync.
@@ -336,6 +355,32 @@
       else if (k === "ArrowUp" || k === "PageUp") { e.preventDefault(); nav(-1); }
       else if (k === "Home") { e.preventDefault(); goTo(0, 3400); }
     });
+  }
+
+  /* ---- scroll-settle snap (2026-08-16, mobile fly-through) -------------
+     Wheel-interception above guarantees every desktop gesture lands on a
+     whole panel; touch scrolling has no wheel to intercept, so without
+     this a swipe could leave the page stopped mid-fade -- a panel half
+     transparent and blurred, reading as broken rather than as the effect.
+     Reuses goTo/currentIndex/deckEngaged unchanged; only runs where
+     snapOK's wheel handling isn't already covering this. */
+  if (!snapOK && deck && panels.length > 1) {
+    var settleTimer = null;
+    var SETTLE_DELAY = 120;  // ms of scroll silence before settling
+    var SETTLE_MS = 420;     // quick -- this is a nudge into place, not a tour
+
+    function scheduleSettle() {
+      // goTo()'s own scrollTo calls fire scroll events too; skip re-arming
+      // while it's already running so the two never fight over the timer.
+      if (animating) return;
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(function () {
+        if (animating || !deckEngaged()) return;
+        goTo(currentIndex(), SETTLE_MS);
+      }, SETTLE_DELAY);
+    }
+
+    window.addEventListener("scroll", scheduleSettle, { passive: true });
   }
 
   /* ---- rail + in-page nav --------------------------------------------- */

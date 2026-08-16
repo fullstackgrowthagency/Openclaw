@@ -89,14 +89,18 @@ body.lp header.is-stuck .header-logo { height: 30px; }
    THE DECK
    ========================================================================= */
 
-.deck { position: relative; height: calc(var(--panels, 17) * 100vh); }
+/* --vh (set by landing.js) tracks the real viewport height instead of the
+   unstable 100vh unit -- see landing.js's setVh() for why (iOS Safari's
+   collapsing address bar). Falls back to 1vh (i.e. plain 100vh behavior)
+   if JS hasn't run yet, so there's no flash of zero-height content. */
+.deck { position: relative; height: calc(var(--panels, 17) * var(--vh, 1vh) * 100); }
 
 /* The camera. Perspective lives here so every panel and every element
    inside them shares one vanishing point at the centre of the viewport.
    Depth is produced by scaling elements at different rates -- see the
    fly-through block below. */
 .deck-pin {
-  position: sticky; top: 0; height: 100vh; overflow: hidden;
+  position: sticky; top: 0; height: calc(var(--vh, 1vh) * 100); overflow: hidden;
   display: flex; align-items: center; justify-content: center;
 }
 
@@ -119,7 +123,12 @@ body.lp header.is-stuck .header-logo { height: 30px; }
 .fs-panel.is-on { pointer-events: auto; }
 
 /* No 3D anywhere: no perspective, no preserve-3d, no translateZ. */
-.panel-inner { width: 100%; max-width: var(--lp-max); }
+/* max-height + overflow-y are a defensive fallback (2026-08-16, mobile
+   fly-through): .deck-pin clips at the viewport edge, so a panel whose
+   content is still taller than the screen despite the compact-mode rules
+   below would otherwise be silently cut off at the bottom on a short
+   phone. This makes it scrollable in place instead of clipped. */
+.panel-inner { width: 100%; max-width: var(--lp-max); max-height: 100%; overflow-y: auto; }
 
 .panel-split {
   display: grid; grid-template-columns: 1fr 1fr; gap: 60px; align-items: center;
@@ -225,7 +234,13 @@ body.lp header.is-stuck .header-logo { height: 30px; }
    and unprefixed selectors here inverts specificity and hides the site.
    ========================================================================= */
 
-@media (min-width: 901px) and (prefers-reduced-motion: no-preference) {
+/* 2026-08-16: was min-width:901px + no-preference -- the width gate is
+   gone, so the fly-through now also runs on phones/tablets (see
+   landing.js's setVh() for the --vh fix that makes pinning safe there).
+   prefers-reduced-motion is the only remaining exclusion; it must stay,
+   since motion-sensitive users need the un-pinned fallback regardless of
+   device. */
+@media (prefers-reduced-motion: no-preference) {
 
   html.js .fs-panel { visibility: hidden; }
 
@@ -609,8 +624,12 @@ body.lp > header { position: fixed; }
   padding: 9px 18px; font-size: 14px; color: var(--text);
 }
 
-/* Short viewports: pull everything in so no panel can overflow its 100vh. */
-@media (max-height: 760px) {
+/* Short viewports: pull everything in so no panel can overflow its 100vh.
+   920px (was 760px, 2026-08-16) covers common phone portrait heights too
+   (roughly 640-930px across current devices), not just a short desktop
+   window -- the reasoning is the same either way: less vertical room
+   means content needs to be more compact to fit one pinned screen. */
+@media (max-height: 920px) {
   .fs-panel { padding: 84px 28px 60px; }
   .p-title { font-size: clamp(21px, 2.8vw, 30px); }
   .p-body { font-size: 15px; }
@@ -679,31 +698,26 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
 .lp-footer-by { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--panel-border); }
 
 /* =========================================================================
-   UN-PIN FALLBACKS -- load-bearing. Without these, a reader on a phone,
-   with reduced motion, or with JS off sees panel one and nothing else.
+   NARROW-VIEWPORT LAYOUT (2026-08-16: no longer an un-pin fallback -- the
+   fly-through now runs at every width, see the media query above). This
+   block only adjusts internal panel layout for narrow screens: side-by-side
+   splits and card grids don't fit two/three across on a phone, and the
+   flipped stage/copy order stops mattering once there's only one column.
    ========================================================================= */
 
 @media (max-width: 900px) {
-  .deck { height: auto; }
-  .deck-pin { position: relative; height: auto; overflow: visible; display: block; }
-  .deck-rail { display: none; }
-  .fs-panel {
-    position: relative; inset: auto; opacity: 1; transform: none !important;
-    filter: none !important; pointer-events: auto; padding: 64px 20px;
-    border-bottom: 1px solid var(--panel-border);
-  }
-  .fs-panel .p-num, .fs-panel .p-title, .fs-panel .p-body, .fs-panel .p-terms,
-  .fs-panel .p-statement, .fs-panel .p-stack span, .fs-panel .p-cta, .fs-panel .panel-stage {
-    opacity: 1; transform: none; transition: none;
-  }
+  .fs-panel { padding-left: 20px; padding-right: 20px; }
   .panel-split { grid-template-columns: 1fr; gap: 32px; }
   .panel-flip .panel-stage, .panel-flip .panel-copy { order: 0; }
   .p-cards { grid-template-columns: 1fr; }
-  .p-hint { display: none; }
-  .fs-panel .flow-rail::after { height: 100%; }
-  .fs-panel .flow-dot { border-color: var(--accent); color: var(--accent); background: var(--lp-accent-soft); }
-  .fs-panel .flow-label { color: var(--text); }
 }
+
+/* =========================================================================
+   UN-PIN FALLBACKS -- load-bearing. Without these, a reader with reduced
+   motion or with JS off sees panel one and nothing else. (A phone with JS
+   and no reduced-motion preference now gets the full fly-through above,
+   same as desktop -- these two are the only remaining cases that need it.)
+   ========================================================================= */
 
 html:not(.js) .deck { height: auto; }
 html:not(.js) .deck-pin { position: relative; height: auto; overflow: visible; display: block; }
