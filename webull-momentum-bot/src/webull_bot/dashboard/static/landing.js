@@ -357,6 +357,58 @@
     });
   }
 
+  /* ---- touch swipe navigation (2026-08-16, one-swipe-one-panel) --------
+     Mirrors the wheel-interception block above, driven by touch deltas
+     instead of wheel deltaY: wheel events never fire for touch scrolling
+     at all, so without this, a flick's native momentum could carry the
+     scroll position through several panels before the settle-snap below
+     ever got a chance to intervene -- landing on whichever panel was
+     nearest wherever momentum ran out, not necessarily the next one.
+
+     Bound unconditionally, not gated to snapOK's min-width:901px check:
+     touch events simply don't fire from non-touch input regardless of
+     viewport width, so a touch-capable laptop correctly gets wheel-nav
+     from its trackpad AND swipe-nav from its touchscreen, not one or the
+     other. Reuses nav()/currentIndex()/deckEngaged() unchanged. */
+  if (deck && panels.length > 1) {
+    var touchStartX = 0, touchStartY = 0, touchDecided = false, touchNavigated = false;
+    var TOUCH_THRESHOLD = 10; // px of drag before treating this as a deliberate swipe
+
+    window.addEventListener("touchstart", function (e) {
+      if (e.touches.length !== 1) return; // ignore pinch/multi-touch entirely
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      touchDecided = false;
+      touchNavigated = false;
+    }, { passive: true });
+
+    window.addEventListener("touchmove", function (e) {
+      if (touchNavigated || e.touches.length !== 1) return;
+      var dx = e.touches[0].clientX - touchStartX;
+      var dy = e.touches[0].clientY - touchStartY;
+
+      if (!touchDecided) {
+        if (Math.abs(dx) < TOUCH_THRESHOLD && Math.abs(dy) < TOUCH_THRESHOLD) return;
+        touchDecided = true;
+        // Horizontal drag: leave it alone entirely (a chip row, a native
+        // OS edge-swipe, whatever it is -- not this gesture's business).
+        if (Math.abs(dx) > Math.abs(dy)) return;
+      }
+      if (!deckEngaged()) return; // tail scrolls natively below the deck
+
+      var dir = dy < 0 ? 1 : -1;
+      var idx = currentIndex();
+      var r = deck.getBoundingClientRect();
+      // Same hand-back-control-at-the-ends rule as wheel.
+      if (dir > 0 && idx >= panels.length - 1 && r.bottom <= window.innerHeight + 1) return;
+      if (dir < 0 && idx <= 0 && r.top >= -1) return;
+
+      e.preventDefault();     // suppress native momentum for the rest of this gesture
+      touchNavigated = true;  // commit once -- further drag in the same touch advances no further
+      nav(dir);
+    }, { passive: false });
+  }
+
   /* ---- scroll-settle snap (2026-08-16, mobile fly-through) -------------
      Wheel-interception above guarantees every desktop gesture lands on a
      whole panel; touch scrolling has no wheel to intercept, so without
