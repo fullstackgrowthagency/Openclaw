@@ -1086,33 +1086,44 @@ body.lp > header { position: fixed; z-index: 200; }
 .fs-panel.is-on .p-list li:nth-child(3)::before { animation-delay: 240ms; }
 .fs-panel.is-on .p-list li:nth-child(4)::before { animation-delay: 360ms; }
 
-.p-chips { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; position: relative; overflow: hidden; }
+.p-chips { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
 
-/* A soft light band loops across the chip row -- these represent the
+.p-chip {
+  border: 1px solid var(--panel-border); background: var(--panel); border-radius: 999px;
+  padding: 9px 18px; font-size: 14px; color: var(--text);
+  position: relative; overflow: hidden;
+}
+
+/* A soft light shimmer loops inside each chip -- these represent the
    always-running infrastructure pieces underneath a strategy, so a
-   continuous sweep (not a one-shot reveal) is the point. A pseudo-element
-   is a separate box, so this doesn't touch .p-chips' own scroll-driven
-   transform. */
-.p-chips::after {
+   continuous sweep (not a one-shot reveal) is the point. Scoped to each
+   .p-chip (clipped to its own rounded-pill shape via overflow:hidden)
+   rather than one band behind the whole row, so it only shows inside a
+   chip's own container, not passing over the gaps between them. A
+   pseudo-element is a separate box, so this doesn't touch .p-chips'/
+   .p-chip's own scroll-driven transform. */
+.p-chip::after {
   content: ""; position: absolute; inset: 0; pointer-events: none;
   background: linear-gradient(90deg, transparent, var(--lp-accent-soft) 45%, transparent 88%);
   transform: translateX(-120%); opacity: 0;
 }
-.fs-panel.is-on .p-chips::after {
-  animation: lp-chip-sweep 2.8s var(--lp-panel-ease) infinite;
+.fs-panel.is-on .p-chip::after {
+  animation: lp-chip-shimmer 2.2s var(--lp-panel-ease) infinite;
 }
-@keyframes lp-chip-sweep {
+@keyframes lp-chip-shimmer {
   0%   { transform: translateX(-120%); opacity: 0; }
   12%  { opacity: .8; }
   50%  { opacity: .8; }
   62%  { transform: translateX(120%); opacity: 0; }
   100% { transform: translateX(120%); opacity: 0; }
 }
-
-.p-chip {
-  border: 1px solid var(--panel-border); background: var(--panel); border-radius: 999px;
-  padding: 9px 18px; font-size: 14px; color: var(--text);
-}
+.fs-panel.is-on .p-chip:nth-child(1)::after { animation-delay: 0ms; }
+.fs-panel.is-on .p-chip:nth-child(2)::after { animation-delay: 130ms; }
+.fs-panel.is-on .p-chip:nth-child(3)::after { animation-delay: 260ms; }
+.fs-panel.is-on .p-chip:nth-child(4)::after { animation-delay: 390ms; }
+.fs-panel.is-on .p-chip:nth-child(5)::after { animation-delay: 520ms; }
+.fs-panel.is-on .p-chip:nth-child(6)::after { animation-delay: 650ms; }
+.fs-panel.is-on .p-chip:nth-child(7)::after { animation-delay: 780ms; }
 
 /* Short viewports: pull everything in so no panel can overflow its 100vh.
    920px (was 760px, 2026-08-16) covers common phone portrait heights too
