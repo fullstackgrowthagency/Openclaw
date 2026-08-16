@@ -338,38 +338,40 @@ body.lp header.is-stuck .header-logo { height: 30px; }
 .hc.down::after { background: var(--red); }
 
 /* Each wick (::before) is sized to the same span as its own candle's body
-   (::after) plus a fixed 8% reach beyond each end, so the tail always
-   reads as centered through that candle's body -- not a single line
-   running the full strip height behind every candle regardless of where
-   its body actually sits. */
-.hc:nth-child(1)::after  { top: 62%; height: 26%; }
-.hc:nth-child(1)::before { top: 54%; bottom: 4%; }
-.hc:nth-child(2)::after  { top: 46%; height: 34%; }
-.hc:nth-child(2)::before { top: 38%; bottom: 12%; }
-.hc:nth-child(3)::after  { top: 30%; height: 30%; }
-.hc:nth-child(3)::before { top: 22%; bottom: 32%; }
-.hc:nth-child(4)::after  { top: 40%; height: 22%; }
-.hc:nth-child(4)::before { top: 32%; bottom: 30%; }
-.hc:nth-child(5)::after  { top: 26%; height: 32%; }
-.hc:nth-child(5)::before { top: 18%; bottom: 34%; }
-.hc:nth-child(6)::after  { top: 42%; height: 40%; }
-.hc:nth-child(6)::before { top: 34%; bottom: 10%; }
-.hc:nth-child(7)::after  { top: 18%; height: 36%; }
-.hc:nth-child(7)::before { top: 10%; bottom: 38%; }
-.hc:nth-child(8)::after  { top: 32%; height: 24%; }
-.hc:nth-child(8)::before { top: 24%; bottom: 36%; }
-.hc:nth-child(9)::after  { top: 20%; height: 30%; }
-.hc:nth-child(9)::before { top: 12%; bottom: 42%; }
-.hc:nth-child(10)::after { top: 34%; height: 38%; }
-.hc:nth-child(10)::before { top: 26%; bottom: 20%; }
-.hc:nth-child(11)::after { top: 44%; height: 26%; }
-.hc:nth-child(11)::before { top: 36%; bottom: 22%; }
-.hc:nth-child(12)::after { top: 22%; height: 34%; }
-.hc:nth-child(12)::before { top: 14%; bottom: 36%; }
-.hc:nth-child(13)::after { top: 12%; height: 28%; }
-.hc:nth-child(13)::before { top: 4%;  bottom: 52%; }
-.hc:nth-child(14)::after { top: 8%;  height: 32%; }
-.hc:nth-child(14)::before { top: 0%;  bottom: 52%; }
+   (::after) plus a 12% reach beyond each end, so a trail clearly pokes
+   out past both the top and the bottom of every body, centered through
+   it -- not a single line running the full strip height behind every
+   candle regardless of where its body actually sits. Candle 6 is sized
+   as the clear standout of the row -- the tallest body by a wide margin,
+   an up (green) breakout candle sitting slightly left of center. */
+.hc:nth-child(1)::after  { top: 64%; height: 22%; }
+.hc:nth-child(1)::before { top: 52%; bottom: 2%; }
+.hc:nth-child(2)::after  { top: 48%; height: 30%; }
+.hc:nth-child(2)::before { top: 36%; bottom: 10%; }
+.hc:nth-child(3)::after  { top: 30%; height: 34%; }
+.hc:nth-child(3)::before { top: 18%; bottom: 24%; }
+.hc:nth-child(4)::after  { top: 38%; height: 26%; }
+.hc:nth-child(4)::before { top: 26%; bottom: 24%; }
+.hc:nth-child(5)::after  { top: 24%; height: 36%; }
+.hc:nth-child(5)::before { top: 12%; bottom: 28%; }
+.hc:nth-child(6)::after  { top: 21%; height: 54%; }
+.hc:nth-child(6)::before { top: 9%;  bottom: 13%; }
+.hc:nth-child(7)::after  { top: 16%; height: 40%; }
+.hc:nth-child(7)::before { top: 4%;  bottom: 32%; }
+.hc:nth-child(8)::after  { top: 30%; height: 28%; }
+.hc:nth-child(8)::before { top: 18%; bottom: 30%; }
+.hc:nth-child(9)::after  { top: 18%; height: 34%; }
+.hc:nth-child(9)::before { top: 6%;  bottom: 36%; }
+.hc:nth-child(10)::after { top: 20%; height: 42%; }
+.hc:nth-child(10)::before { top: 8%;  bottom: 26%; }
+.hc:nth-child(11)::after { top: 36%; height: 30%; }
+.hc:nth-child(11)::before { top: 24%; bottom: 22%; }
+.hc:nth-child(12)::after { top: 20%; height: 38%; }
+.hc:nth-child(12)::before { top: 8%;  bottom: 30%; }
+.hc:nth-child(13)::after { top: 14%; height: 24%; }
+.hc:nth-child(13)::before { top: 2%;  bottom: 50%; }
+.hc:nth-child(14)::after { top: 6%;  height: 36%; }
+.hc:nth-child(14)::before { top: 0%;  bottom: 46%; }
 
 /* A dedicated keyframe rather than reusing .mod-bars' shared lp-bar-tick:
    a CSS animation's transform keyframes replace the element's whole
