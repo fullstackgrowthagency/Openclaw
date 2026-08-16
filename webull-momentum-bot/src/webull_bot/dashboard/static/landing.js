@@ -333,21 +333,6 @@
     goTo(currentIndex() + dir, STEP_MS);
   }
 
-  // A panel whose content is still taller than the screen despite the
-  // compact-mode CSS rules falls back to its own internal scroll (see
-  // .panel-inner's overflow-y:auto in landing.css). Both interception
-  // handlers below must let that internal scroll run to its own boundary
-  // before taking the gesture over for deck navigation -- otherwise
-  // preventDefault() blocks the nested scroll along with everything else
-  // and the tail of an overflowing panel becomes permanently unreachable.
-  function atScrollBoundary(dir) {
-    var el = panels[currentIndex()].querySelector(".panel-inner");
-    if (!el || el.scrollHeight <= el.clientHeight + 1) return true;
-    return dir > 0
-      ? el.scrollTop + el.clientHeight >= el.scrollHeight - 1
-      : el.scrollTop <= 1;
-  }
-
   if (snapOK && deck && panels.length > 1) {
     window.addEventListener("wheel", function (e) {
       if (e.ctrlKey) return;                  // pinch-zoom
@@ -358,7 +343,6 @@
       // Hand control back at the ends so the page can leave the deck.
       if (dir > 0 && idx >= panels.length - 1 && r.bottom <= window.innerHeight + 1) return;
       if (dir < 0 && idx <= 0 && r.top >= -1) return;
-      if (!atScrollBoundary(dir)) return;     // let panel-inner's own scroll consume this first
       e.preventDefault();
       if (Math.abs(e.deltaY) < 4) return;
       nav(dir);
@@ -418,11 +402,6 @@
       // Same hand-back-control-at-the-ends rule as wheel.
       if (dir > 0 && idx >= panels.length - 1 && r.bottom <= window.innerHeight + 1) return;
       if (dir < 0 && idx <= 0 && r.top >= -1) return;
-      // Let an overflowing panel's own scroll run first -- same reasoning
-      // as the wheel handler above. Native touch scroll continues on this
-      // same drag, so once the content bottoms out the very same swipe
-      // naturally carries into deck navigation instead of needing a second one.
-      if (!atScrollBoundary(dir)) return;
 
       e.preventDefault();     // suppress native momentum for the rest of this gesture
       touchNavigated = true;  // commit once -- further drag in the same touch advances no further
