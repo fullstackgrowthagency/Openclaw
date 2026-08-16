@@ -520,25 +520,31 @@ body.lp > header { position: fixed; z-index: 200; }
 }
 
 /* ---- market scan grid ----
-   Represents the universe being scanned: most cells are unmatched
-   (visible but dim, so the grid actually reads as a grid), a handful
-   are flagged matches (accent), and phase 3's single top-tier cell is
-   the confirmed candidate (green). Base state already shows the final
-   look with no JS/animation required -- .is-on below only adds a
-   one-time pulse-in + scan sweep on top, the same "base = resting
-   look, is-on = one-shot flourish" split .eval-bar already uses. */
+   Represents the universe being scanned: each cell is a real (illustrative)
+   ticker symbol, not a blank swatch -- 2026-08-16, previous version was
+   colored squares with no label, which read as an abstract heatmap rather
+   than "tickers being scanned." Fewer, wider cells than before so the
+   symbol text has room; most are unmatched (visible but dim, so the grid
+   still reads as a grid and every symbol stays legible), a handful are
+   flagged matches (accent), and phase 3's single top-tier cell is the
+   confirmed candidate (green). Base state already shows the final look
+   with no JS/animation required -- .is-on below only adds a one-time
+   pulse-in + scan sweep on top, the same "base = resting look, is-on =
+   one-shot flourish" split .eval-bar already uses. */
 
-.scan-grid { position: relative; overflow: hidden; display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px; margin-bottom: 16px; }
+.scan-grid { position: relative; overflow: hidden; display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-bottom: 16px; }
 
 .scan-cell {
-  aspect-ratio: 1; border-radius: 4px;
-  background: var(--bg); border: 1px solid var(--panel-border); opacity: .3;
+  aspect-ratio: 1.7 / 1; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); border: 1px solid var(--panel-border); opacity: .55;
+  font-size: 11px; font-weight: 600; letter-spacing: .01em; color: var(--muted);
 }
 
-.scan-cell[data-tier] { opacity: 1; border-color: var(--accent); background: var(--lp-accent-soft); }
+.scan-cell[data-tier] { opacity: 1; border-color: var(--accent); background: var(--lp-accent-soft); color: var(--text); }
 
 .scan-grid[data-phase="3"] .scan-cell[data-tier="3"] {
-  border-color: var(--green); background: var(--lp-green-soft); transform: scale(1.15);
+  border-color: var(--green); background: var(--lp-green-soft); transform: scale(1.1);
 }
 
 /* One sweep band, not per-cell -- stays cheap regardless of grid size. */
