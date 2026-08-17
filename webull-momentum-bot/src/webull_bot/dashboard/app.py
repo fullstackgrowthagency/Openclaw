@@ -635,9 +635,9 @@ def create_app(
     def pricing_page():
         return FileResponse(_STATIC_DIR / "pricing.html")
 
-    @app.get("/features", response_class=FileResponse)
-    def features_page():
-        return FileResponse(_STATIC_DIR / "features.html")
+    @app.get("/how-it-works", response_class=FileResponse)
+    def how_it_works_page():
+        return FileResponse(_STATIC_DIR / "how-it-works.html")
 
     @app.get("/strategies", response_class=FileResponse)
     def strategies_page():

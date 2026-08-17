@@ -268,17 +268,28 @@ def test_signup_and_login_pages_are_served(loop, session_factory):
     assert client.get("/login").status_code == 200
 
 
-def test_pricing_and_features_pages_are_served(loop, session_factory):
+def test_pricing_page_is_served(loop, session_factory):
     app = create_app(loop, session_factory, "paper", settings=Settings(session_secret_key="test-secret"))
     client = TestClient(app)
     assert client.get("/pricing").status_code == 200
-    assert client.get("/features").status_code == 200
 
 
 def test_strategies_page_is_served(loop, session_factory):
     app = create_app(loop, session_factory, "paper", settings=Settings(session_secret_key="test-secret"))
     client = TestClient(app)
     assert client.get("/strategies").status_code == 200
+
+
+def test_how_it_works_page_is_served(loop, session_factory):
+    app = create_app(loop, session_factory, "paper", settings=Settings(session_secret_key="test-secret"))
+    client = TestClient(app)
+    assert client.get("/how-it-works").status_code == 200
+
+
+def test_features_page_no_longer_exists(loop, session_factory):
+    app = create_app(loop, session_factory, "paper", settings=Settings(session_secret_key="test-secret"))
+    client = TestClient(app)
+    assert client.get("/features").status_code == 404
 
 
 def test_app_page_redirects_to_login_when_not_authenticated(loop, session_factory):
