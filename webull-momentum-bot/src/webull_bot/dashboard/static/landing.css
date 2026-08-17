@@ -1337,6 +1337,7 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
   .panel-split { grid-template-columns: 1fr; gap: 32px; }
   .panel-flip .panel-stage, .panel-flip .panel-copy { order: 0; }
   .p-cards { grid-template-columns: 1fr; }
+  .section4-split { grid-template-columns: 1fr !important; gap: 32px !important; }
 }
 
 /* =========================================================================
@@ -1615,4 +1616,249 @@ body.lp-auth header { position: sticky; }
 @media (max-width: 480px) {
   .lp-auth-card { padding: 30px 22px 26px; }
   .lp-auth-main { padding: 92px 20px 64px; min-height: 0; }
+}
+
+/* =========================================================================
+   HOME PAGE (2026-08-17) -- everything below is specific to the new
+   landing.html content: the Markets card icons, the hero's Strategy/
+   Signal/Execution relay, the How It Works pipeline timeline, and a
+   couple of scoped overrides for widgets/components reused from
+   elsewhere on the site that need different behavior here.
+   ========================================================================= */
+
+/* The home page reuses .wb-link/.wb-rail/.wb-meta from the Webull
+   integration panel on /how-it-works verbatim, but that panel's rail
+   flow / pulse / "Live" glow are gated behind .fs-panel.is-on (only
+   ever true inside the scroll deck). The home page has no deck, so
+   scope the same animations to fire unconditionally when this widget
+   is used inside a plain .lp-section instead. */
+.lp-section .wb-rail::before { animation: lp-wb-flow-dash .5s linear infinite; }
+.lp-section .wb-rail-pulse { animation: lp-wb-rail-pulse 2.2s var(--lp-panel-ease) infinite; }
+.lp-section .wb-meta-row.is-key b { animation: lp-glow-pulse 2.1s var(--lp-panel-ease) infinite; }
+
+/* .lp-auth-trust's existing rule (above) caps it at 420px and
+   auto-centers it, correct for the standalone auth-card usage on
+   login/signup. On the home page it sits under a full-width,
+   left-aligned paragraph inside a split column, so let it fill that
+   column instead of floating centered at a fixed width. */
+.section4-split .lp-auth-trust { max-width: none; margin: 26px 0 0; }
+
+/* Market visual components -- one small animated icon per Markets
+   card, sitting above its stage-head. Always-on (not gated behind
+   .fs-panel.is-on, since these live on a static page, not the deck) --
+   Live gets a vivid, energetic motion; Coming Soon gets the same idea
+   rendered muted and slower, so status reads through the motion
+   itself, not just the pill.
+
+   Each shape is specific to its own market, researched rather than one
+   icon recolored five times: stocks get an actual price chart, crypto
+   a spinning coin, futures an order book, forex an actual traded pair,
+   options a real payoff diagram.
+
+   Do not redeclare height on any .mv-* class below -- .mv already sets
+   a fixed height, and a second same-specificity height rule on the
+   same element would silently cancel it (whichever rule is declared
+   later in the cascade wins), letting percentage-height children
+   resolve against nothing definite and blow the widget up past its
+   card's border. */
+.mv { height: 64px; margin-bottom: 20px; }
+
+/* Stocks -- ticking candlesticks with a trend line overlay, the same
+   "current price chart" language the hero already uses. Neutral
+   palette (var(--muted)/var(--panel-border), no green/red) so the
+   widget reads as one consistent visual system across all five markets
+   -- status lives in the pill, not in the shape's own color. Up/down
+   still shows through as alternating shade, not hue; tempo (fastest of
+   the five) is what marks this one as actually trading in real time. */
+.mv-candles { position: relative; display: flex; align-items: flex-end; gap: 4px; padding: 0 2px; }
+.mv-candles-trend {
+  position: absolute; left: 0; right: 0; top: 22%; height: 2px;
+  background: repeating-linear-gradient(90deg, var(--muted) 0 6px, transparent 6px 12px);
+  background-size: 16px 100%; opacity: .55; animation: mv-trend-flow .7s linear infinite;
+}
+@keyframes mv-trend-flow { to { background-position: -16px 0; } }
+.mv-candles i { flex: 1; display: block; border-radius: 2px; transform-origin: bottom; animation: mv-candle-tick 1.3s var(--lp-panel-ease) infinite; }
+.mv-candles i.up { background: var(--muted); }
+.mv-candles i.down { background: var(--panel-border); border: 1px solid var(--muted); }
+.mv-candles i:nth-child(2) { height: 42%; animation-delay: 0ms; }
+.mv-candles i:nth-child(3) { height: 58%; animation-delay: 90ms; }
+.mv-candles i:nth-child(4) { height: 34%; animation-delay: 180ms; }
+.mv-candles i:nth-child(5) { height: 70%; animation-delay: 270ms; }
+.mv-candles i:nth-child(6) { height: 50%; animation-delay: 360ms; }
+.mv-candles i:nth-child(7) { height: 88%; animation-delay: 450ms; }
+.mv-candles i:nth-child(8) { height: 66%; animation-delay: 540ms; }
+@keyframes mv-candle-tick { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.82); } }
+
+/* Crypto -- a coin flipping in place, a token itself rather than the
+   ledger behind it. backface-visibility hides each face while it's
+   edge-on, so the swap between the two reads as one continuous spin
+   rather than a flat card flattening (Coming Soon: muted, unhurried). */
+.mv-coin { display: flex; align-items: center; justify-content: center; perspective: 320px; }
+.mv-coin-disc { position: relative; width: 40px; height: 40px; transform-style: preserve-3d; animation: mv-coin-spin 3.2s linear infinite; }
+.mv-coin-face {
+  position: absolute; inset: 0; border-radius: 50%; backface-visibility: hidden;
+  background: var(--panel-border); border: 2px solid var(--muted);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; font-weight: 700; color: var(--muted);
+}
+.mv-coin-face-b { transform: rotateY(180deg); }
+@keyframes mv-coin-spin { from { transform: rotateY(0deg); } to { transform: rotateY(360deg); } }
+
+/* Futures -- an order book: bid depth (left) and ask depth (right)
+   stacked as rows around a central spread, exactly the ladder a
+   futures trader actually watches -- not a chart of price over time
+   (that's what Stocks already is) but a snapshot of resting size at
+   each level right now. Each bar's width pulses independently and out
+   of phase, so the book reads as continuously being added to and
+   pulled, the way a live book never sits still (Coming Soon: muted,
+   unhurried). No height rule on .mv-book itself -- see the note above
+   .mv. */
+.mv-book { display: flex; flex-direction: column; justify-content: center; gap: 5px; padding: 0 2px; }
+.mv-book-row { position: relative; display: flex; align-items: center; height: 6px; }
+.mv-book-row::after {
+  content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px;
+  background: var(--panel-border);
+}
+.mv-book-side { width: 50%; height: 100%; display: flex; }
+.mv-book-bids { justify-content: flex-end; }
+.mv-book-bar {
+  height: 100%; width: var(--w, 40%); border-radius: 2px;
+  animation: mv-book-depth 2.8s var(--lp-panel-ease) infinite; animation-delay: var(--d, 0ms);
+}
+.mv-book-bids .mv-book-bar { background: var(--muted); transform-origin: 100% 50%; }
+.mv-book-asks .mv-book-bar { background: var(--panel-border); border: 1px solid var(--muted); transform-origin: 0% 50%; }
+@keyframes mv-book-depth { 0%, 100% { transform: scaleX(1); } 50% { transform: scaleX(.62); } }
+
+/* Forex -- an actual traded pair (EUR/USD, the single most-traded pair
+   in the world) rather than an abstract "FX" label, quoted rate
+   swapping direction between them along a dashed rail (Coming Soon:
+   muted). */
+.mv-pair { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
+.mv-pair-node {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  background: var(--bg); border: 1px solid var(--panel-border);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: var(--muted);
+}
+.mv-pair-rail { position: relative; flex: 1; height: 2px; margin: 0 8px; }
+.mv-pair-rail::before {
+  content: ""; position: absolute; inset: 0; opacity: .5;
+  background: repeating-linear-gradient(90deg, var(--muted) 0 4px, transparent 4px 8px);
+}
+.mv-pair-dot {
+  position: absolute; top: 50%; left: 0; width: 6px; height: 6px; margin-top: -3px;
+  border-radius: 50%; background: var(--muted); opacity: .8;
+  animation: mv-pair-swap 3s ease-in-out infinite;
+}
+@keyframes mv-pair-swap { 0%, 100% { left: 0; } 50% { left: calc(100% - 6px); } }
+
+/* Options -- an actual payoff diagram (flat, then a kinked rise past
+   the strike), the chart every options course opens with, drawing
+   itself in like a live quote rather than a static print (Coming Soon:
+   muted). */
+.mv-payoff { display: flex; align-items: center; }
+.mv-payoff svg { width: 100%; height: 100%; overflow: visible; }
+.mv-payoff-base { stroke: var(--panel-border); stroke-width: 1; }
+.mv-payoff-strike { stroke: var(--panel-border); stroke-width: 1; stroke-dasharray: 2 2; }
+.mv-payoff-line {
+  fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 106; stroke-dashoffset: 106;
+  animation: mv-payoff-draw 3.4s ease-in-out infinite;
+}
+@keyframes mv-payoff-draw {
+  0%   { stroke-dashoffset: 106; opacity: .35; }
+  14%  { opacity: 1; }
+  55%  { stroke-dashoffset: 0; opacity: 1; }
+  86%  { stroke-dashoffset: 0; opacity: 1; }
+  100% { stroke-dashoffset: 106; opacity: .35; }
+}
+
+/* Hero pipeline -- Strategy / Signal / Execution, the three stages
+   named in the closing CTA's tagline ("Define the strategy. Automate
+   the process. Let the system execute."), illustrated as a relay: a
+   pulse travels rail-to-rail while each badge lights up in turn
+   behind it. */
+.hero-flow { max-width: 460px; margin: 0 auto 36px; }
+.hero-flow-row {
+  display: grid; grid-template-columns: 48px 1fr 48px 1fr 48px; align-items: center;
+}
+.hero-node-badge {
+  width: 48px; height: 48px; border-radius: 50%; background: var(--panel);
+  border: 1px solid var(--panel-border); display: flex; align-items: center; justify-content: center;
+  animation: hero-badge-glow 3.6s var(--lp-panel-ease) infinite;
+}
+.hero-node-badge svg { width: 20px; height: 20px; color: var(--muted); }
+.hero-node-badge.n2 { animation-delay: 1.2s; }
+.hero-node-badge.n3 { animation-delay: 2.4s; }
+@keyframes hero-badge-glow {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; border-color: var(--panel-border); }
+  50% { box-shadow: 0 0 14px 2px var(--lp-accent-line); border-color: var(--accent); }
+}
+.hero-rail { position: relative; height: 2px; }
+.hero-rail::before {
+  content: ""; position: absolute; inset: 0;
+  background: repeating-linear-gradient(90deg, var(--panel-border) 0 6px, transparent 6px 12px);
+}
+.hero-rail-pulse {
+  position: absolute; top: 50%; left: 0; width: 8px; height: 8px; margin-top: -4px;
+  border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px 2px var(--lp-accent-line);
+  opacity: 0; animation: hero-rail-travel 3.6s var(--lp-panel-ease) infinite;
+}
+.hero-rail.r2 .hero-rail-pulse { animation-delay: 1.2s; }
+@keyframes hero-rail-travel {
+  0%   { left: 0; opacity: 0; }
+  8%   { opacity: 1; }
+  92%  { opacity: 1; }
+  100% { left: calc(100% - 8px); opacity: 0; }
+}
+.hero-flow-labels { display: flex; margin-top: 10px; }
+.hero-flow-labels span {
+  flex: 1; font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--muted); text-align: center; white-space: nowrap;
+}
+
+/* Pipeline flow -- the 6 how-it-works stages connected by a single
+   timeline: a dashed rail runs between each pair of cards (in reading
+   order, including the row-wrap from card 3 to card 4) with a
+   traveling pulse relaying through all five segments, plus a numbered
+   step badge on each card so the sequence reads clearly even with
+   motion off. */
+.p-cards.pipeline-flow { row-gap: 16px; }
+@media (min-width: 901px) {
+  .p-cards.pipeline-flow { grid-template-columns: 1fr 34px 1fr 34px 1fr; align-items: stretch; }
+}
+@media (max-width: 900px) {
+  .p-cards.pipeline-flow { grid-template-columns: 1fr; }
+}
+.pf-rail { position: relative; }
+.pf-rail.pf-rail-row { grid-column: 1 / -1; }
+@media (min-width: 901px) {
+  .pf-rail { height: 2px; align-self: center; }
+  .pf-rail.pf-rail-row { margin: 2px 0; }
+}
+@media (max-width: 900px) {
+  .pf-rail { height: 26px; width: 2px; margin: 0 auto; }
+}
+.pf-rail::before {
+  content: ""; position: absolute; inset: 0;
+  background: repeating-linear-gradient(90deg, var(--panel-border) 0 5px, transparent 5px 10px);
+}
+@media (max-width: 900px) {
+  .pf-rail::before { background: repeating-linear-gradient(180deg, var(--panel-border) 0 5px, transparent 5px 10px); }
+}
+.pf-rail-pulse {
+  position: absolute; top: 50%; left: 0; width: 6px; height: 6px; margin-top: -3px;
+  border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px 1px var(--lp-accent-line);
+  opacity: 0; animation: pf-rail-travel-h 4.5s linear infinite;
+}
+@keyframes pf-rail-travel-h { 0% { left: 0; opacity: 0; } 8% { opacity: 1; } 92% { opacity: 1; } 100% { left: calc(100% - 6px); opacity: 0; } }
+@media (max-width: 900px) {
+  .pf-rail-pulse { top: 0; left: 50%; margin-top: 0; margin-left: -3px; animation-name: pf-rail-travel-v; }
+  @keyframes pf-rail-travel-v { 0% { top: 0; opacity: 0; } 8% { opacity: 1; } 92% { opacity: 1; } 100% { top: calc(100% - 6px); opacity: 0; } }
+}
+.pf-num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border-radius: 50%; background: var(--bg);
+  border: 1px solid var(--panel-border); color: var(--muted);
+  font-size: 12px; font-weight: 700; margin-bottom: 10px;
 }

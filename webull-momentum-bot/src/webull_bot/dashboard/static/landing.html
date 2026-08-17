@@ -19,10 +19,12 @@
 </head>
 <body class="lp">
 
-<!-- Scaffold (2026-08-17) -- header/hero/footer only, replacing the old
-     scroll-deck home page (moved to /how-it-works). This is a deliberate
-     starting point, not a finished home page -- more sections land here
-     iteratively. -->
+<!-- Full home page (2026-08-17) -- header, an animated hero, then six
+     sections (How It Works pipeline, Markets, Trading Styles, Your
+     Account, Pricing teaser, closing CTA) covering everything shipped
+     today plus every Coming Soon item from /strategies, woven into the
+     relevant section rather than listed separately. Replaces the old
+     scroll-deck home page (moved to /how-it-works). -->
 
 <div class="site-bg" aria-hidden="true">
   <div class="p-grid"></div>
@@ -52,19 +54,337 @@
 </header>
 
 <main>
-  <section class="lp-section">
-    <div class="lp-wrap">
-      <p class="lp-eyebrow" data-reveal>FSTrading</p>
+  <!-- ===== HERO ===== -->
+  <section class="lp-section" style="padding-top: 140px;">
+    <div class="lp-wrap" style="text-align: center;">
+      <div class="hero-flow" data-reveal aria-hidden="true">
+        <div class="hero-flow-row">
+          <div class="hero-node-badge n1">
+            <svg viewBox="0 0 24 24">
+              <rect x="3" y="12" width="4" height="9" rx="1" fill="currentColor"></rect>
+              <rect x="10" y="7" width="4" height="14" rx="1" fill="currentColor"></rect>
+              <rect x="17" y="3" width="4" height="18" rx="1" fill="currentColor"></rect>
+            </svg>
+          </div>
+          <div class="hero-rail r1"><span class="hero-rail-pulse"></span></div>
+          <div class="hero-node-badge n2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="8"></circle>
+              <circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none"></circle>
+              <line x1="12" y1="1" x2="12" y2="4"></line>
+              <line x1="12" y1="20" x2="12" y2="23"></line>
+              <line x1="1" y1="12" x2="4" y2="12"></line>
+              <line x1="20" y1="12" x2="23" y2="12"></line>
+            </svg>
+          </div>
+          <div class="hero-rail r2"><span class="hero-rail-pulse"></span></div>
+          <div class="hero-node-badge n3">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path>
+            </svg>
+          </div>
+        </div>
+        <div class="hero-flow-labels">
+          <span>Strategy</span><span>Signal</span><span>Execution</span>
+        </div>
+      </div>
+      <p class="lp-eyebrow" data-reveal style="justify-content: center;">FSTrading</p>
       <h2 data-reveal>Turn trading strategies into automated systems</h2>
-      <p class="p-body" data-reveal style="max-width: 62ch; margin-bottom: 8px;">
+      <p class="p-body" data-reveal style="max-width: 62ch; margin: 0 auto 8px;">
         Define how you'd trade. FSTrading watches the market for it, decides when it's real,
         sizes the risk, and places the order &mdash; in your own Webull account, on your own
         rules, every time the setup shows up.
       </p>
 
-      <div class="p-cta" style="margin-top: 32px;">
+      <div class="p-cta" style="justify-content: center; margin-top: 32px;">
         <a class="lp-btn lp-btn-primary" href="/signup">Create your beta account</a>
         <a class="lp-btn lp-btn-secondary" href="/how-it-works">See how it works</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 1. HOW IT WORKS (pipeline overview, revives deleted /features content) ===== -->
+  <section class="lp-section" style="position: relative; padding-top: 0;">
+    <div class="lp-wrap" style="text-align: center;">
+      <p class="lp-eyebrow" data-reveal style="justify-content: center;">How it works</p>
+      <h2 data-reveal>Every stage of the trade, automated</h2>
+      <p class="p-body" data-reveal style="max-width: 62ch; margin: 0 auto 8px;">
+        A strategy isn't just an entry signal. FSTrading automates every stage between
+        "the market moved" and "the trade is managed correctly."
+      </p>
+      <div class="p-cards pipeline-flow" style="margin-top: 32px;">
+        <div class="p-card" data-reveal>
+          <span class="pf-num">1</span>
+          <h3>Discovery</h3>
+          <p>Every strategy begins differently. The platform continuously scans for the
+             conditions each one is watching for &mdash; no manual refreshing, no jumping
+             between watchlists.</p>
+        </div>
+        <div class="pf-rail" aria-hidden="true"><span class="pf-rail-pulse" style="animation-delay: 0s;"></span></div>
+        <div class="p-card" data-reveal>
+          <span class="pf-num">2</span>
+          <h3>Analysis</h3>
+          <p>Finding a candidate is only the first step. Price, volume, volatility, liquidity,
+             technical levels and more are evaluated automatically before anything qualifies.</p>
+        </div>
+        <div class="pf-rail" aria-hidden="true"><span class="pf-rail-pulse" style="animation-delay: .9s;"></span></div>
+        <div class="p-card" data-reveal>
+          <span class="pf-num">3</span>
+          <h3>The Waiting</h3>
+          <p>A good setup may not be ready yet. Every candidate is watched at the same time
+             &mdash; not the two or three a person can hold in their head at once.</p>
+        </div>
+        <div class="pf-rail pf-rail-row" aria-hidden="true"><span class="pf-rail-pulse" style="animation-delay: 1.8s;"></span></div>
+        <div class="p-card" data-reveal>
+          <span class="pf-num">4</span>
+          <h3>Decision &amp; Risk</h3>
+          <p>The order is the last part, not the important part. Risk is sized and decided
+             before a trade exists, not improvised in the moment.</p>
+        </div>
+        <div class="pf-rail" aria-hidden="true"><span class="pf-rail-pulse" style="animation-delay: 2.7s;"></span></div>
+        <div class="p-card" data-reveal>
+          <span class="pf-num">5</span>
+          <h3>Execution</h3>
+          <p>Signal, risk and order come together automatically &mdash; entries, stops and
+             targets submitted as one atomic bracket, not separate manual steps.</p>
+        </div>
+        <div class="pf-rail" aria-hidden="true"><span class="pf-rail-pulse" style="animation-delay: 3.6s;"></span></div>
+        <div class="p-card" data-reveal>
+          <span class="pf-num">6</span>
+          <h3>Trade Management</h3>
+          <p>Automation doesn't stop at entry. Positions are actively managed after the fill
+             &mdash; the same discipline applied to every trade, every time.</p>
+        </div>
+      </div>
+      <div class="p-cta" style="margin-top: 32px;">
+        <a class="lp-btn lp-btn-primary" href="/how-it-works">See it in motion</a>
+        <a class="lp-btn lp-btn-secondary" href="/signup">Create your beta account</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 2. MARKETS (Crypto/Futures/Forex Coming Soon woven in) ===== -->
+  <section class="lp-section" style="position: relative; padding-top: 0;">
+    <div class="lp-wrap" style="text-align: center;">
+      <p class="lp-eyebrow" data-reveal style="justify-content: center;">Markets</p>
+      <h2 data-reveal>Where FSTrading trades</h2>
+      <p class="p-body" data-reveal style="max-width: 62ch; margin: 0 auto 8px;">
+        Stocks are live today. Every other market is being built on the same
+        scan-to-execution pipeline.
+      </p>
+      <div class="p-cards" style="margin-top: 32px;">
+        <div class="p-card" data-reveal>
+          <div class="mv mv-candles" aria-hidden="true">
+            <span class="mv-candles-trend"></span>
+            <i class="up"></i><i class="up"></i><i class="down"></i><i class="up"></i><i class="down"></i><i class="up"></i><i class="up"></i>
+          </div>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Stocks</h3>
+            <span class="stage-pill">Live</span>
+          </div>
+          <p>Day trading and scalping across 8 trigger strategies, checked in priority order
+             on every tick.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <div class="mv mv-payoff" aria-hidden="true">
+            <svg viewBox="0 0 100 40" preserveAspectRatio="none">
+              <line class="mv-payoff-base" x1="0" y1="34" x2="100" y2="34"></line>
+              <line class="mv-payoff-strike" x1="46" y1="4" x2="46" y2="34"></line>
+              <path class="mv-payoff-line" d="M2,30 L46,30 L98,4"></path>
+            </svg>
+          </div>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Options</h3>
+            <span class="stage-pill is-muted">Coming Soon</span>
+          </div>
+          <p>Trigger entry strategies for options aren't available yet. When they launch,
+             they'll run through the same scan-to-execution pipeline as stocks &mdash; this
+             page will get its own detailed breakdown at that point.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <div class="mv mv-coin" aria-hidden="true">
+            <div class="mv-coin-disc">
+              <span class="mv-coin-face mv-coin-face-a">&#8383;</span>
+              <span class="mv-coin-face mv-coin-face-b">&#8383;</span>
+            </div>
+          </div>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Crypto</h3>
+            <span class="stage-pill is-muted">Coming Soon</span>
+          </div>
+          <p>Trigger entry strategies for crypto pairs aren't available yet. When they launch,
+             they'll run through the same scan-to-execution pipeline as stocks &mdash; this
+             page will get its own detailed breakdown at that point.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <div class="mv mv-book" aria-hidden="true">
+            <div class="mv-book-row">
+              <span class="mv-book-side mv-book-bids"><span class="mv-book-bar" style="--w:78%; --d:0ms;"></span></span>
+              <span class="mv-book-side mv-book-asks"><span class="mv-book-bar" style="--w:55%; --d:150ms;"></span></span>
+            </div>
+            <div class="mv-book-row">
+              <span class="mv-book-side mv-book-bids"><span class="mv-book-bar" style="--w:50%; --d:300ms;"></span></span>
+              <span class="mv-book-side mv-book-asks"><span class="mv-book-bar" style="--w:80%; --d:450ms;"></span></span>
+            </div>
+            <div class="mv-book-row">
+              <span class="mv-book-side mv-book-bids"><span class="mv-book-bar" style="--w:65%; --d:600ms;"></span></span>
+              <span class="mv-book-side mv-book-asks"><span class="mv-book-bar" style="--w:38%; --d:750ms;"></span></span>
+            </div>
+            <div class="mv-book-row">
+              <span class="mv-book-side mv-book-bids"><span class="mv-book-bar" style="--w:35%; --d:900ms;"></span></span>
+              <span class="mv-book-side mv-book-asks"><span class="mv-book-bar" style="--w:62%; --d:1050ms;"></span></span>
+            </div>
+          </div>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Futures</h3>
+            <span class="stage-pill is-muted">Coming Soon</span>
+          </div>
+          <p>Trigger entry strategies for futures aren't available yet. When they launch,
+             they'll run through the same scan-to-execution pipeline as stocks &mdash; this
+             page will get its own detailed breakdown at that point.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <div class="mv mv-pair" aria-hidden="true">
+            <span class="mv-pair-node">&euro;</span>
+            <span class="mv-pair-rail"><span class="mv-pair-dot"></span></span>
+            <span class="mv-pair-node">$</span>
+          </div>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Forex</h3>
+            <span class="stage-pill is-muted">Coming Soon</span>
+          </div>
+          <p>Trigger entry strategies for forex pairs aren't available yet. When they launch,
+             they'll run through the same scan-to-execution pipeline as stocks &mdash; this
+             page will get its own detailed breakdown at that point.</p>
+        </div>
+      </div>
+      <div class="p-cta">
+        <a class="lp-btn lp-btn-secondary" href="/strategies">See every trigger strategy</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 3. TRADING STYLES (Swing/Long Term/Short/Options Coming Soon woven in) ===== -->
+  <section class="lp-section" style="position: relative; padding-top: 0;">
+    <div class="lp-wrap" style="text-align: center;">
+      <p class="lp-eyebrow" data-reveal style="justify-content: center;">Trading styles</p>
+      <h2 data-reveal>Every way to structure a trade</h2>
+      <p class="p-body" data-reveal style="max-width: 62ch; margin: 0 auto 8px;">
+        Day trading and scalping is live now. Every other holding period is on the roadmap.
+      </p>
+      <div class="p-cards" style="margin-top: 32px;">
+        <div class="p-card" data-reveal>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Day Trading / Scalping</h3>
+            <span class="stage-pill">Live</span>
+          </div>
+          <p>8 strategies, checked in priority order &mdash; from a fresh breakout to a
+             volume ignition catch-all.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Swing Trading</h3>
+            <span class="stage-pill is-muted">Coming Soon</span>
+          </div>
+          <p>Multi-day trigger strategies aren't available yet &mdash; this section will get
+             its own detailed breakdown once they launch.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Long Term Portfolio</h3>
+            <span class="stage-pill is-muted">Coming Soon</span>
+          </div>
+          <p>Longer-horizon, portfolio-level strategies aren't available yet &mdash; this
+             section will get its own detailed breakdown once they launch.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Short Trading</h3>
+            <span class="stage-pill is-muted">Coming Soon</span>
+          </div>
+          <p>Short-selling trigger strategies aren't available yet &mdash; this section will
+             get its own detailed breakdown once they launch.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <div class="stage-head" style="margin-bottom: 10px;">
+            <h3 style="margin:0;">Options Trading</h3>
+            <span class="stage-pill is-muted">Coming Soon</span>
+          </div>
+          <p>Options-based trigger strategies aren't available yet &mdash; this section will
+             get its own detailed breakdown once they launch.</p>
+        </div>
+      </div>
+      <div class="p-cta">
+        <a class="lp-btn lp-btn-secondary" href="/strategies">See every trigger strategy</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 4. YOUR OWN ACCOUNT (trust/custody, broker-agnostic copy since
+       more brokers are coming; the widget itself still names Webull
+       specifically, since that's the one broker actually live today --
+       reused verbatim from /how-it-works' own Webull-integration panel) ===== -->
+  <section class="lp-section" style="position: relative; padding-top: 0;">
+    <div class="lp-wrap">
+      <div class="section4-split" style="display: grid; grid-template-columns: 1fr 1fr; gap: 60px; align-items: center;">
+        <div>
+          <p class="lp-eyebrow" data-reveal>Your account, your custody</p>
+          <h2 data-reveal>Trades through your own broker's accounts</h2>
+          <p class="p-body" data-reveal style="max-width: 46ch; margin-bottom: 8px;">
+            FSTrading isn't a broker. It connects to your own brokerage account's API, using
+            the app key, app secret, and account ID from your broker.
+          </p>
+          <ul class="lp-auth-trust">
+            <li data-reveal>Your API credentials are encrypted at rest and never shown back once saved</li>
+            <li data-reveal>Every order the system places is a real order in your own account &mdash; your funds, your custody, your broker</li>
+            <li data-reveal>FSTrading only automates the decisions</li>
+          </ul>
+        </div>
+        <div data-reveal>
+          <div class="stage">
+            <div class="stage-head"><span class="stage-title">Webull integration</span><span class="stage-pill">Connected</span></div>
+            <div class="wb-link">
+              <img src="/logo.png" alt="FSTrading" class="wb-node-logo">
+              <div class="wb-rail"><div class="wb-rail-pulse"></div></div>
+              <img src="/webull-logo.png" alt="Webull" class="wb-node-logo">
+            </div>
+            <div class="wb-meta">
+              <div class="wb-meta-row"><span>App key &amp; secret</span><b>Encrypted at rest</b></div>
+              <div class="wb-meta-row"><span>Orders</span><b>Placed in your account</b></div>
+              <div class="wb-meta-row is-key"><span>Connection</span><b>Live</b></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 5. PRICING TEASER (verbatim from pricing.html) ===== -->
+  <section class="lp-section" style="position: relative; padding-top: 0;">
+    <div class="lp-wrap lp-narrow" style="text-align: center;">
+      <p class="lp-eyebrow" data-reveal style="justify-content: center;">Pricing</p>
+      <h2 data-reveal>Free during early access</h2>
+      <p class="p-body" data-reveal style="max-width: 62ch; margin: 0 auto 8px;">
+        There are no paid plans yet. Every account gets the full platform, and every strategy
+        can run in sandbox mode against a real broker connection &mdash; no risk, no live
+        capital &mdash; for as long as you want before you ever switch it to live.
+      </p>
+      <div class="p-cta" style="justify-content: center;">
+        <a class="lp-btn lp-btn-primary" href="/pricing">See pricing details</a>
+        <a class="lp-btn lp-btn-secondary" href="/signup">Create your beta account</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 6. CLOSING CTA ===== -->
+  <section class="lp-section" style="position: relative; padding-top: 0; padding-bottom: 60px;">
+    <div class="lp-wrap" style="text-align: center;">
+      <h2 data-reveal style="max-width: 640px; margin: 0 auto 28px;">
+        Define the strategy. Automate the process. Let the system execute.
+      </h2>
+      <div class="p-cta">
+        <a class="lp-btn lp-btn-primary" href="/signup">Create your beta account</a>
+        <a class="lp-btn lp-btn-secondary" href="/login">Log in</a>
       </div>
     </div>
   </section>
