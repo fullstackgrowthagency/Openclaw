@@ -76,7 +76,12 @@ body.lp header.is-stuck {
   border-bottom-color: var(--panel-border); padding: 9px 0;
 }
 
-body.lp .header-top { max-width: var(--lp-max); margin: 0 auto; padding: 0 28px; }
+/* Full width, not the usual `max-width: var(--lp-max); margin: 0 auto`
+   content-column treatment every other `.lp-wrap`/`.panel-inner` gets --
+   the header logo and nav are meant to sit at the actual screen edges
+   (top-left / top-right), not clustered together in the middle of a
+   1180px column on wide viewports. */
+body.lp .header-top { padding: 0 28px; }
 body.lp header .header-logo { height: 36px; transition: height .3s var(--lp-ease); }
 body.lp header.is-stuck .header-logo { height: 30px; }
 
