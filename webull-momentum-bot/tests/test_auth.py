@@ -275,6 +275,12 @@ def test_pricing_and_features_pages_are_served(loop, session_factory):
     assert client.get("/features").status_code == 200
 
 
+def test_strategies_page_is_served(loop, session_factory):
+    app = create_app(loop, session_factory, "paper", settings=Settings(session_secret_key="test-secret"))
+    client = TestClient(app)
+    assert client.get("/strategies").status_code == 200
+
+
 def test_app_page_redirects_to_login_when_not_authenticated(loop, session_factory):
     app = create_app(loop, session_factory, "paper", settings=Settings(session_secret_key="test-secret"))
     client = TestClient(app, follow_redirects=False)

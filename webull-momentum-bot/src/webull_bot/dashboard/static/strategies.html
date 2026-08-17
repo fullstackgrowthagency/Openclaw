@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trigger Entry Strategies - FSTrading</title>
+<meta name="description" content="Every trigger entry strategy FSTrading runs against stocks, explained in detail -- plus what's coming for crypto, futures and forex.">
+<link rel="icon" href="/favicon.png">
+
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/landing.css">
+<script>document.documentElement.classList.add("js");</script>
+</head>
+<body class="lp">
+
+<div class="site-bg" aria-hidden="true">
+  <div class="p-grid"></div>
+  <div class="p-glow"></div>
+</div>
+
+<header data-header>
+  <div class="header-top">
+    <a href="/"><img src="/logo.png" alt="FSTrading" class="header-logo"></a>
+    <nav class="lp-nav">
+      <a class="lp-btn lp-btn-secondary lp-btn-sm" href="/login">Log in</a>
+      <a class="lp-btn lp-btn-primary lp-btn-sm" href="/signup">Sign up</a>
+      <div class="lp-menu">
+        <button class="lp-menu-btn" id="lp-menu-btn" type="button" aria-label="Menu" aria-expanded="false">&#9776;</button>
+        <div class="lp-menu-dropdown" id="lp-menu-dropdown">
+          <a href="/#faq">FAQ</a>
+          <a href="/features">Features</a>
+          <a href="/strategies">Strategies</a>
+          <a href="/pricing">Pricing</a>
+          <div class="lp-menu-divider"></div>
+          <a href="/login">Log in</a>
+          <a href="/signup">Sign up</a>
+        </div>
+      </div>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="lp-section">
+    <div class="lp-wrap">
+      <p class="lp-eyebrow" data-reveal>Trigger Entry Strategies</p>
+      <h2 data-reveal>Every way FSTrading actually enters a trade</h2>
+      <p class="p-body" data-reveal style="max-width: 68ch; margin-bottom: 8px;">
+        FSTrading doesn't trade off one signal. Once a candidate has already been through the
+        scanning, analysis and watching stages covered on the <a href="/features">Features</a>
+        page and is armed, it's checked against every trigger strategy below, on every tick, in
+        a fixed priority order &mdash; the first strategy whose conditions are actually met is
+        the one that places the trade, never more than one per candidate.
+      </p>
+
+      <div class="p-cta" style="justify-content: flex-start; margin: 28px 0 8px;">
+        <a class="lp-btn lp-btn-secondary lp-btn-sm" href="#stocks">Stocks</a>
+        <a class="lp-btn lp-btn-secondary lp-btn-sm" href="#crypto">Crypto</a>
+        <a class="lp-btn lp-btn-secondary lp-btn-sm" href="#futures">Futures</a>
+        <a class="lp-btn lp-btn-secondary lp-btn-sm" href="#forex">Forex</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="lp-section" id="stocks" style="padding-top: 0;">
+    <div class="lp-wrap">
+      <div class="stage-head" style="margin-bottom: 8px;">
+        <span class="stage-title" style="font-size: 13px;">Stocks</span>
+        <span class="stage-pill">Live</span>
+      </div>
+      <h2 data-reveal>8 strategies, checked in priority order</h2>
+      <p class="p-body" data-reveal style="max-width: 68ch; margin-bottom: 8px;">
+        Each strategy below is built around a different way a stock actually starts moving.
+        They're listed in the exact order FSTrading checks them &mdash; the most selective,
+        timing-sensitive patterns first, the broadest catch-all last &mdash; so a candidate
+        that qualifies for a more specific setup is never entered on the generic one instead.
+      </p>
+
+      <div class="p-cards" data-stagger="60" style="grid-template-columns: repeat(2, 1fr); margin-top: 32px;">
+        <div class="p-card" data-reveal>
+          <h3>1. Refined Breakout</h3>
+          <p class="stage-title" style="margin: -4px 0 10px;">Fresh breakouts, not stale ones</p>
+          <p>Triggers the moment price breaks above a known resistance level &mdash; but only in
+             the earliest stretch of that move, so it favors a breakout that's still happening
+             over one that already ran. Requires volume to be accelerating and the spread to stay
+             tight, filtering out breakouts on thin, choppy order books.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <h3>2. Opening Range Breakout</h3>
+          <p class="stage-title" style="margin: -4px 0 10px;">First 5 minutes of the session</p>
+          <p>Some stocks &mdash; recent IPOs especially &mdash; don't have a meaningful price
+             history to build a resistance level from. This strategy uses the high of the first
+             five minutes of the session as its reference line instead, and triggers when price
+             breaks above it on rising volume.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <h3>3. VWAP Reclaim</h3>
+          <p class="stage-title" style="margin: -4px 0 10px;">The second leg of a move</p>
+          <p>Watches for a stock that dipped meaningfully below its volume-weighted average price
+             and is now reclaiming it on renewed volume &mdash; a shakeout followed by a resume.
+             The stop for this one tracks VWAP itself rather than a flat percentage, since VWAP
+             holding as support is the entire thesis.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <h3>4. Momentum Breakout</h3>
+          <p class="stage-title" style="margin: -4px 0 10px;">The original breakout, no ceiling</p>
+          <p>The most straightforward strategy: price clears a resistance level with volume
+             accelerating and spread in check. Unlike Refined Breakout, there's no cap on how far
+             past resistance price already is, which makes this one broader but less selective
+             about timing.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <h3>5. Breakout Pullback</h3>
+          <p class="stage-title" style="margin: -4px 0 10px;">Breakout, pullback, reclaim</p>
+          <p>Waits through a full three-part pattern: an initial breakout, a pullback that gives
+             back no more than half of that move, then a reclaim of the pullback high with volume
+             and momentum returning. The stop sits just below the pullback low.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <h3>6. Ignition Pullback</h3>
+          <p class="stage-title" style="margin: -4px 0 10px;">Pullback off a volume surge</p>
+          <p>The same pullback-then-reclaim structure as Breakout Pullback, but it doesn't need a
+             resistance level to work from &mdash; it anchors to any stock showing a genuine
+             volume "ignition" instead, so it can catch setups that don't have an obvious chart
+             level yet.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <h3>7. Volatility Contraction Breakout</h3>
+          <p class="stage-title" style="margin: -4px 0 10px;">The flag / pennant pattern</p>
+          <p>Looks for the classic flag or pennant: a stock that made an initial move, tightened
+             into a narrow trading range, then expands back out on volume. Compares how tight the
+             recent range is against the broader range to tell a real contraction from a stock
+             that's simply stalled.</p>
+        </div>
+        <div class="p-card" data-reveal>
+          <h3>8. Volume Ignition</h3>
+          <p class="stage-title" style="margin: -4px 0 10px;">The catch-all</p>
+          <p>Checked last, on purpose &mdash; the broadest strategy and the one every candidate
+             falls through to if nothing more specific fired first. No resistance level or
+             reference price required: just a genuine surge in volume, combined with rising price
+             above VWAP to rule out a spike that's actually distribution.</p>
+        </div>
+      </div>
+
+      <div class="p-card" data-reveal style="margin-top: 20px;">
+        <h3>How these fit together</h3>
+        <p>
+          Every strategy above shares the same guardrails. Reward and stop-loss sizing come from
+          your own adjustable risk settings, not a number hardcoded into the strategy. Most stops
+          are a flat percentage below entry; VWAP Reclaim, Breakout Pullback and Ignition Pullback
+          anchor to a technical level instead, since the level itself is the trade thesis. Once a
+          strategy triggers, the signal still has to clear a confirmation window and your risk
+          settings before an order is ever placed &mdash; see
+          <a href="/features">Features</a> for the rest of that pipeline.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="lp-section" id="crypto" style="padding-top: 0;">
+    <div class="lp-wrap">
+      <div class="stage-head" style="margin-bottom: 8px;">
+        <span class="stage-title" style="font-size: 13px;">Crypto</span>
+        <span class="stage-pill is-muted">Coming Soon</span>
+      </div>
+      <p class="p-body" data-reveal style="max-width: 68ch;">
+        Trigger entry strategies for crypto pairs aren't available yet. When they launch,
+        they'll run through the same scan-to-execution pipeline as stocks &mdash; this page will
+        get its own detailed breakdown at that point.
+      </p>
+    </div>
+  </section>
+
+  <section class="lp-section" id="futures" style="padding-top: 0;">
+    <div class="lp-wrap">
+      <div class="stage-head" style="margin-bottom: 8px;">
+        <span class="stage-title" style="font-size: 13px;">Futures</span>
+        <span class="stage-pill is-muted">Coming Soon</span>
+      </div>
+      <p class="p-body" data-reveal style="max-width: 68ch;">
+        Trigger entry strategies for futures aren't available yet. When they launch, they'll run
+        through the same scan-to-execution pipeline as stocks &mdash; this page will get its own
+        detailed breakdown at that point.
+      </p>
+    </div>
+  </section>
+
+  <section class="lp-section" id="forex" style="padding-top: 0;">
+    <div class="lp-wrap">
+      <div class="stage-head" style="margin-bottom: 8px;">
+        <span class="stage-title" style="font-size: 13px;">Forex</span>
+        <span class="stage-pill is-muted">Coming Soon</span>
+      </div>
+      <p class="p-body" data-reveal style="max-width: 68ch; margin-bottom: 8px;">
+        Trigger entry strategies for forex pairs aren't available yet. When they launch, they'll
+        run through the same scan-to-execution pipeline as stocks &mdash; this page will get its
+        own detailed breakdown at that point.
+      </p>
+
+      <div class="p-cta" style="margin-top: 40px;">
+        <a class="lp-btn lp-btn-primary" href="/">See it in motion</a>
+        <a class="lp-btn lp-btn-secondary" href="/signup">Create your beta account</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="lp-footer-inner">
+    <div class="lp-footer-brand">FSTrading</div>
+    <div class="lp-footer-tag">Turn trading strategies into automated systems.</div>
+    <p>
+      Trading involves substantial risk of loss and is not suitable for every investor.
+      Automation does not reduce market risk and does not make any strategy profitable. The
+      thresholds described on this page are configurable starting points, not a guarantee of
+      how any strategy performs. Nothing on this page is financial advice, a recommendation, or
+      an offer to buy or sell any security.
+    </p>
+    <div class="lp-footer-by">Powered by Full Stack Growth Studio.</div>
+  </div>
+</footer>
+
+<script src="/landing.js"></script>
+</body>
+</html>

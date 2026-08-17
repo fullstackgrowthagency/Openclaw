@@ -639,6 +639,10 @@ def create_app(
     def features_page():
         return FileResponse(_STATIC_DIR / "features.html")
 
+    @app.get("/strategies", response_class=FileResponse)
+    def strategies_page():
+        return FileResponse(_STATIC_DIR / "strategies.html")
+
     def _require_login_page(request: Request, page_filename: str):
         """Shared guard for every page under /app: redirects to /login when
         auth is configured and the request has no valid session, otherwise

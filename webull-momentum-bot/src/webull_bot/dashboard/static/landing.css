@@ -76,6 +76,17 @@ body.lp header.is-stuck {
   border-bottom-color: var(--panel-border); padding: 9px 0;
 }
 
+/* style.css's bare `main` selector is a CSS grid with auto-fit columns --
+   correct for the dashboard app (app.html's widget panels), wrong for
+   these marketing pages, where every direct child is a full-width
+   .lp-section meant to stack vertically. Harmless on pages with a single
+   section (pricing.html, features.html -- one grid item just fills the
+   row) but breaks as soon as a page has more than one, since auto-fit
+   places multiple 420px+ sections side by side instead of stacking them.
+   Overriding to block here, scoped to body.lp so the dashboard app is
+   untouched. */
+body.lp main { display: block; }
+
 /* Full width, not the usual `max-width: var(--lp-max); margin: 0 auto`
    content-column treatment every other `.lp-wrap`/`.panel-inner` gets --
    the header logo and nav are meant to sit at the actual screen edges
@@ -678,6 +689,11 @@ body.lp > header { position: fixed; z-index: 200; }
   font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
   color: var(--accent); background: var(--lp-accent-soft); border-radius: 999px; padding: 4px 11px;
 }
+
+/* Same pill, muted -- for a section that isn't live yet (e.g. the
+   Crypto/Futures/Forex headers on /strategies), so "Coming Soon" doesn't
+   read with the same active-and-connected color as "Live"/"Connected". */
+.stage-pill.is-muted { color: var(--muted); background: rgba(139, 152, 165, .12); }
 
 .stage-note { font-size: 12px; color: var(--muted); text-align: center; max-width: 460px; margin: 0; }
 
