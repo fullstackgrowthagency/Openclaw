@@ -716,17 +716,14 @@ body.lp > header { position: fixed; z-index: 200; }
 
 .wb-link { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
 
-/* FSTrading's side is just /logo.png -- it already bakes its own
-   wordmark into the image, same as any other place this logo is used
-   (e.g. the header). Webull's side pairs the mark with its own inline
-   wordmark text below, since there's no equivalent combined asset for
-   it -- kept as a proper mark+wordmark lockup (icon left, name right),
-   not a caption underneath, so the two sides read as comparable logos. */
+/* Both sides are just their own logo image -- /logo.png already bakes
+   in the FSTrading wordmark (same as the header), and /webull-logo.png
+   is Webull's own crescent+wordmark lockup (the exact asset, not a
+   redrawn approximation -- has a transparent background and a white
+   wordmark, so it reads correctly against this page's dark theme).
+   height only, width:auto, so each scales uniformly without distorting
+   its own aspect ratio. */
 .wb-node-logo { height: 26px; width: auto; flex-shrink: 0; }
-
-.wb-node { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.wb-mark { height: 26px; width: auto; display: block; flex-shrink: 0; }
-.wb-wordmark { font-size: 20px; font-weight: 800; letter-spacing: -.01em; color: var(--text); }
 
 /* Same "current flowing" technique as .exec-link (a dashed line whose
    background-position loops), just horizontal instead of vertical --
@@ -1245,8 +1242,7 @@ body.lp > header { position: fixed; z-index: 200; }
      for the same short-but-wide-desktop clipping bug to resurface a
      third time. Sized in between the two narrower tiers below. */
   .wb-link { gap: 11px; margin-bottom: 13px; }
-  .wb-node-logo, .wb-mark { height: 24px; }
-  .wb-wordmark { font-size: 18px; }
+  .wb-node-logo { height: 24px; }
   .wb-meta-row { padding: 4px 0; }
 }
 
@@ -1370,8 +1366,7 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
   .flow-dot { width: 24px; height: 24px; }
 
   .wb-link { gap: 9px; margin-bottom: 11px; }
-  .wb-node-logo, .wb-mark { height: 21px; }
-  .wb-wordmark { font-size: 16px; }
+  .wb-node-logo { height: 21px; }
   .wb-meta-row { padding: 3px 0; }
 
   .p-cards { gap: 8px; }
@@ -1434,8 +1429,7 @@ body.lp footer { border-top: 1px solid var(--panel-border); padding: 46px 28px 6
   .flow-dot { width: 22px; height: 22px; }
 
   .wb-link { gap: 7px; margin-bottom: 8px; }
-  .wb-node-logo, .wb-mark { height: 18px; }
-  .wb-wordmark { font-size: 14px; }
+  .wb-node-logo { height: 18px; }
   .wb-meta-row { padding: 2px 0; }
 
   .p-cards { gap: 6px; }
