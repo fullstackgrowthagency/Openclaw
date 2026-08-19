@@ -15,7 +15,7 @@
 #
 # Bump `version` any time you change a weight or threshold so MomentumScore
 # records stay traceable to the formula that produced them.
-version: "v2.3-tick-order-flow"
+version: "v2.4-price-momentum"
 
 # v2 (2026-08-09): added float_turnover_score/short_term_relative_volume_score/
 # dollar_volume_acceleration_score -- metrics/rolling.py already computed
@@ -70,20 +70,35 @@ version: "v2.3-tick-order-flow"
 # not scored as 0) for every candidate until that's verified and the map
 # is corrected if needed. Safe to ship weighted-in ahead of that
 # verification specifically because of this None-until-confirmed fallback.
+#
+# v2.4 (2026-08-19): added price_momentum_score (raw upward price
+# velocity, blending metrics.price_velocity_1m/5m through a three-point
+# progressive curve -- see metrics/calculations.py's scale3 and
+# scoring/momentum_ignition_score.py's compute_components). Real
+# motivation: no existing component actually scores "is the price moving
+# up right now" -- price_acceleration_score only measures whether the
+# move is speeding up, not the raw move itself, so a name could rank
+# highly on MIS purely on volume/float signals while barely moving (or
+# even red). Since the dashboard's candidate list is sorted by this score
+# (see the v2 comment above), that meant "moving up appropriately" wasn't
+# actually driving ranking anywhere. Every existing weight (all 13) is the
+# v2.3 value scaled by 0.90 (preserves each component's *relative*
+# weighting exactly), with the freed 10% going to price_momentum_score.
 weights:
-  float_score: 0.0513                          # structural (float size) -- 0.0558 * 0.92
-  float_velocity_score: 0.1027                 # popularity: 5m float turnover rate -- 0.1116 * 0.92
-  float_turnover_score: 0.0856                 # today's cumulative float turnover -- 0.0930 * 0.92
-  relative_volume_score: 0.1027                # popularity: whole-session RVOL -- 0.1116 * 0.92
-  short_term_relative_volume_score: 0.1283      # windowed (5m) RVOL, the freshest "hot right now" signal -- 0.1395 * 0.92
-  volume_acceleration_score: 0.0770             # 0.0837 * 0.92
-  dollar_volume_acceleration_score: 0.0770      # 0.0837 * 0.92
-  price_acceleration_score: 0.0856              # fast price movement is itself a popularity signal -- 0.0930 * 0.92
-  breakout_proximity_score: 0.0428              # least popularity-relevant structural factor -- 0.0465 * 0.92
-  trend_quality_score: 0.0428                   # 0.0465 * 0.92
-  liquidity_score: 0.0599                       # 0.0651 * 0.92
-  room_to_target_score: 0.0644                  # v2.2 -- 0.07 * 0.92
-  order_flow_score: 0.08                        # v2.3: new -- see comment above
+  float_score: 0.0462                           # structural (float size) -- 0.0513 * 0.90
+  float_velocity_score: 0.0924                  # popularity: 5m float turnover rate -- 0.1027 * 0.90
+  float_turnover_score: 0.0770                  # today's cumulative float turnover -- 0.0856 * 0.90
+  relative_volume_score: 0.0924                 # popularity: whole-session RVOL -- 0.1027 * 0.90
+  short_term_relative_volume_score: 0.1155      # windowed (5m) RVOL, the freshest "hot right now" signal -- 0.1283 * 0.90
+  volume_acceleration_score: 0.0693             # 0.0770 * 0.90
+  dollar_volume_acceleration_score: 0.0693      # 0.0770 * 0.90
+  price_acceleration_score: 0.0770              # fast price movement is itself a popularity signal -- 0.0856 * 0.90
+  breakout_proximity_score: 0.0385              # least popularity-relevant structural factor -- 0.0428 * 0.90
+  trend_quality_score: 0.0385                   # 0.0428 * 0.90
+  liquidity_score: 0.0539                       # 0.0599 * 0.90
+  room_to_target_score: 0.0580                  # v2.2 -- 0.0644 * 0.90
+  order_flow_score: 0.0720                      # v2.3 -- 0.08 * 0.90
+  price_momentum_score: 0.10                    # v2.4: new -- see comment above
 
 # Thresholds used to normalize raw metrics into 0-100 sub-scores, and to
 # drive DISCOVERED -> WATCHING -> HEATING_UP -> ARMED transitions. All
@@ -116,3 +131,16 @@ thresholds:
   # to arrive, large enough that 1-2 stray prints can't swing the ratio
   # to +/-1.0 on pure noise.
   min_order_flow_sample_count: 8
+  # price_momentum_score's scale3 curve breakpoints (2026-08-19) -- see
+  # MomentumMetrics.price_velocity_1m/5m's own docstrings for what these
+  # % values represent. Starting guesses, not backtested, same as every
+  # other threshold in this file. 1m is the freshest/noisiest window so
+  # its bar is set lower than 5m's; 5m's "exceptional" end sits just past
+  # scoring/rtms_weights.yaml's own hard +5%/5min regime-gate threshold --
+  # sensible since that's genuinely the "unambiguous real run" zone.
+  price_momentum_1m_min: 0.3
+  price_momentum_1m_strong: 1.0
+  price_momentum_1m_exceptional: 2.5
+  price_momentum_5m_min: 1.0
+  price_momentum_5m_strong: 3.0
+  price_momentum_5m_exceptional: 6.0

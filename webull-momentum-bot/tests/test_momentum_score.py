@@ -256,3 +256,66 @@ def test_order_flow_score_is_none_when_metrics_never_saw_any_ticks():
     config = MISConfig.load()
     score = compute_score(_metrics(), _float_data(5_000_000), config)
     assert score.components.order_flow_score is None
+
+
+# -- price_momentum_score (2026-08-19) -- raw upward price velocity, ------
+# distinct from price_acceleration_score which only measures whether the
+# move is speeding up, not whether/how much price is actually moving up.
+
+def test_price_momentum_score_is_zero_when_flat():
+    config = MISConfig.load()
+    score = compute_score(_metrics(price_velocity_1m=0.0, price_velocity_5m=0.0), _float_data(5_000_000), config)
+    assert score.components.price_momentum_score == 0.0
+
+
+def test_price_momentum_score_is_zero_when_red():
+    config = MISConfig.load()
+    score = compute_score(_metrics(price_velocity_1m=-2.0, price_velocity_5m=-3.0), _float_data(5_000_000), config)
+    assert score.components.price_momentum_score == 0.0
+
+
+def test_price_momentum_score_scales_with_strength_not_just_pass_fail():
+    # The three-point curve should give "barely positive" and "screaming
+    # higher" meaningfully different scores, not both maxing out past a
+    # single threshold -- confirms the scale3 curve is actually wired in,
+    # not a plain two-point _scale.
+    config = MISConfig.load()
+    float_data = _float_data(5_000_000)
+    barely_positive = compute_score(
+        _metrics(price_velocity_1m=0.4, price_velocity_5m=1.2), float_data, config,
+    ).components.price_momentum_score
+    strong = compute_score(
+        _metrics(price_velocity_1m=1.5, price_velocity_5m=4.0), float_data, config,
+    ).components.price_momentum_score
+    exceptional = compute_score(
+        _metrics(price_velocity_1m=3.0, price_velocity_5m=7.0), float_data, config,
+    ).components.price_momentum_score
+    assert 0.0 < barely_positive < strong < exceptional == 100.0
+
+
+def test_strong_upward_price_movement_outranks_an_otherwise_identical_flat_candidate():
+    # This is the whole point: a candidate genuinely running up should now
+    # outrank an otherwise-identical one that's flat, purely on the new
+    # component -- previously nothing in MIS scored raw upward price
+    # movement at all (only price_acceleration_score, which measures
+    # whether the move is speeding up, not the move itself).
+    config = MISConfig.load()
+    float_data = _float_data(5_000_000)
+    flat = compute_score(_metrics(price_velocity_1m=0.0, price_velocity_5m=0.0), float_data, config)
+    running_up = compute_score(_metrics(price_velocity_1m=2.0, price_velocity_5m=5.0), float_data, config)
+    assert running_up.components.price_momentum_score > flat.components.price_momentum_score
+    assert running_up.score > flat.score
+
+
+def test_price_momentum_score_blends_both_windows():
+    # Strong on one window but flat on the other should land in between --
+    # confirms this is a genuine average of the two, not just reading one.
+    config = MISConfig.load()
+    float_data = _float_data(5_000_000)
+    both_strong = compute_score(_metrics(price_velocity_1m=2.0, price_velocity_5m=5.0), float_data, config)
+    only_1m_strong = compute_score(_metrics(price_velocity_1m=2.0, price_velocity_5m=0.0), float_data, config)
+    only_5m_strong = compute_score(_metrics(price_velocity_1m=0.0, price_velocity_5m=5.0), float_data, config)
+    assert only_1m_strong.components.price_momentum_score < both_strong.components.price_momentum_score
+    assert only_5m_strong.components.price_momentum_score < both_strong.components.price_momentum_score
+    assert only_1m_strong.components.price_momentum_score > 0.0
+    assert only_5m_strong.components.price_momentum_score > 0.0

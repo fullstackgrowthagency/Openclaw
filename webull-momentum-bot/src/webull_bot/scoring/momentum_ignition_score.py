@@ -20,6 +20,7 @@ from typing import Optional, Sequence
 
 import yaml
 
+from ..metrics.calculations import scale3
 from ..metrics.volume_profile import evaluate_target_clearance
 from ..models import FloatData, MomentumMetrics, MomentumScore, MomentumScoreComponents
 
@@ -151,6 +152,28 @@ def compute_components(
     ):
         order_flow_score = _scale(metrics.order_flow_imbalance_1m, -1.0, 1.0)
 
+    # v2.4 addition (2026-08-19): raw upward price velocity, not just
+    # whether it's accelerating (price_acceleration_score above already
+    # covers that). Blends the freshest window (1m) with a short-term
+    # confirmation window (5m) -- both snapshot-history derived and always
+    # populated (unlike the newer Optional TICK-buffer return_* fields),
+    # so this stays meaningful even for a just-discovered candidate with no
+    # tick stream yet. Each window scored independently via scale3's
+    # three-point progressive curve (min/strong/exceptional -- "barely
+    # positive" and "screaming higher" read as meaningfully different
+    # scores, not both maxing out past one threshold), then averaged into
+    # one component the same way liquidity_score above blends spread +
+    # dollar volume.
+    price_momentum_1m_score = scale3(
+        metrics.price_velocity_1m,
+        th["price_momentum_1m_min"], th["price_momentum_1m_strong"], th["price_momentum_1m_exceptional"],
+    )
+    price_momentum_5m_score = scale3(
+        metrics.price_velocity_5m,
+        th["price_momentum_5m_min"], th["price_momentum_5m_strong"], th["price_momentum_5m_exceptional"],
+    )
+    price_momentum_score = (price_momentum_1m_score + price_momentum_5m_score) / 2
+
     return MomentumScoreComponents(
         float_score=float_score,
         float_velocity_score=float_velocity_score,
@@ -165,6 +188,7 @@ def compute_components(
         dollar_volume_acceleration_score=dollar_volume_acceleration_score,
         room_to_target_score=room_to_target_score,
         order_flow_score=order_flow_score,
+        price_momentum_score=price_momentum_score,
     )
 
 

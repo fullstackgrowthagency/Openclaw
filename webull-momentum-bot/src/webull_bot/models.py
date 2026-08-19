@@ -382,6 +382,21 @@ class MomentumScoreComponents:
     # _TICK_SIDE_MAP) -- deliberately fails toward "no signal" (None)
     # rather than a confidently wrong one if that map's guesses are wrong.
     order_flow_score: Optional[float] = None
+    # v2.4 addition (2026-08-19): raw upward price velocity itself --
+    # distinct from price_acceleration_score above, which measures whether
+    # the move is SPEEDING UP, not whether/how much price is actually
+    # moving up right now. Blends metrics.price_velocity_1m/5m (both
+    # always-populated snapshot-history fields, unlike the newer Optional
+    # TICK-buffer return_5s/15s/... fields -- this keeps the component
+    # meaningful even for a just-discovered WATCHING candidate with no tick
+    # stream yet) through a three-point progressive curve (metrics/
+    # calculations.py's scale3) so a strong run reads as meaningfully
+    # higher than a barely-positive one, not both maxing out past a single
+    # threshold. Typed Optional (like room_to_target_score/order_flow_score
+    # above) purely so existing positional MomentumScoreComponents(...)
+    # construction in tests keeps working -- in practice this is always a
+    # real float, since both source metrics are never None.
+    price_momentum_score: Optional[float] = None
 
 
 @dataclass

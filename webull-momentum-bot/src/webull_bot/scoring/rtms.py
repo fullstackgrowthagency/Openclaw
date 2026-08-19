@@ -16,7 +16,8 @@ Structurally a direct copy of momentum_ignition_score.py's pattern
 missing components excluded and the remaining weights renormalized rather
 than treated as 0. The one real difference is the scoring curve shape --
 RTMS's components use a three-point (min/strong/exceptional) progressive
-curve (_scale3) instead of MIS's plain two-point _scale, so "barely
+curve (metrics/calculations.py's scale3, also reused by MIS's own
+price_momentum_score) instead of MIS's plain two-point _scale, so "barely
 qualifies" and "extremely strong" read as meaningfully different scores.
 
 All weights/thresholds live in rtms_weights.yaml so they can be tuned from
@@ -31,6 +32,7 @@ from typing import Optional
 
 import yaml
 
+from ..metrics.calculations import scale3
 from ..models import MomentumMetrics, RTMSComponents, RTMSScore
 
 _DEFAULT_WEIGHTS_PATH = Path(__file__).parent / "rtms_weights.yaml"
@@ -38,24 +40,6 @@ _DEFAULT_WEIGHTS_PATH = Path(__file__).parent / "rtms_weights.yaml"
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, value))
-
-
-def _scale3(value: float, minimum: float, strong: float, exceptional: float, *, mid: float = 60.0) -> float:
-    """Ascending three-point progressive curve: 0 at/below `minimum`, `mid`
-    at `strong`, 100 at/above `exceptional`, linearly interpolated between
-    each pair of breakpoints. Unlike MIS's plain two-point _scale, this
-    gives "barely cleared the bar" and "extremely strong" meaningfully
-    different scores instead of both maxing out once past a single
-    threshold."""
-    if value <= minimum:
-        return 0.0
-    if value >= exceptional:
-        return 100.0
-    if value <= strong:
-        span = strong - minimum
-        return _clamp((value - minimum) / span * mid) if span else mid
-    span = exceptional - strong
-    return _clamp(mid + (value - strong) / span * (100.0 - mid)) if span else 100.0
 
 
 def _fresh_high_reclaim_score(
@@ -147,7 +131,7 @@ def compute_rtms_components(
         if value is None:
             return None
         c = curves[name]
-        return _scale3(value, c["min"], c["strong"], c["exceptional"])
+        return scale3(value, c["min"], c["strong"], c["exceptional"])
 
     momentum_15s_score = _curve("momentum_15s_score", metrics.return_15s)
     momentum_30s_score = _curve("momentum_30s_score", metrics.return_30s)
@@ -170,7 +154,7 @@ def compute_rtms_components(
         and metrics.order_flow_sample_count_1m >= th["min_order_flow_sample_count"]
     ):
         c = curves["order_flow_trade_velocity_score"]
-        order_flow_trade_velocity_score = _scale3(metrics.order_flow_imbalance_1m, c["min"], c["strong"], c["exceptional"])
+        order_flow_trade_velocity_score = scale3(metrics.order_flow_imbalance_1m, c["min"], c["strong"], c["exceptional"])
 
     volume_acceleration_score = _curve("volume_acceleration_score", metrics.volume_accel_1m_3m)
 

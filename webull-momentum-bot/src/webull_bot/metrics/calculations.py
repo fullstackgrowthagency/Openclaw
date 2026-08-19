@@ -150,6 +150,25 @@ def trend_efficiency(prices: Sequence[float]) -> float:
     return net_move / total_path
 
 
+def scale3(value: float, minimum: float, strong: float, exceptional: float, *, mid: float = 60.0) -> float:
+    """Ascending three-point progressive curve: 0 at/below `minimum`, `mid`
+    at `strong`, 100 at/above `exceptional`, linearly interpolated between
+    each pair of breakpoints. Unlike a plain two-point linear scale, this
+    gives "barely cleared the bar" and "extremely strong" meaningfully
+    different scores instead of both maxing out once past a single
+    threshold -- used by scoring/rtms.py's RTMS components and
+    scoring/momentum_ignition_score.py's price_momentum_score."""
+    if value <= minimum:
+        return 0.0
+    if value >= exceptional:
+        return 100.0
+    if value <= strong:
+        span = strong - minimum
+        return max(0.0, min(100.0, (value - minimum) / span * mid)) if span else mid
+    span = exceptional - strong
+    return max(0.0, min(100.0, mid + (value - strong) / span * (100.0 - mid))) if span else 100.0
+
+
 def price_range_pct(prices: Sequence[float]) -> float:
     """High-low range of a list of prices as a % of their average -- a
     coarse volatility proxy for detecting a tightening/consolidating range
