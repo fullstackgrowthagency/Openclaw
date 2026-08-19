@@ -53,6 +53,26 @@ const COLUMN_INFO = {
     body:
       "Why this candidate is in its current state -- the reason logged the last time it changed state. For example, \"failed liquidity/spread check\" for a REJECTED candidate, or \"MIS 45.2 crossed heating-up threshold\" for one that just started heating up.",
   },
+  phase: {
+    title: "Phase",
+    body:
+      "The Real-Time Momentum Qualification Layer's own phase, separate from State -- tracked while ARMED/CONFIRMING and updated every tick, independent of whether a strategy has actually fired:\n\n" +
+      "NONE / IGNITING: not yet moving fast enough to qualify (IGNITING = approaching the 5-minute regime gate).\n" +
+      "IMPULSING: a real, fresh impulse -- entry-eligible if RTMS also clears its floor.\n" +
+      "PULLING_BACK: a controlled, structurally-intact retracement from a prior impulse -- tracked, not rejected, waiting to see if it re-accelerates.\n" +
+      "REACCELERATING: price has resumed climbing out of a pullback -- entry-eligible again.\n\n" +
+      "A candidate can be ARMED (score-qualified) for a long time while phase stays NONE/IGNITING -- that's this layer withholding entry, not a bug by itself. See the Momentum column for exactly why on this specific candidate.",
+  },
+  rtms: {
+    title: "RTMS",
+    body:
+      "The Real-Time Momentum Score, 0-100 -- separate from the Score (MIS) column. MIS asks \"is this stock structurally interesting\"; RTMS asks \"is it actually moving RIGHT NOW,\" blending 15s/30s/60s momentum, price acceleration, trend efficiency, fresh-high proximity, order flow, and volume acceleration. Only populated once phase has left NONE. Must clear a threshold (65 from IMPULSING, 60 from REACCELERATING by default) before a fired signal is allowed to actually start confirming an entry.",
+  },
+  "momentum-block-reason": {
+    title: "Momentum",
+    body:
+      "The most recent reason the Real-Time Momentum Qualification Layer declined to start (or kept waiting on) confirming an entry for this candidate -- e.g. \"5m momentum regime not met (3.10% < 4.00%)\" or \"RTMS 42.1 below 65.0 required...\". Only set once a strategy has actually fired a signal for this candidate at least once; blank if none has fired yet, even if Phase/RTMS are already updating.",
+  },
   "score-breakdown": {
     title: "Score Weighting Breakdown",
     body:
@@ -407,13 +427,16 @@ async function refreshCandidates() {
           <td>${fmtNum(c.score, 1)}</td>
           <td>${fmtNum(c.price)}</td>
           <td>${fmtNum(c.resistance_level)}</td>
+          <td class="muted">${c.momentum_phase ? c.momentum_phase.replace("_", " ") : "--"}</td>
+          <td>${fmtNum(c.rtms, 1)}</td>
+          <td class="muted">${c.momentum_block_reason || "--"}</td>
           <td class="muted">${c.reason || "--"}</td>
           <td class="muted">${fmtTime(c.last_updated_at)}</td>
         </tr>`).join("")
-      : emptyRow(7, "No candidates tracked yet");
+      : emptyRow(10, "No candidates tracked yet");
     return rows;
   } catch (e) {
-    body.innerHTML = emptyRow(7, `Failed to load: ${e.message}`);
+    body.innerHTML = emptyRow(10, `Failed to load: ${e.message}`);
     lastCandidateRows = [];
     return [];
   }

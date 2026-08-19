@@ -15,7 +15,7 @@
 #
 # Bump `version` any time you change a weight or threshold so MomentumScore
 # records stay traceable to the formula that produced them.
-version: "v2.4-price-momentum"
+version: "v2.5-breakout-weighted"
 
 # v2 (2026-08-09): added float_turnover_score/short_term_relative_volume_score/
 # dollar_volume_acceleration_score -- metrics/rolling.py already computed
@@ -84,21 +84,34 @@ version: "v2.4-price-momentum"
 # actually driving ranking anywhere. Every existing weight (all 13) is the
 # v2.3 value scaled by 0.90 (preserves each component's *relative*
 # weighting exactly), with the freed 10% going to price_momentum_score.
+#
+# v2.5 (2026-08-19, same LGHL incident as rtms_weights.yaml's rtms-v2):
+# raised price_momentum_score further, 0.10 -> 0.15, so upward price
+# movement weighs more in ranking -- the real entry-timing fix for that
+# incident was the RTMS gate thresholds (rtms_weights.yaml), not MIS, but
+# the user separately wanted price movement weighted harder here too.
+# breakout_proximity_score deliberately left untouched at its v2.4 value
+# (0.0385) per explicit instruction, even though it's the most literally
+# "breakout"-named component -- not every component that measures
+# breakout-adjacent structure needs to move just because this one round
+# is about price momentum specifically. The other 11 components are each
+# the v2.4 value scaled by 0.9420 (preserves their *relative* weighting
+# exactly), with the freed 5% going to price_momentum_score.
 weights:
-  float_score: 0.0462                           # structural (float size) -- 0.0513 * 0.90
-  float_velocity_score: 0.0924                  # popularity: 5m float turnover rate -- 0.1027 * 0.90
-  float_turnover_score: 0.0770                  # today's cumulative float turnover -- 0.0856 * 0.90
-  relative_volume_score: 0.0924                 # popularity: whole-session RVOL -- 0.1027 * 0.90
-  short_term_relative_volume_score: 0.1155      # windowed (5m) RVOL, the freshest "hot right now" signal -- 0.1283 * 0.90
-  volume_acceleration_score: 0.0693             # 0.0770 * 0.90
-  dollar_volume_acceleration_score: 0.0693      # 0.0770 * 0.90
-  price_acceleration_score: 0.0770              # fast price movement is itself a popularity signal -- 0.0856 * 0.90
-  breakout_proximity_score: 0.0385              # least popularity-relevant structural factor -- 0.0428 * 0.90
-  trend_quality_score: 0.0385                   # 0.0428 * 0.90
-  liquidity_score: 0.0539                       # 0.0599 * 0.90
-  room_to_target_score: 0.0580                  # v2.2 -- 0.0644 * 0.90
-  order_flow_score: 0.0720                      # v2.3 -- 0.08 * 0.90
-  price_momentum_score: 0.10                    # v2.4: new -- see comment above
+  float_score: 0.0435                           # structural (float size) -- 0.0462 * 0.9420
+  float_velocity_score: 0.0870                  # popularity: 5m float turnover rate -- 0.0924 * 0.9420
+  float_turnover_score: 0.0725                  # today's cumulative float turnover -- 0.0770 * 0.9420
+  relative_volume_score: 0.0870                 # popularity: whole-session RVOL -- 0.0924 * 0.9420
+  short_term_relative_volume_score: 0.1089      # windowed (5m) RVOL, the freshest "hot right now" signal -- 0.1155 * 0.9420
+  volume_acceleration_score: 0.0653             # 0.0693 * 0.9420
+  dollar_volume_acceleration_score: 0.0653      # 0.0693 * 0.9420
+  price_acceleration_score: 0.0725              # fast price movement is itself a popularity signal -- 0.0770 * 0.9420
+  breakout_proximity_score: 0.0385              # unchanged from v2.4 -- see v2.5 comment above
+  trend_quality_score: 0.0363                   # 0.0385 * 0.9420
+  liquidity_score: 0.0508                       # 0.0539 * 0.9420
+  room_to_target_score: 0.0546                  # v2.2 -- 0.0580 * 0.9420
+  order_flow_score: 0.0678                      # v2.3 -- 0.0720 * 0.9420
+  price_momentum_score: 0.15                    # v2.5: raised from 0.10 -- see comment above
 
 # Thresholds used to normalize raw metrics into 0-100 sub-scores, and to
 # drive DISCOVERED -> WATCHING -> HEATING_UP -> ARMED transitions. All

@@ -16,7 +16,18 @@
 # scanner/momentum_qualification.py) -- a candidate can only reach RTMS
 # scoring once it's already cleared that hard gate, so re-weighting it
 # heavily here would just be measuring the same thing twice.
-version: "rtms-v1"
+#
+# rtms-v2 (2026-08-19, real incident): LGHL sat at the top of the
+# candidate list (MIS 78.2, ARMED) but never even attempted an entry.
+# Root cause was this gate, not MIS -- see the six threshold comments
+# below marked "loosened rtms-v2" for exactly what changed and why. The
+# single clearest bug: impulsing_high_freshness_seconds (4.0s) was
+# checked at TradingLoopConfig.poll_interval_seconds cadence (5.0s
+# default) -- the check ran less often than the window it enforced, so
+# even a genuinely still-breaking-out stock would regularly get sampled
+# more than 4s after its last local high and fail the gate for reasons
+# unrelated to whether the breakout was real.
+version: "rtms-v2"
 
 weights:
   momentum_15s_score: 0.20                # freshest short-term momentum signal
@@ -59,13 +70,21 @@ component_curves:
 thresholds:
   # The hard momentum-regime gate: a candidate cannot enter CONFIRMING at
   # all until its trailing 5-minute return clears this, regardless of how
-  # high MIS or RTMS reads.
-  min_return_5m_pct: 5.00
+  # high MIS or RTMS reads. Loosened rtms-v2: 5.00 -> 4.00 -- return_5m
+  # reads off the EARLIEST snapshot currently in a candidate's rolling
+  # history (metrics/rolling.py's _window), not necessarily one from
+  # exactly 5 minutes ago -- a candidate whose discovery bar-seed was
+  # thin/failed, or that went ARMED shortly after discovery, can read
+  # well below its true 5-minute move here even mid-breakout.
+  min_return_5m_pct: 4.00
 
   # IGNITING classification -- informational only, never entry-eligible.
   # A candidate approaching the regime gate with rising short-term
   # velocity gets flagged this way well before it can actually qualify.
-  igniting_min_return_5m_pct: 4.0
+  # Loosened rtms-v2: 4.0 -> 3.0, kept a full point below the new
+  # min_return_5m_pct so this stays a distinct earlier-warning tier
+  # instead of collapsing onto the regime gate itself.
+  igniting_min_return_5m_pct: 3.0
 
   # IMPULSING quality gate -- ALL of these must hold simultaneously (see
   # MomentumQualificationEngine._meets_impulsing_quality).
@@ -74,8 +93,17 @@ thresholds:
   impulsing_min_return_15s_pct: 0.40
   impulsing_min_return_5s_pct: 0.0
   impulsing_min_trend_efficiency_15s: 0.55
-  impulsing_high_proximity_pct: 0.35
-  impulsing_high_freshness_seconds: 4.0
+  # Loosened rtms-v2: 0.35 -> 0.60 -- 0.35% was too tight for the choppy-
+  # but-real prints a thin low-float breakout actually produces between
+  # ticks.
+  impulsing_high_proximity_pct: 0.60
+  # Loosened rtms-v2: 4.0 -> 10.0 -- see the rtms-v2 comment at the top of
+  # this file. Must stay comfortably above TradingLoopConfig
+  # .poll_interval_seconds (5.0s default), which is the real cadence this
+  # check runs at -- a value below (or too close to) the poll interval
+  # guarantees this check regularly reads its own sampling gap as "the
+  # high has gone stale."
+  impulsing_high_freshness_seconds: 10.0
 
   # PULLING_BACK classification -- a retracement inside these bounds (AND
   # structurally intact, see scanner/momentum_structure.py) is tracked, not
@@ -88,9 +116,14 @@ thresholds:
   # counts as intact rather than requiring an exact hold.
   structure_reclaim_tolerance_pct: 0.15
 
-  # RTMS gates at each stage of the pipeline.
-  rtms_entry_threshold: 70.0                    # required to start CONFIRMING out of IMPULSING
-  rtms_reaccelerating_threshold: 70.0           # required to (re)start CONFIRMING out of REACCELERATING
+  # RTMS gates at each stage of the pipeline. Loosened rtms-v2:
+  # rtms_entry_threshold/rtms_reaccelerating_threshold now EQUAL their
+  # respective final-recheck thresholds (were both 70.0, stricter than
+  # the 65.0/60.0 required to stay qualified through to submission) --
+  # there was never a good reason entry itself should demand MORE than
+  # staying qualified does.
+  rtms_entry_threshold: 65.0                    # required to start CONFIRMING out of IMPULSING
+  rtms_reaccelerating_threshold: 60.0           # required to (re)start CONFIRMING out of REACCELERATING
   rtms_final_threshold: 65.0                    # final pre-submission recheck, IMPULSING path
   rtms_reaccelerating_final_threshold: 60.0     # final pre-submission recheck, REACCELERATING path -- slightly more lenient, since a re-acceleration is by definition still building
 

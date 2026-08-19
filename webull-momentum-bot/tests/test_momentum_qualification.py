@@ -134,11 +134,12 @@ def test_scenario_b_strong_breakout_reaches_impulsing():
 def test_scenario_c_stale_breakout_does_not_reach_impulsing():
     engine = _engine()
     candidate = _candidate()
-    # Same strong returns as B, but the "recent high" was made 10s ago --
-    # well past impulsing_high_freshness_seconds (4.0s) -- so quality fails.
+    # Same strong returns as B, but the "recent high" was made 20s ago --
+    # well past impulsing_high_freshness_seconds (10.0s, rtms-v2) -- so
+    # quality fails.
     candidate.latest_metrics = _metrics(
         return_5m=6.0, return_60s=2.0, return_30s=1.5, return_15s=0.8, return_5s=0.1,
-        trend_efficiency_15s=0.9, recent_high_15s=10.10, recent_high_15s_time=_NOW - timedelta(seconds=10),
+        trend_efficiency_15s=0.9, recent_high_15s=10.10, recent_high_15s_time=_NOW - timedelta(seconds=20),
         acceleration_60s=0.5,
     )
     signal = _signal()
