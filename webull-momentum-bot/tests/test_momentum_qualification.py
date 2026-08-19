@@ -4,13 +4,27 @@ Named-scenario tests for the Real-Time Momentum Qualification Layer
 layer was built from:
   A) slow grinder -- never clears the regime gate, stays rejected/ARMED
   B) strong breakout -- IMPULSING
-  C) stale breakout -- quality gate holds it back from IMPULSING
-  D) healthy pullback -- PULLING_BACK, tracked not rejected/entered
-  E) pullback -> reacceleration -- entry-eligible again
-  F) pullback invalidated (broken structure/excess retracement) -- revert
+  C) stale breakout -- quality gate holds phase back from IMPULSING
+  D) healthy pullback -- PULLING_BACK, tracked not rejected
+  E) pullback -> reacceleration -- REACCELERATING
+  F) pullback invalidated (broken structure/excess retracement) -- phase
+     reverts to NONE
+  H) regime genuinely fails -- the one case that still blocks entry
 (Scenario G, "stale queued confirmation blocked, needs fresh qualification",
 is a TradingLoop-level integration behavior -- see
 tests/test_trading_loop.py's test_submit_ranked_entries_final_recheck_*.)
+
+rtms-v3 (2026-08-19, real incidents: LGHL never attempted entry, BIVI and
+BTCT both ran 20%+ over 5 minutes and never entered): evaluate_trigger's
+entry decision no longer depends on phase (C/D/E/F below) at all -- see
+its docstring in scanner/momentum_qualification.py. Phase is still
+computed by on_snapshot exactly as before (for the dashboard and for
+_final_entry_rank's ranking weight), so scenarios C-F still assert on
+`candidate.momentum.phase` to prove that computation is unchanged; what
+changed is that `evaluate_trigger`'s outcome in every one of them is now
+governed purely by the 5-minute regime check, which is met throughout
+these fixtures (return_5m=6.0/6.2, well above the 4.00% floor) -- hence
+`start_confirmation` in all of C/D/E/F now, regardless of phase.
 """
 from datetime import datetime, timedelta
 
@@ -136,7 +150,7 @@ def test_scenario_c_stale_breakout_does_not_reach_impulsing():
     candidate = _candidate()
     # Same strong returns as B, but the "recent high" was made 20s ago --
     # well past impulsing_high_freshness_seconds (10.0s, rtms-v2) -- so
-    # quality fails.
+    # quality fails and phase stays out of IMPULSING.
     candidate.latest_metrics = _metrics(
         return_5m=6.0, return_60s=2.0, return_30s=1.5, return_15s=0.8, return_5s=0.1,
         trend_efficiency_15s=0.9, recent_high_15s=10.10, recent_high_15s_time=_NOW - timedelta(seconds=20),
@@ -145,6 +159,12 @@ def test_scenario_c_stale_breakout_does_not_reach_impulsing():
     signal = _signal()
     engine.on_snapshot(candidate, signal, _snapshot(10.10), _NOW)
     assert candidate.momentum.phase != MomentumPhase.IMPULSING
+
+    # rtms-v3: this is the direct BIVI/LGHL regression case -- phase never
+    # reaches IMPULSING, but the 5-minute regime is well clear (6.0% >=
+    # 4.00%), so entry must proceed anyway.
+    decision = engine.evaluate_trigger(candidate, signal, _snapshot(10.10), _NOW)
+    assert decision.outcome == "start_confirmation"
 
 
 # -- D: healthy pullback -- tracked, not rejected or entered -----------------
@@ -172,8 +192,11 @@ def test_scenario_d_healthy_pullback_is_tracked_not_rejected():
     assert candidate.momentum.phase == MomentumPhase.PULLING_BACK
     assert candidate.momentum.structure_intact is True
 
+    # rtms-v3: phase (PULLING_BACK) no longer changes the entry decision --
+    # regime is still cleared (return_5m=6.0), so this enters same as any
+    # other phase.
     decision = engine.evaluate_trigger(candidate, signal, _snapshot(10.00), t1)
-    assert decision.outcome == "track_pullback"
+    assert decision.outcome == "start_confirmation"
 
 
 # -- E: pullback -> reacceleration -- entry-eligible again -------------------
@@ -213,12 +236,11 @@ def test_scenario_e_pullback_then_reacceleration_is_entry_eligible():
 
     decision = engine.evaluate_trigger(candidate, signal, _snapshot(10.05), t2)
     assert decision.rtms is not None
-    # REACCELERATING is entry-eligible (subject to its own RTMS floor) --
-    # never silently downgraded back to track_pullback/stay_armed just for
-    # having pulled back earlier in the same impulse.
-    assert decision.outcome in ("start_confirmation", "stay_armed")
-    if decision.outcome == "stay_armed":
-        assert "RTMS" in decision.reason  # only reason it may still be blocked
+    # rtms-v3: REACCELERATING is entry-eligible unconditionally now --
+    # regime is cleared (return_5m=6.2), so this always enters, never
+    # silently downgraded back to stay_armed for an RTMS floor that no
+    # longer gates anything.
+    assert decision.outcome == "start_confirmation"
 
 
 # -- F: pullback invalidated -- broken structure or excess retracement -------
@@ -238,7 +260,11 @@ def test_scenario_f_pullback_invalidated_by_broken_structure_reverts_to_none():
     assert candidate.momentum.phase == MomentumPhase.IMPULSING
 
     # A hard drop through resistance -- structure broken regardless of
-    # retracement size.
+    # retracement size. Phase still fully resets (dashboard/ranking
+    # signal), but rtms-v3: return_5m is still 6.0% here, so the entry
+    # decision is unaffected by that reset -- this intentionally still
+    # enters. A structural break that also erases the 5-minute gain is
+    # covered by scenario H below.
     t1 = _NOW + timedelta(seconds=5)
     candidate.latest_metrics = _metrics(return_5m=6.0)
     engine.on_snapshot(candidate, signal, _snapshot(9.50), t1)
@@ -246,7 +272,7 @@ def test_scenario_f_pullback_invalidated_by_broken_structure_reverts_to_none():
     assert candidate.momentum.impulse_high is None  # full reset, not just a phase flip
 
     decision = engine.evaluate_trigger(candidate, signal, _snapshot(9.50), t1)
-    assert decision.outcome == "stay_armed"
+    assert decision.outcome == "start_confirmation"
 
 
 def test_scenario_f_variant_excess_retracement_reverts_even_with_structure_intact():
@@ -270,3 +296,33 @@ def test_scenario_f_variant_excess_retracement_reverts_even_with_structure_intac
     candidate.latest_metrics = _metrics(return_5m=6.0)
     engine.on_snapshot(candidate, signal, _snapshot(9.90), t1)
     assert candidate.momentum.phase == MomentumPhase.NONE
+
+    # rtms-v3: same reasoning as the other F variant -- phase reset alone
+    # doesn't block entry; regime (6.0%) is still cleared.
+    decision = engine.evaluate_trigger(candidate, signal, _snapshot(9.90), t1)
+    assert decision.outcome == "start_confirmation"
+
+
+# -- H: regime genuinely fails -- the one remaining hard block ---------------
+
+def test_scenario_h_regime_genuinely_failing_still_blocks_entry():
+    engine = _engine()
+    candidate = _candidate()
+    signal = _signal()
+
+    # A strong-looking impulse by every OTHER measure (short-term returns,
+    # trend efficiency, a fresh high) but return_5m itself sits below the
+    # 4.00% floor -- e.g. a candidate that just barely started moving.
+    # rtms-v3 removed the compound phase/RTMS gate, but the 5-minute
+    # regime check itself is unchanged and must still block.
+    candidate.latest_metrics = _metrics(
+        return_5m=2.5, return_60s=2.0, return_30s=1.5, return_15s=0.8, return_5s=0.1,
+        trend_efficiency_15s=0.9, recent_high_15s=10.10, recent_high_15s_time=_NOW - timedelta(seconds=1),
+        acceleration_60s=0.5,
+    )
+    engine.on_snapshot(candidate, signal, _snapshot(10.10), _NOW)
+
+    decision = engine.evaluate_trigger(candidate, signal, _snapshot(10.10), _NOW)
+    assert decision.outcome == "stay_armed"
+    assert "regime not met" in decision.reason
+    assert candidate.momentum.momentum_qualified is False

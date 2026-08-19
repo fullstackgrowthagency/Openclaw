@@ -443,7 +443,31 @@ class _AlwaysQualifiedMomentumEngine:
         return TriggerDecision(outcome="start_confirmation", reason="test double", phase=MomentumPhase.IMPULSING, rtms=100.0)
 
 
-def _armed_candidate_setup(broker):
+class _RegimeOnlyQualifiedMomentumEngine:
+    """Test double proving rtms-v3's core claim directly: same as
+    _AlwaysQualifiedMomentumEngine (regime/RTMS/metrics all forced
+    qualified) EXCEPT phase is forced to NONE instead of IMPULSING --
+    since phase no longer gates entry, this should behave identically to
+    the always-IMPULSING double for every entry-path test."""
+
+    def __init__(self):
+        from webull_bot.scoring.rtms import RTMSConfig
+        self.config = RTMSConfig.load()
+
+    def on_snapshot(self, candidate, signal, snapshot, now):
+        from webull_bot.enums import MomentumPhase
+        _qualify_for_entry(candidate)
+        candidate.momentum.phase = MomentumPhase.NONE
+
+    def evaluate_trigger(self, candidate, signal, snapshot, now):
+        from webull_bot.enums import MomentumPhase
+        from webull_bot.scanner.momentum_qualification import TriggerDecision
+        _qualify_for_entry(candidate)
+        candidate.momentum.phase = MomentumPhase.NONE
+        return TriggerDecision(outcome="start_confirmation", reason="test double", phase=MomentumPhase.NONE, rtms=100.0)
+
+
+def _armed_candidate_setup(broker, momentum_engine=None):
     from webull_bot.state_machine import new_candidate, transition
     from webull_bot.enums import CandidateState
 
@@ -464,7 +488,7 @@ def _armed_candidate_setup(broker):
         broker, StaticUniverseProvider([]), BroadScanner(broker, _SingleSymbolFloatProvider("TEST", 1_000_000)),
         watcher, trigger_engine, order_manager, position_manager, risk_engine,
         config=TradingLoopConfig(universe_rescan_interval_seconds=3600),
-        momentum_engine=_AlwaysQualifiedMomentumEngine(),
+        momentum_engine=momentum_engine or _AlwaysQualifiedMomentumEngine(),
     )
     loop.candidates["TEST"] = candidate
     return loop, candidate
@@ -541,6 +565,67 @@ def test_poll_confirmation_fails_and_reverts_to_armed_on_a_price_reversal():
     assert candidate.entry_block_reason is not None
     from webull_bot.enums import RiskEventType
     assert loop.risk_engine.events[-1].event_type == RiskEventType.CONFIRMATION_FAILED.value
+
+
+def test_poll_confirmation_reversal_hard_cancels_even_during_a_tracked_pullback():
+    """rtms-v3 (2026-08-19): a price reversal past confirmation_max_pullback_pct
+    used to be excused while candidate.momentum.phase == PULLING_BACK (the
+    engine tracking a "healthy" retracement) -- that excuse is gone. A real
+    reversal cancels unconditionally now, regardless of what phase reads."""
+    from webull_bot.enums import MomentumPhase
+
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    # Isolate from the separate MIS-fade check (also true in this fixture,
+    # since it's checked ahead of the reversal in the same combined block)
+    # so this test actually exercises the reversal branch, not MIS.
+    loop.watcher.config.armed_score_threshold = -1.0
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._start_confirmation(candidate, _confirming_signal(reference_price=5.20), snapshot, _IN_HOURS_NOW)
+    # Force PULLING_BACK directly -- _AlwaysQualifiedMomentumEngine.on_snapshot
+    # (called at the top of _poll_confirmation below) always resets phase to
+    # IMPULSING, so this needs to be set on the same call this test drives.
+    candidate.momentum.phase = MomentumPhase.PULLING_BACK
+
+    later = _IN_HOURS_NOW + timedelta(seconds=2)
+    # Well past confirmation_max_pullback_pct's default 1.5% below 5.20 --
+    # same reversal test_poll_confirmation_fails_and_reverts_to_armed_on_a_price_reversal
+    # uses, just with phase forced to PULLING_BACK first.
+    reversal_snapshot = _snapshot(later, 5.05, 5.20, 610_000, 5.04, 5.06, 5.10)
+    loop._poll_confirmation(candidate, reversal_snapshot, later)
+
+    assert candidate.state == CandidateState.ARMED
+    assert "TEST" not in loop._pending_confirmations
+    assert "price reversed" in candidate.entry_block_reason
+    from webull_bot.enums import RiskEventType
+    assert loop.risk_engine.events[-1].event_type == RiskEventType.CONFIRMATION_FAILED.value
+
+
+def test_poll_confirmation_succeeds_with_regime_cleared_despite_non_impulsing_phase():
+    """rtms-v3 (2026-08-19, the direct BIVI/BTCT regression): phase never
+    reaching IMPULSING/REACCELERATING must not by itself keep a candidate
+    from confirming and queuing for entry once the window elapses clean --
+    the 5-minute regime check (forced qualified here via _qualify_for_entry)
+    is the only thing that governs now."""
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker, momentum_engine=_RegimeOnlyQualifiedMomentumEngine())
+    loop.watcher.config.armed_score_threshold = -1.0  # isolate from cold-start MIS
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._start_confirmation(candidate, _confirming_signal(), snapshot, _IN_HOURS_NOW)
+
+    from webull_bot.enums import MomentumPhase
+    assert candidate.momentum.phase == MomentumPhase.NONE  # confirms the double is doing its job
+
+    after_window = _IN_HOURS_NOW + timedelta(seconds=11)  # past the 10s default window
+    holding_snapshot = _snapshot(after_window, 5.30, 5.30, 620_000, 5.29, 5.31, 5.15)
+    loop._poll_confirmation(candidate, holding_snapshot, after_window)
+
+    assert candidate.momentum.phase == MomentumPhase.NONE  # still non-IMPULSING
+    assert candidate.state == CandidateState.CONFIRMING
+    assert candidate in loop._ready_to_enter  # queued for ranking despite the phase
+    assert broker._orders == {}
 
 
 def test_poll_confirmation_fails_on_sell_side_order_flow_with_enough_samples():
@@ -711,7 +796,7 @@ def _pending_confirmation(broker, candidate, signal, snapshot):
 # candidate still gets a chance -- not entered on stale qualification.
 
 def test_submit_ranked_entries_final_recheck_blocks_a_candidate_whose_momentum_has_gone_stale():
-    from webull_bot.enums import MomentumPhase, RiskEventType
+    from webull_bot.enums import RiskEventType
 
     from webull_bot.state_machine import transition as _transition
 
@@ -719,10 +804,13 @@ def test_submit_ranked_entries_final_recheck_blocks_a_candidate_whose_momentum_h
     loop, candidate = _armed_candidate_setup(broker)
     _transition(candidate, CandidateState.CONFIRMING)
     _qualify_for_entry(candidate)
-    # ... but momentum has since decayed back to PULLING_BACK -- exactly the
-    # "stale queued confirmation" scenario: it looked good when it won the
-    # ranking, but is no longer entry-eligible by the time its slot opens up.
-    candidate.momentum.phase = MomentumPhase.PULLING_BACK
+    # ... but the 5-minute return has since decayed back below the regime
+    # floor -- exactly the "stale queued confirmation" scenario: it looked
+    # good when it won the ranking, but is no longer entry-eligible by the
+    # time its slot opens up. rtms-v3: the regime check is the only thing
+    # _final_pretrade_recheck still enforces, so that's what must go stale
+    # here (phase no longer matters to this recheck).
+    candidate.latest_metrics.return_5m = 1.0
 
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     loop._pending_confirmations["TEST"] = _pending_confirmation(broker, candidate, _confirming_signal(), snapshot)
@@ -737,8 +825,6 @@ def test_submit_ranked_entries_final_recheck_blocks_a_candidate_whose_momentum_h
 
 
 def test_submit_ranked_entries_final_recheck_lets_the_next_ranked_candidate_take_the_slot():
-    from webull_bot.enums import MomentumPhase
-
     from webull_bot.state_machine import new_candidate, transition as _transition
 
     broker = _FakeBroker()
@@ -746,7 +832,9 @@ def test_submit_ranked_entries_final_recheck_lets_the_next_ranked_candidate_take
     loop.risk_engine.config.max_simultaneous_positions = 1
     _transition(candidate_a, CandidateState.CONFIRMING)
     _qualify_for_entry(candidate_a)
-    candidate_a.momentum.phase = MomentumPhase.PULLING_BACK  # stale -- must be skipped
+    # rtms-v3: staleness is now simulated via the regime check (the only
+    # thing _final_pretrade_recheck still enforces), not phase.
+    candidate_a.latest_metrics.return_5m = 1.0  # stale -- must be skipped
 
     candidate_b = new_candidate("OTHR")
     _transition(candidate_b, CandidateState.WATCHING)

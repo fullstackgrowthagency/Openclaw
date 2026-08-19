@@ -1632,41 +1632,29 @@ class TradingLoop:
         since CandidateWatcher.update()'s transition logic has no branch
         that matches CONFIRMING.
 
-        Four ways this ends:
-        1. FAILS -- price reversed past confirmation_max_pullback_pct (and
-           the momentum-qualification layer did NOT already validate that
-           exact reversal as a healthy pullback -- see below), MIS fell
-           back below the armed threshold, the spread widened back out,
-           (2026-08-14) TICK-derived order flow shows net sell-side
+        Three ways this ends (rtms-v3, 2026-08-19: simplified from four --
+        see scanner/momentum_qualification.py's evaluate_trigger docstring
+        for the incident writeup; candidate.momentum.phase is still
+        updated every tick below for dashboard display/ranking, but no
+        longer changes which of these branches this method takes):
+        1. FAILS -- price reversed past confirmation_max_pullback_pct, MIS
+           fell back below the armed threshold, the spread widened back
+           out, (2026-08-14) TICK-derived order flow shows net sell-side
            pressure past order_flow_sell_pressure_threshold with enough
-           classified volume to trust it, or (2026-08-17) the 5m momentum
-           regime itself failed, or the momentum engine's own
-           impulse/pullback tracking already reset the phase to NONE
-           (structure broken / retracement too large, on its own more
-           sophisticated criteria) -- RiskEventType.CONFIRMATION_FAILED,
-           revert to ARMED, must re-trigger fresh (not resume this same
-           clock).
-        2. PULLING BACK (2026-08-17, see scanner/momentum_qualification.py)
-           -- a controlled, structurally-intact retracement from the
-           triggering impulse. NOT a failure: the confirmation stays
-           pending (this method just keeps returning "still waiting" every
-           tick) until either REACCELERATING is detected (falls through to
-           case 3 below) or `total_timeout` elapses with no separate,
-           longer clock for this state -- see this class's own
-           confirmation_ready_max_wait_seconds docstring.
-        3. Window elapses clean, phase is IMPULSING or REACCELERATING --
-           recompute stop/target from the ACTUAL current price, not
-           signal.reference_price (which by now is confirmation_window_seconds
-           stale), preserving the ORIGINAL strategy's risk/reward shape
-           rather than recomputing generically. Then run the
-           target-clearance/resistance-runway hard gates; a failure here
-           reverts to ARMED with RiskEventType.RESISTANCE_BEFORE_TARGET.
-           Passing queues the candidate onto self._ready_to_enter for this
-           tick's batch-ranking pass (_submit_ranked_entries) instead of
-           submitting immediately -- see that method for why (which now
-           also includes a final momentum-qualification recheck
-           immediately before actually submitting).
-        4. Already cleared confirmation on an earlier tick but never won a
+           classified volume to trust it, or the 5m momentum regime itself
+           failed -- RiskEventType.CONFIRMATION_FAILED, revert to ARMED,
+           must re-trigger fresh (not resume this same clock).
+        2. Window elapses clean (nothing above failed) -- recompute stop/
+           target from the ACTUAL current price, not signal.reference_price
+           (which by now is confirmation_window_seconds stale), preserving
+           the ORIGINAL strategy's risk/reward shape rather than
+           recomputing generically. Then run the target-clearance/
+           resistance-runway hard gates; a failure here reverts to ARMED
+           with RiskEventType.RESISTANCE_BEFORE_TARGET. Passing queues the
+           candidate onto self._ready_to_enter for this tick's batch-
+           ranking pass (_submit_ranked_entries) instead of submitting
+           immediately -- see that method for why.
+        3. Already cleared confirmation on an earlier tick but never won a
            slot -- keeps re-queuing onto self._ready_to_enter (recomputed
            fresh off the current price every tick) until either it wins a
            slot or confirmation_ready_max_wait_seconds' extra grace period
@@ -1770,28 +1758,19 @@ class TradingLoop:
             _cancel(failure)
             return
 
-        # A raw price reversal past confirmation_max_pullback_pct is
-        # DIFFERENT: scanner/momentum_qualification.py's own, more
-        # sophisticated retracement/structure check already ran (via the
-        # on_snapshot call above) and may have already validated this
-        # exact reversal as a healthy, structurally-intact PULLING_BACK --
-        # in which case this cruder price-vs-original-trigger check is
-        # superseded, not an independent second failure. Only cancels here
-        # when the momentum engine did NOT reach that classification (a
-        # pullback outside its own tolerance already reset the phase back
-        # to NONE, handled below; PULLING_BACK survives untouched).
-        if reversed_past_tolerance and candidate.momentum.phase != MomentumPhase.PULLING_BACK:
+        # rtms-v3 (2026-08-19): a raw price reversal past
+        # confirmation_max_pullback_pct now hard-cancels unconditionally --
+        # the momentum engine's phase classification (PULLING_BACK etc.)
+        # is display/ranking-only now, not an excuse to keep waiting
+        # through a real reversal. See scanner/momentum_qualification.py's
+        # evaluate_trigger docstring for the incident writeup.
+        if reversed_past_tolerance:
             _cancel("price reversed")
             return
 
-        if candidate.momentum.phase == MomentumPhase.NONE:
-            # The momentum engine already reset this impulse on its own
-            # criteria (structure broken or retracement too large) even
-            # though none of the four checks above happened to catch it --
-            # still a hard failure, not something to keep waiting on.
-            _cancel("momentum setup invalidated (structure broken or retracement too large)")
-            return
-
+        # Cosmetic only (rtms-v3): still surface "why is this waiting"
+        # text on the dashboard while PULLING_BACK, purely informational --
+        # doesn't affect whether this method cancels, waits, or succeeds.
         if candidate.momentum.phase == MomentumPhase.PULLING_BACK:
             candidate.entry_block_reason = (
                 f"{candidate.symbol}: pulling back during confirmation "
@@ -1809,26 +1788,10 @@ class TradingLoop:
             transition(candidate, CandidateState.ARMED, now=now, reason=reason)
             return
 
-        if (
-            candidate.momentum.phase in (MomentumPhase.PULLING_BACK, MomentumPhase.IGNITING)
-            or elapsed_seconds < self.config.confirmation_window_seconds
-        ):
-            # Still waiting -- either inside the base window with nothing
-            # having failed yet, pulling back and not yet ready
-            # (REACCELERATING is what promotes out of this, never just
-            # "the window elapsed"), or IGNITING: the regime can be active
-            # (return_5m already >= min_return_5m_pct -- regime_failed above
-            # only catches it falling BELOW that bar, not merely not yet
-            # clearing the separate, stricter IMPULSING quality gate) while
-            # quality still isn't there yet -- e.g. the "recent high" isn't
-            # fresh/close enough. IGNITING must never fall through to the
-            # success path below just because the confirmation clock ran
-            # out; it needs the SAME promotion to IMPULSING/REACCELERATING
-            # everything else here does.
+        if elapsed_seconds < self.config.confirmation_window_seconds:
+            # Still inside the base window with nothing having failed yet.
             return
 
-        # phase is guaranteed IMPULSING or REACCELERATING here -- every
-        # other phase either returned above (PULLING_BACK, IGNITING, NONE).
         original = pending.signal
         confirmed_entry = snapshot.last_price
         stop_pct = (
@@ -1925,7 +1888,18 @@ class TradingLoop:
         several ticks (case 4 of _poll_confirmation's docstring) behind a
         faster-confirming rival before a slot actually opens up, by which
         point its setup may no longer hold. Returns None if every check
-        passes, otherwise a short human-readable reason -- never raises."""
+        passes, otherwise a short human-readable reason -- never raises.
+
+        rtms-v3 (2026-08-19): dropped the momentum-phase and RTMS-floor
+        checks that used to live here -- they duplicated the exact
+        compound gate just removed from evaluate_trigger, and would have
+        silently killed a candidate at this final step for the same
+        reason BIVI/LGHL never entered in the first place. See
+        scanner/momentum_qualification.py's evaluate_trigger docstring
+        for the incident writeup. `state` is still read below for
+        active_strategy_name; phase/RTMS remain fully populated for the
+        dashboard and for _final_entry_rank's ranking weight, just not
+        checked here anymore."""
         metrics = candidate.latest_metrics
         state = candidate.momentum
         th = self.momentum_engine.config.thresholds
@@ -1935,16 +1909,6 @@ class TradingLoop:
 
         if metrics is None or metrics.return_5m is None or metrics.return_5m < th["min_return_5m_pct"]:
             return f"5m return no longer clears the {th['min_return_5m_pct']:.1f}% regime gate"
-
-        if state.phase not in (MomentumPhase.IMPULSING, MomentumPhase.REACCELERATING):
-            return f"momentum phase is {state.phase.value}, not entry-eligible"
-
-        rtms_floor = (
-            th["rtms_reaccelerating_final_threshold"] if state.phase == MomentumPhase.REACCELERATING
-            else th["rtms_final_threshold"]
-        )
-        if state.rtms is None or state.rtms < rtms_floor:
-            return f"RTMS {state.rtms} below {rtms_floor:.1f}"
 
         active_strategy = state.active_strategy_name or pending.signal.strategy_name
         if not momentum_structure_intact(candidate, active_strategy, pending.snapshot):

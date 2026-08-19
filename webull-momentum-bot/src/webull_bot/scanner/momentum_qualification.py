@@ -2,24 +2,31 @@
 MomentumQualificationEngine: the Real-Time Momentum Qualification Layer,
 inserted between an existing strategy's trigger firing and the existing
 CONFIRMING state (see runtime/trading_loop.py's _process_candidate_inner
-and _poll_confirmation for exactly where this is called). Answers a
-question neither MIS nor the 8 strategies' own trigger conditions do:
-"is this stock actually moving upward fast enough RIGHT NOW to enter, and
-if it's pulling back, is that pullback healthy or a real failure."
+and _poll_confirmation for exactly where this is called).
+
+rtms-v3 (2026-08-19, see evaluate_trigger's own docstring for the full
+incident writeup): the entry DECISION is now a single check -- has the
+trailing 5-minute return cleared the regime threshold? Phase (NONE/
+IGNITING/IMPULSING/PULLING_BACK/REACCELERATING) and RTMS are still fully
+computed every tick by on_snapshot, exactly as before -- they're just no
+longer read by evaluate_trigger. They remain genuinely useful: visible on
+the dashboard, and RTMS still drives ranking when multiple candidates
+compete for one scarce slot (see runtime/trading_loop.py's
+_final_entry_rank).
 
 Two entry points:
   - on_snapshot: runs every tick for ARMED/CONFIRMING candidates,
     independent of whether a strategy fired this tick -- updates
-    candidate.momentum (phase, RTMS, impulse/pullback tracking) in place.
-    This unconditional per-tick run is what lets pullback/reacceleration
-    tracking persist between a strategy's own re-fires, which aren't
-    guaranteed every tick (see scanner/momentum_structure.py's docstring
-    on why IgnitionPullbackStrategy in particular can't be leaned on for
+    candidate.momentum (phase, RTMS, impulse/pullback tracking) in place,
+    purely for display/ranking now (see above). This unconditional
+    per-tick run is what lets pullback/reacceleration tracking persist
+    between a strategy's own re-fires, which aren't guaranteed every tick
+    (see scanner/momentum_structure.py's docstring on why
+    IgnitionPullbackStrategy in particular can't be leaned on for
     continuous structural context).
   - evaluate_trigger: called only when a strategy actually fired a Signal
-    this tick -- reads whatever on_snapshot already computed THIS tick and
-    decides whether to start (or resume) CONFIRMING, keep tracking a
-    pullback, or simply leave the candidate ARMED.
+    this tick -- decides whether to start CONFIRMING or leave the
+    candidate ARMED, based solely on the 5-minute regime check.
 
 Pure reader of candidate.latest_metrics (already refreshed every tick by
 CandidateWatcher.update() before this runs) -- no broker/tick access of
@@ -37,7 +44,7 @@ from ..models import Candidate, MarketSnapshot, MomentumState, Signal
 from ..scoring.rtms import RTMSConfig, compute_rtms
 from .momentum_structure import momentum_structure_intact
 
-TriggerOutcome = Literal["stay_armed", "track_pullback", "start_confirmation"]
+TriggerOutcome = Literal["stay_armed", "start_confirmation"]
 
 
 @dataclass
@@ -257,45 +264,35 @@ class MomentumQualificationEngine:
     def evaluate_trigger(
         self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot, now: datetime,
     ) -> TriggerDecision:
+        """rtms-v3 (2026-08-19, real incidents: LGHL never attempted entry,
+        BIVI ran +21-22% over 5 minutes and still never entered): the
+        compound gate this used to enforce (phase must reach IMPULSING/
+        REACCELERATING via _meets_impulsing_quality's simultaneous 60s/30s/
+        15s/5s/trend-efficiency/fresh-high checks, THEN a separate RTMS
+        score floor) was killing entries on stocks that had already proven
+        a real, large move. Per explicit user decision: the sole hard gate
+        is now the 5-minute regime check alone -- the instant
+        metrics.return_5m clears min_return_5m_pct, the candidate enters,
+        full stop. Phase and RTMS (still fully computed every tick by
+        on_snapshot, unconditionally, exactly as before) are kept purely
+        as dashboard-visible/ranking signals (see
+        runtime/trading_loop.py's _final_entry_rank) -- they no longer
+        block or delay entry in any way."""
         state = candidate.momentum
-        phase = state.phase
+        metrics = candidate.latest_metrics
+        min_regime = self.config.thresholds["min_return_5m_pct"]
+        regime_met = metrics is not None and metrics.return_5m is not None and metrics.return_5m >= min_regime
 
-        if phase not in (MomentumPhase.IMPULSING, MomentumPhase.REACCELERATING):
-            if phase == MomentumPhase.PULLING_BACK:
-                reason = f"{candidate.symbol}: pulling back (structure intact) -- tracking for reacceleration"
-                outcome: TriggerOutcome = "track_pullback"
+        if not regime_met:
+            if metrics is not None and metrics.return_5m is not None:
+                reason = f"{candidate.symbol}: 5m momentum regime not met ({metrics.return_5m:.2f}% < {min_regime:.2f}%)"
             else:
-                metrics = candidate.latest_metrics
-                min_regime = self.config.thresholds["min_return_5m_pct"]
-                if metrics is not None and metrics.return_5m is not None:
-                    reason = f"{candidate.symbol}: 5m momentum regime not met ({metrics.return_5m:.2f}% < {min_regime:.2f}%)"
-                else:
-                    reason = f"{candidate.symbol}: 5m momentum regime not yet measurable"
-                outcome = "stay_armed"
+                reason = f"{candidate.symbol}: 5m momentum regime not yet measurable"
             state.momentum_qualified = False
             state.block_reason = reason
-            return TriggerDecision(outcome=outcome, reason=reason, phase=phase, rtms=state.rtms)
+            return TriggerDecision(outcome="stay_armed", reason=reason, phase=state.phase, rtms=state.rtms)
 
-        allowed_phases = self.config.strategy_phase_policy.get(
-            signal.strategy_name, frozenset({MomentumPhase.IMPULSING, MomentumPhase.REACCELERATING}),
-        )
-        if phase not in allowed_phases:
-            reason = f"{candidate.symbol}: {signal.strategy_name} does not accept entries from phase {phase.value}"
-            state.momentum_qualified = False
-            state.block_reason = reason
-            return TriggerDecision(outcome="stay_armed", reason=reason, phase=phase, rtms=state.rtms)
-
-        rtms_floor = (
-            self.config.thresholds["rtms_reaccelerating_threshold"] if phase == MomentumPhase.REACCELERATING
-            else self.config.thresholds["rtms_entry_threshold"]
-        )
-        if state.rtms is None or state.rtms < rtms_floor:
-            reason = f"{candidate.symbol}: RTMS {state.rtms} below {rtms_floor:.1f} required to enter confirmation from {phase.value}"
-            state.momentum_qualified = False
-            state.block_reason = reason
-            return TriggerDecision(outcome="stay_armed", reason=reason, phase=phase, rtms=state.rtms)
-
-        reason = f"{candidate.symbol}: momentum qualified (phase={phase.value}, RTMS={state.rtms:.1f})"
+        reason = f"{candidate.symbol}: 5m momentum regime cleared ({metrics.return_5m:.2f}% >= {min_regime:.2f}%) -- entering"
         state.momentum_qualified = True
         state.block_reason = None
-        return TriggerDecision(outcome="start_confirmation", reason=reason, phase=phase, rtms=state.rtms)
+        return TriggerDecision(outcome="start_confirmation", reason=reason, phase=state.phase, rtms=state.rtms)

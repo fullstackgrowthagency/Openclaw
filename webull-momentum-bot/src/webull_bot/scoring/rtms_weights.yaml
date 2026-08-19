@@ -27,7 +27,30 @@
 # even a genuinely still-breaking-out stock would regularly get sampled
 # more than 4s after its last local high and fail the gate for reasons
 # unrelated to whether the breakout was real.
-version: "rtms-v2"
+#
+# rtms-v3 (2026-08-19, real incident: BIVI ran +21-22% over 5 minutes,
+# return_5m far above min_return_5m_pct, and still never entered --
+# followed by a second confirming example, BTCT, same day). Root cause:
+# even after rtms-v2's threshold loosening, entry still required the
+# compound gate below (phase reach IMPULSING/REACCELERATING via
+# _meets_impulsing_quality's simultaneous 60s/30s/15s/5s/trend-efficiency/
+# fresh-high checks, THEN a separate RTMS score floor) -- a stock that had
+# already proven a real, large 5-minute move could still fail on a
+# short-term sub-metric or a stale-high check and simply never enter. Per
+# explicit user decision: the compound gate is removed. The sole hard
+# entry gate is now min_return_5m_pct alone (see
+# scanner/momentum_qualification.py's evaluate_trigger docstring for the
+# full incident writeup and rationale). Phase and RTMS are UNCHANGED
+# below and still computed every tick exactly as before -- the user
+# explicitly wants to keep seeing them on the dashboard -- and RTMS keeps
+# its ranking_weights role when multiple candidates compete for a scarce
+# slot. What changed is which thresholds are actually enforced as a
+# block: strategy_phase_policy and the four rtms_*threshold values below
+# are now parsed but NOT read by the entry decision -- see the comments
+# on each for detail. Kept in this file rather than deleted: cheap, and
+# preserves the tuning history if a future pass wants to reintroduce a
+# softer version of this gate.
+version: "rtms-v3"
 
 weights:
   momentum_15s_score: 0.20                # freshest short-term momentum signal
@@ -122,10 +145,16 @@ thresholds:
   # the 65.0/60.0 required to stay qualified through to submission) --
   # there was never a good reason entry itself should demand MORE than
   # staying qualified does.
-  rtms_entry_threshold: 65.0                    # required to start CONFIRMING out of IMPULSING
-  rtms_reaccelerating_threshold: 60.0           # required to (re)start CONFIRMING out of REACCELERATING
-  rtms_final_threshold: 65.0                    # final pre-submission recheck, IMPULSING path
-  rtms_reaccelerating_final_threshold: 60.0     # final pre-submission recheck, REACCELERATING path -- slightly more lenient, since a re-acceleration is by definition still building
+  #
+  # rtms-v3: NOT read by the entry decision anymore -- evaluate_trigger,
+  # _poll_confirmation, and _final_pretrade_recheck no longer check any of
+  # these four values against state.rtms. Kept (unenforced) for tuning
+  # history and in case a future pass wants to reintroduce a softer
+  # RTMS-based gate or alert.
+  rtms_entry_threshold: 65.0                    # unenforced (rtms-v3) -- formerly required to start CONFIRMING out of IMPULSING
+  rtms_reaccelerating_threshold: 60.0           # unenforced (rtms-v3) -- formerly required to (re)start CONFIRMING out of REACCELERATING
+  rtms_final_threshold: 65.0                    # unenforced (rtms-v3) -- formerly the final pre-submission recheck, IMPULSING path
+  rtms_reaccelerating_final_threshold: 60.0     # unenforced (rtms-v3) -- formerly the final pre-submission recheck, REACCELERATING path
 
   # Minimum classified TICK prints before order_flow_trade_velocity_score
   # trusts order_flow_imbalance_1m at all -- same reasoning and same
@@ -155,6 +184,18 @@ ranking_weights:
 # volume_ignition is deliberately restricted to IMPULSING only -- it must
 # no longer qualify on volume/float-velocity/price-above-VWAP alone (see
 # strategy/volume_ignition.py), and never out of a pullback.
+#
+# rtms-v3: still parsed unconditionally by RTMSConfig.load() (and asserted
+# on by test_rtms.py) but NO LONGER ENFORCED -- evaluate_trigger's one
+# read site for this policy was removed along with the rest of the
+# compound gate; the 5-minute regime check alone now governs every
+# strategy identically. The volume_ignition restriction in particular
+# (must not qualify on volume/float-velocity/price-above-VWAP alone) is a
+# real, now-unenforced gap: a volume_ignition signal that clears the
+# regime gate on volume with weak price follow-through can now enter the
+# same as any other strategy. Left as a known gap rather than special-
+# cased back in -- worth revisiting if volume-only entries turn out to be
+# a real live problem, but out of scope for this pass.
 strategy_phase_policy:
   momentum_breakout: [impulsing, reaccelerating]
   refined_breakout: [impulsing, reaccelerating]

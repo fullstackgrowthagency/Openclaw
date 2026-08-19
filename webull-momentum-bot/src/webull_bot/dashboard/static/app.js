@@ -56,22 +56,22 @@ const COLUMN_INFO = {
   phase: {
     title: "Phase",
     body:
-      "The Real-Time Momentum Qualification Layer's own phase, separate from State -- tracked while ARMED/CONFIRMING and updated every tick, independent of whether a strategy has actually fired:\n\n" +
+      "The Real-Time Momentum Qualification Layer's own phase, separate from State -- tracked while ARMED/CONFIRMING and updated every tick, independent of whether a strategy has actually fired. As of rtms-v3 (2026-08-19) this is informational and ranking-only -- it no longer blocks or delays entry by itself; the sole hard entry gate is the 5-minute regime check (see the Momentum column):\n\n" +
       "NONE / IGNITING: not yet moving fast enough to qualify (IGNITING = approaching the 5-minute regime gate).\n" +
-      "IMPULSING: a real, fresh impulse -- entry-eligible if RTMS also clears its floor.\n" +
-      "PULLING_BACK: a controlled, structurally-intact retracement from a prior impulse -- tracked, not rejected, waiting to see if it re-accelerates.\n" +
-      "REACCELERATING: price has resumed climbing out of a pullback -- entry-eligible again.\n\n" +
-      "A candidate can be ARMED (score-qualified) for a long time while phase stays NONE/IGNITING -- that's this layer withholding entry, not a bug by itself. See the Momentum column for exactly why on this specific candidate.",
+      "IMPULSING: a real, fresh impulse.\n" +
+      "PULLING_BACK: a controlled, structurally-intact retracement from a prior impulse.\n" +
+      "REACCELERATING: price has resumed climbing out of a pullback.\n\n" +
+      "A candidate can be ARMED (score-qualified) while phase stays NONE/IGNITING and still enter the instant its 5-minute return clears the regime gate -- phase is shown for context, but does not by itself withhold entry anymore.",
   },
   rtms: {
     title: "RTMS",
     body:
-      "The Real-Time Momentum Score, 0-100 -- separate from the Score (MIS) column. MIS asks \"is this stock structurally interesting\"; RTMS asks \"is it actually moving RIGHT NOW,\" blending 15s/30s/60s momentum, price acceleration, trend efficiency, fresh-high proximity, order flow, and volume acceleration. Only populated once phase has left NONE. Must clear a threshold (65 from IMPULSING, 60 from REACCELERATING by default) before a fired signal is allowed to actually start confirming an entry.",
+      "The Real-Time Momentum Score, 0-100 -- separate from the Score (MIS) column. MIS asks \"is this stock structurally interesting\"; RTMS asks \"is it actually moving RIGHT NOW,\" blending 15s/30s/60s momentum, price acceleration, trend efficiency, fresh-high proximity, order flow, and volume acceleration. Only populated once phase has left NONE. As of rtms-v3 (2026-08-19), RTMS no longer gates entry -- it's shown for context and used only to rank which candidate wins a scarce position slot when several qualify at once (weighted 0.65 alongside MIS and strategy quality).",
   },
   "momentum-block-reason": {
     title: "Momentum",
     body:
-      "The most recent reason the Real-Time Momentum Qualification Layer declined to start (or kept waiting on) confirming an entry for this candidate -- e.g. \"5m momentum regime not met (3.10% < 4.00%)\" or \"RTMS 42.1 below 65.0 required...\". Only set once a strategy has actually fired a signal for this candidate at least once; blank if none has fired yet, even if Phase/RTMS are already updating.",
+      "The most recent reason the Real-Time Momentum Qualification Layer declined to start (or kept waiting on) confirming an entry for this candidate. As of rtms-v3 (2026-08-19) the only hard entry gate is the 5-minute momentum regime, so this is always regime-based, e.g. \"5m momentum regime not met (3.10% < 4.00%)\". Only set once a strategy has actually fired a signal for this candidate at least once; blank if none has fired yet, even if Phase/RTMS are already updating.",
   },
   "score-breakdown": {
     title: "Score Weighting Breakdown",
