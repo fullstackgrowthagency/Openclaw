@@ -1634,10 +1634,25 @@ class TradingLoop:
                 else "spread widened" if spread_too_wide
                 else "sell-side order flow"
             )
-            reason = (
-                f"{candidate.symbol} failed confirmation ({failure}, {elapsed_seconds:.0f}s into a "
-                f"{self.config.confirmation_window_seconds:.0f}s window)"
-            )
+            # Distinguish "still inside the base confirmation window" from
+            # "already cleared it and is now waiting for a slot" (see this
+            # method's own docstring, case 3) -- these checks run every
+            # tick across the WHOLE total_timeout span (window + wait), not
+            # just the first confirmation_window_seconds, so elapsed_seconds
+            # routinely exceeds the window on a candidate that's simply
+            # queued for a slot. Always phrasing it as "Ns into a Ms
+            # window" when N > M read as if the window itself had somehow
+            # run over, which it never does -- this makes the wait-phase
+            # case explicit instead.
+            if elapsed_seconds <= self.config.confirmation_window_seconds:
+                timing = f"{elapsed_seconds:.0f}s into a {self.config.confirmation_window_seconds:.0f}s window"
+            else:
+                wait_elapsed = elapsed_seconds - self.config.confirmation_window_seconds
+                timing = (
+                    f"cleared the {self.config.confirmation_window_seconds:.0f}s window, "
+                    f"{wait_elapsed:.0f}s into waiting for a position slot"
+                )
+            reason = f"{candidate.symbol} failed confirmation ({failure}, {timing})"
             candidate.entry_block_reason = reason
             self._pending_confirmations.pop(candidate.symbol, None)
             self.risk_engine.record_operational_event(RiskEventType.CONFIRMATION_FAILED, candidate.symbol, reason, now)
