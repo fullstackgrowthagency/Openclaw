@@ -190,6 +190,21 @@ def test_mis_weights_endpoint_returns_current_config(client):
     assert abs(sum(body["weights"].values()) - 1.0) < 1e-9
 
 
+def test_rtms_weights_endpoint_returns_current_config(client):
+    # Mirrors test_mis_weights_endpoint_returns_current_config above --
+    # pairs with /api/candidates' `return_5m` field so the dashboard can
+    # render the live 5m regime % against the actual configured floor
+    # (2026-08-19, explicit user request for the Momentum column).
+    from webull_bot.scoring.rtms import RTMSConfig
+
+    resp = client.get("/api/rtms-weights")
+    assert resp.status_code == 200
+    body = resp.json()
+    config = RTMSConfig.load()
+    assert body["version"] == config.version
+    assert body["thresholds"]["min_return_5m_pct"] == pytest.approx(config.thresholds["min_return_5m_pct"])
+
+
 def test_scan_symbol_adds_a_passing_ticker(loop, client):
     loop.broker.feed_snapshot(
         MarketSnapshot(
@@ -291,6 +306,9 @@ def test_positions_includes_unrealized_pnl_from_the_cached_price(loop, client):
     assert len(rows) == 1
     assert rows[0]["current_price"] == 12.0
     assert rows[0]["unrealized_pnl"] == pytest.approx((12.0 - 10.0) * 100)
+    # A snapshot cached "now" is fresh, not stale.
+    assert rows[0]["price_stale"] is False
+    assert rows[0]["price_age_seconds"] < 1.0
     # PaperBrokerClient (this fixture's broker) has no place_oco_bracket, so
     # this position was never (and never could be) broker-bracketed -- see
     # TradingLoop._attach_broker_bracket.
@@ -307,6 +325,38 @@ def test_positions_reports_none_price_when_nothing_has_been_cached_yet(loop, cli
     assert len(rows) == 1
     assert rows[0]["current_price"] is None
     assert rows[0]["unrealized_pnl"] is None
+    assert rows[0]["price_age_seconds"] is None
+    assert rows[0]["price_stale"] is False
+
+
+def test_positions_flags_a_stale_cached_price(loop, client):
+    # Real incident (2026-08-19): BTCT/BTOG showed a frozen price that no
+    # longer matched the market -- get_last_known_price has no staleness
+    # check of its own (see get_last_known_price_age_seconds' docstring),
+    # so /api/positions must compute and surface price_stale itself. A
+    # snapshot cached well past last_known_price_stale_after_seconds
+    # (30.0 default) must be flagged, not silently presented as live.
+    from datetime import timedelta
+
+    stale_timestamp = datetime.utcnow() - timedelta(seconds=60)
+    loop._last_known_snapshots["TEST"] = MarketSnapshot(
+        symbol="TEST", timestamp=stale_timestamp, last_price=12.0, bid=11.9, ask=12.1,
+        bid_size=100, ask_size=100, cumulative_volume=100_000, vwap=11.5, high_of_day=12.5,
+        low_of_day=10.0, open_price=10.5,
+    )
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0, stop_price=9.0,
+        target_price=13.0, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    resp = client.get("/api/positions")
+    rows = resp.json()
+    assert len(rows) == 1
+    # current_price is still shown (not blanked) -- unrealized_pnl still
+    # renders, just flagged as potentially not reflecting the market.
+    assert rows[0]["current_price"] == 12.0
+    assert rows[0]["unrealized_pnl"] == pytest.approx((12.0 - 10.0) * 100)
+    assert rows[0]["price_stale"] is True
+    assert rows[0]["price_age_seconds"] >= 60.0
 
 
 def test_risk_events_reflects_live_risk_engine(loop, client):

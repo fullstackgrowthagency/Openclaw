@@ -24,6 +24,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -50,6 +51,7 @@ from ..db.repository import (
 from ..runtime.loop_registry import LoopRegistry
 from ..runtime.trading_loop import TradingLoop
 from ..scoring.momentum_ignition_score import MISConfig
+from ..scoring.rtms import RTMSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +342,17 @@ def create_app(
         config = MISConfig.load()
         return {"weights_version": config.version, "weights": config.weights}
 
+    @app.get("/api/rtms-weights")
+    def get_rtms_weights():
+        """The currently active RTMS thresholds, straight from
+        scoring/rtms_weights.yaml -- mirrors /api/mis-weights above.
+        Pairs with /api/candidates' `return_5m` field so the dashboard can
+        render the live 5-minute momentum regime percentage against the
+        actual configured floor (`thresholds.min_return_5m_pct`) instead
+        of hardcoding it in the frontend."""
+        config = RTMSConfig.load()
+        return {"version": config.version, "thresholds": config.thresholds}
+
     @app.get("/api/risk-settings")
     def get_risk_settings(request: Request):
         """Live values of the RiskConfig fields the dashboard's Settings modal
@@ -439,6 +452,7 @@ def create_app(
     @app.get("/api/positions")
     def get_positions(request: Request):
         loop = _resolve_loop(request)
+        now = datetime.utcnow()
         rows = []
         for symbol, position in loop.get_open_positions().items():
             # Reads TradingLoop's own per-tick price cache
@@ -451,12 +465,26 @@ def create_app(
                 (current_price - position.avg_entry_price) * position.quantity
                 if current_price is not None else None
             )
+            # Real incident (2026-08-19): BTCT/BTOG showed a frozen price
+            # that no longer matched the market -- get_last_known_price has
+            # no staleness check of its own (see
+            # get_last_known_price_age_seconds' docstring). price_stale
+            # flags that condition instead of hiding it; current_price
+            # itself is left as-is (not blanked) so unrealized_pnl still
+            # renders with a caveat rather than going blank.
+            price_age_seconds = loop.get_last_known_price_age_seconds(symbol, now)
+            price_stale = (
+                price_age_seconds is not None
+                and price_age_seconds > loop.config.last_known_price_stale_after_seconds
+            )
             rows.append({
                 "symbol": symbol,
                 "side": position.side.value,
                 "quantity": position.quantity,
                 "avg_entry_price": position.avg_entry_price,
                 "current_price": current_price,
+                "price_age_seconds": price_age_seconds,
+                "price_stale": price_stale,
                 "unrealized_pnl": unrealized_pnl,
                 "stop_price": position.stop_price,
                 "target_price": position.target_price,

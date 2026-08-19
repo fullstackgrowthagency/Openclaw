@@ -71,7 +71,7 @@ const COLUMN_INFO = {
   "momentum-block-reason": {
     title: "Momentum",
     body:
-      "The most recent reason the Real-Time Momentum Qualification Layer declined to start (or kept waiting on) confirming an entry for this candidate. As of rtms-v3 (2026-08-19) the only hard entry gate is the 5-minute momentum regime, so this is always regime-based, e.g. \"5m momentum regime not met (3.10% < 4.00%)\". Only set once a strategy has actually fired a signal for this candidate at least once; blank if none has fired yet, even if Phase/RTMS are already updating.",
+      "The live 5-minute momentum regime return (MomentumMetrics.return_5m) next to the required floor (rtms_weights.yaml's min_return_5m_pct, e.g. \"3.10% / 4.00%\") -- updated every ARMED/CONFIRMING tick, not just after a signal has fired. Green once it clears the floor (the only hard entry gate as of rtms-v3, 2026-08-19) -- the instant it does, the candidate is eligible to enter, full stop. Hover the cell for the most recent block-reason text from the Real-Time Momentum Qualification Layer, which is still regime-based but only set once a strategy has actually fired a signal for this candidate at least once.",
   },
   "score-breakdown": {
     title: "Score Weighting Breakdown",
@@ -414,11 +414,31 @@ function initKillSwitchModal() {
 let selectedCandidateSymbol = null;
 let lastCandidateRows = [];
 
+function momentumCellHtml(c, minReturn5mPct) {
+  // Live 5m momentum regime % (2026-08-19, explicit user request) --
+  // replaces the block-reason text as the PRIMARY content of this cell
+  // (return_5m is updated every ARMED/CONFIRMING tick regardless of
+  // whether a strategy has fired, unlike momentum_block_reason, which
+  // only appears after one has). The block-reason text is kept as a
+  // hover tooltip so the diagnostic detail isn't lost, just demoted.
+  const reasonTitle = (c.momentum_block_reason || "").replace(/"/g, "&quot;");
+  const value = c.return_5m;
+  if (value === null || value === undefined) {
+    return `<td class="muted" title="${reasonTitle}">--</td>`;
+  }
+  const hasFloor = minReturn5mPct !== null && minReturn5mPct !== undefined;
+  const cleared = hasFloor && value >= minReturn5mPct;
+  const cls = hasFloor ? (cleared ? "pos" : "muted") : "muted";
+  const floorText = hasFloor ? ` / ${fmtNum(minReturn5mPct, 2)}%` : "";
+  return `<td class="${cls}" title="${reasonTitle}">${fmtNum(value, 2)}%${floorText}</td>`;
+}
+
 async function refreshCandidates() {
   const body = document.getElementById("candidates-body");
   try {
-    const rows = await fetchJSON("/api/candidates");
+    const [rows, rtms] = await Promise.all([fetchJSON("/api/candidates"), loadRtmsWeightsOnce()]);
     lastCandidateRows = rows;
+    const minReturn5mPct = rtms.thresholds ? rtms.thresholds.min_return_5m_pct : null;
     body.innerHTML = rows.length
       ? rows.map(c => `
         <tr class="candidate-row ${c.symbol === selectedCandidateSymbol ? "selected-row" : ""}" data-symbol="${c.symbol}">
@@ -429,7 +449,7 @@ async function refreshCandidates() {
           <td>${fmtNum(c.resistance_level)}</td>
           <td class="muted">${c.momentum_phase ? c.momentum_phase.replace("_", " ") : "--"}</td>
           <td>${fmtNum(c.rtms, 1)}</td>
-          <td class="muted">${c.momentum_block_reason || "--"}</td>
+          ${momentumCellHtml(c, minReturn5mPct)}
           <td class="muted">${c.reason || "--"}</td>
           <td class="muted">${fmtTime(c.last_updated_at)}</td>
         </tr>`).join("")
@@ -566,6 +586,19 @@ function initChartPanel() {
   });
 }
 
+function positionPriceCellHtml(p) {
+  // Real incident (2026-08-19): BTCT/BTOG showed a frozen price that no
+  // longer matched the market -- see TradingLoop.get_last_known_price_
+  // age_seconds' docstring. price_stale flags that condition instead of
+  // hiding it; the number itself is still shown (not blanked) so
+  // Unrl. P&L keeps its context, just visibly flagged as not live.
+  if (!p.price_stale) return `<td>${fmtNum(p.current_price)}</td>`;
+  const ageText = p.price_age_seconds !== null && p.price_age_seconds !== undefined
+    ? `${Math.round(p.price_age_seconds)}s old`
+    : "stale";
+  return `<td class="stale-price" title="Price is ${ageText} -- may not reflect the current market">${fmtNum(p.current_price)} ⚠</td>`;
+}
+
 async function refreshPositions() {
   const body = document.getElementById("positions-body");
   try {
@@ -577,7 +610,7 @@ async function refreshPositions() {
           <td>${p.side}</td>
           <td>${fmtNum(p.quantity, 0)}</td>
           <td>${fmtNum(p.avg_entry_price)}</td>
-          <td>${fmtNum(p.current_price)}</td>
+          ${positionPriceCellHtml(p)}
           <td class="${pnlClass(p.unrealized_pnl)}">${fmtMoney(p.unrealized_pnl)}</td>
           <td>${fmtNum(p.stop_price)}</td>
           <td>${fmtNum(p.target_price)}</td>
@@ -747,6 +780,18 @@ async function loadMisWeightsOnce() {
     cachedMisWeights = { weights_version: null, weights: {} };
   }
   return cachedMisWeights;
+}
+
+let cachedRtmsWeights = null;
+
+async function loadRtmsWeightsOnce() {
+  if (cachedRtmsWeights) return cachedRtmsWeights;
+  try {
+    cachedRtmsWeights = await fetchJSON("/api/rtms-weights");
+  } catch (e) {
+    cachedRtmsWeights = { version: null, thresholds: {} };
+  }
+  return cachedRtmsWeights;
 }
 
 function setScoreBreakdownHeaders(mode) {

@@ -2091,6 +2091,38 @@ def test_manage_position_caches_the_ticks_price_for_the_dashboard_to_read():
     assert loop.get_last_known_price("TEST") == pytest.approx(12.0)
 
 
+def test_get_last_known_price_age_seconds_returns_none_without_a_cached_snapshot():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker, symbol="TEST", price=12.0)
+
+    assert loop.get_last_known_price_age_seconds("TEST", _IN_HOURS_NOW) is None
+
+
+def test_get_last_known_price_age_seconds_reports_the_elapsed_time():
+    # Real incident (2026-08-19, BTCT/BTOG): get_last_known_price itself
+    # has no staleness check -- this is the method /api/positions uses to
+    # compute whether a cached price should be flagged as stale. Sets
+    # _last_known_snapshots directly (not via a real tick, which caches
+    # a wall-clock datetime.utcnow() timestamp -- see
+    # _managing_candidate_with_position) so the elapsed time is exact and
+    # deterministic against the fixed _IN_HOURS_NOW clock this file uses
+    # everywhere else.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    loop._last_known_snapshots["TEST"] = MarketSnapshot(
+        symbol="TEST", timestamp=_IN_HOURS_NOW, last_price=12.0, bid=11.99, ask=12.01,
+        bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=12.0, high_of_day=12.0,
+        low_of_day=12.0, open_price=12.0,
+    )
+    later = _IN_HOURS_NOW + timedelta(seconds=45)
+
+    age = loop.get_last_known_price_age_seconds("TEST", later)
+    assert age == pytest.approx(45.0)
+
+
 def test_get_account_summary_is_populated_by_the_periodic_background_refresh():
     # Real incident (2026-08-12): the dashboard's /api/status used to call
     # broker.get_account_equity()/get_buying_power() live on every single

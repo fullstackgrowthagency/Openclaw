@@ -415,6 +415,18 @@ class TradingLoopConfig:
     # reconnect issue noted in WebullBrokerClient.subscribe_quotes'
     # docstring) rather than pacing normal operation.
     streaming_staleness_seconds: float = 10.0
+    # How old a MANAGING/ENTERED position's cached _last_known_snapshots
+    # entry can be before dashboard/app.py's /api/positions should flag
+    # its displayed price as stale rather than presenting it as live
+    # (2026-08-19, real incident: BTCT/BTOG showed a frozen price that no
+    # longer matched the market). get_last_known_price itself has no
+    # staleness check at all -- see get_last_known_price_age_seconds'
+    # docstring -- this is deliberately looser than
+    # streaming_staleness_seconds (10s), which governs whether THIS loop
+    # trusts a streamed snapshot enough to use it for its own tick
+    # processing; this value instead governs whether the DASHBOARD should
+    # keep presenting an old cached number as if it's current.
+    last_known_price_stale_after_seconds: float = 30.0
     # Maximum number of symbols _reconcile_streaming_subscriptions will
     # keep actively subscribed to live streaming at once -- see that
     # method and brokers/webull/client.py's corrected
@@ -3250,6 +3262,29 @@ class TradingLoop:
         available this refresh, nothing more alarming than that."""
         snapshot = self._last_known_snapshots.get(symbol)
         return snapshot.last_price if snapshot is not None else None
+
+    def get_last_known_price_age_seconds(self, symbol: str, now: datetime) -> Optional[float]:
+        """Dashboard-facing companion to get_last_known_price (see that
+        method's docstring for why /api/positions reads a cache instead of
+        calling the broker directly): how old the cached snapshot backing
+        that price actually is. get_last_known_price itself has NO
+        staleness check -- unlike _get_streaming_snapshot, which already
+        compares age against streaming_staleness_seconds before trusting a
+        streamed snapshot for this loop's own tick processing, nothing
+        ever stopped /api/positions from presenting an arbitrarily old
+        cached price as if it were current (2026-08-19, real incident:
+        BTCT/BTOG showed a frozen price that no longer matched the
+        market -- the underlying per-tick fetch for that symbol had
+        started failing every cycle, per _process_candidate_inner's
+        early-return on a failed get_snapshot, and _last_known_snapshots
+        simply stops being written from that point on with nothing
+        flagging it). Returns None if this position hasn't had a tick
+        processed yet, same "nothing to report" contract as
+        get_last_known_price's own None case."""
+        snapshot = self._last_known_snapshots.get(symbol)
+        if snapshot is None:
+            return None
+        return (now - snapshot.timestamp).total_seconds()
 
     def get_account_summary(self) -> dict:
         """Dashboard-facing (see dashboard/app.py's /api/status): cached

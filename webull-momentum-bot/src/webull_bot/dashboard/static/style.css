@@ -305,6 +305,10 @@ th {
 .pos { color: var(--green); }
 .neg { color: var(--red); }
 .muted { color: var(--muted); }
+/* Open Positions "Last" price whose cached snapshot has gone stale
+   (2026-08-19, real incident: BTCT/BTOG) -- see positionPriceCellHtml
+   in app.js and TradingLoop.get_last_known_price_age_seconds. */
+.stale-price { color: var(--amber); }
 
 .state-pill {
   padding: 2px 8px;
