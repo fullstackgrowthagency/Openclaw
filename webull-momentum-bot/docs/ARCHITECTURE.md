@@ -491,7 +491,7 @@ of submitting an order immediately (`_start_confirmation`).
 Every tick while `CONFIRMING`, `TradingLoop._poll_confirmation` runs:
 
 - **Keeps failing the whole window**: price pulls back more than
-  `TradingLoopConfig.confirmation_max_pullback_pct` (0.5% default) below
+  `TradingLoopConfig.confirmation_max_pullback_pct` (1.5% default) below
   the trigger reference price, current MIS drops back below
   `WatcherConfig.armed_score_threshold`, or the spread widens back past
   `max_spread_pct` -> `RiskEventType.CONFIRMATION_FAILED`, revert to

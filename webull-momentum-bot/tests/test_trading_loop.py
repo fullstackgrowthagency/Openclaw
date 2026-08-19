@@ -462,7 +462,7 @@ def test_poll_confirmation_fails_and_reverts_to_armed_on_a_price_reversal():
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     loop._start_confirmation(candidate, _confirming_signal(reference_price=5.20), snapshot, _IN_HOURS_NOW)
 
-    # Well past confirmation_max_pullback_pct's default 0.5% below 5.20.
+    # Well past confirmation_max_pullback_pct's default 1.5% below 5.20.
     later = _IN_HOURS_NOW + timedelta(seconds=2)
     reversal_snapshot = _snapshot(later, 5.05, 5.20, 610_000, 5.04, 5.06, 5.10)
     loop._poll_confirmation(candidate, reversal_snapshot, later)

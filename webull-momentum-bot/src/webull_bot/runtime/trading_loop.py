@@ -482,7 +482,7 @@ class TradingLoopConfig:
     # price during the confirmation window before it's treated as a
     # reversal (RiskEventType.CONFIRMATION_FAILED), not ordinary tick-to-
     # tick noise.
-    confirmation_max_pullback_pct: float = 0.5
+    confirmation_max_pullback_pct: float = 1.5
     # Extra time a candidate that ALREADY passed confirmation is allowed to
     # keep waiting for a position slot to open up (see
     # _submit_ranked_entries) before giving up and reverting to ARMED --
