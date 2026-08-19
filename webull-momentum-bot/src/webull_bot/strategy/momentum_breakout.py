@@ -16,6 +16,17 @@ stop_price is likewise computed from stop_loss_pct_fn(), wired to the live
 RiskEngine.config.stop_loss_pct -- see that field's docstring for why this
 strategy is one of the ones read live rather than keeping its own fixed
 config field. Defaults to a fixed 3.0 when not supplied.
+
+stop_price is the TIGHTER (closer to entry) of resistance_level and the
+flat stop_loss_pct-based price -- i.e. max(), not min() (2026-08-19, real
+incident: BTOG entered at $1.24 with resistance_level sitting way down
+at $0.77, producing a 38% stop when stop_loss_pct was configured to
+5%). The flat-% price is the risk CEILING the user configured; a
+structural level may only tighten the stop below that ceiling, never
+widen it past it -- there was previously no upper bound on how far price
+could run past resistance before this breakout fires, so a stale/low
+resistance level could otherwise blow the stop out arbitrarily far past
+what the user actually asked for.
 """
 from __future__ import annotations
 
@@ -66,7 +77,8 @@ class MomentumBreakoutStrategy(Strategy):
             return None
 
         entry_price = snapshot.last_price
-        stop_price = min(candidate.resistance_level, entry_price * (1 - self._stop_loss_pct_fn() / 100.0))
+        # max(), not min() -- see module docstring's 2026-08-19 BTOG note.
+        stop_price = max(candidate.resistance_level, entry_price * (1 - self._stop_loss_pct_fn() / 100.0))
         risk_per_share = entry_price - stop_price
         target_price = entry_price + risk_per_share * self._reward_risk_ratio_fn()
 

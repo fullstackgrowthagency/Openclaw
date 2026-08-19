@@ -26,6 +26,15 @@ supplied (tests, standalone use).
 stop_price is likewise computed from stop_loss_pct_fn(), wired to the live
 RiskEngine.config.stop_loss_pct -- see that field's docstring. Defaults to
 a fixed 3.0 when not supplied.
+
+stop_price is the TIGHTER (closer to entry) of opening_range_high and the
+flat stop_loss_pct-based price -- i.e. max(), not min() (2026-08-19, real
+incident: BTOG entered at $1.24 with a structural level sitting way down
+at $0.77, producing a 38% stop when stop_loss_pct was configured to 5%
+-- see momentum_breakout.py's matching docstring note, the identical bug
+existed in this strategy's stop line too). The flat-% price is the risk
+CEILING the user configured; opening_range_high may only tighten the
+stop below that ceiling, never widen it past it.
 """
 from __future__ import annotations
 
@@ -75,7 +84,8 @@ class OpeningRangeBreakoutStrategy(Strategy):
             return None
 
         entry_price = snapshot.last_price
-        stop_price = min(candidate.opening_range_high, entry_price * (1 - self._stop_loss_pct_fn() / 100.0))
+        # max(), not min() -- see module docstring's 2026-08-19 BTOG note.
+        stop_price = max(candidate.opening_range_high, entry_price * (1 - self._stop_loss_pct_fn() / 100.0))
         risk_per_share = entry_price - stop_price
         if risk_per_share <= 0:
             return None

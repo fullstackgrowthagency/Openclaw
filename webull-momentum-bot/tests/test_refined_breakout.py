@@ -106,3 +106,18 @@ def test_target_follows_injected_reward_risk_ratio():
     assert signal is not None
     risk_per_share = signal.reference_price - signal.suggested_stop
     assert signal.suggested_target == signal.reference_price + risk_per_share * 3.0
+
+
+def test_stop_capped_at_flat_pct_ceiling_not_widened_by_resistance():
+    # rtms-v3-follow-up (2026-08-19, real incident: BTOG, same bug as
+    # momentum_breakout.py/opening_range_breakout.py -- see their matching
+    # tests). max_breakout_extension_pct already keeps entry within 3% of
+    # resistance here, so resistance can never be dramatically far below
+    # entry the way it could in the other two strategies -- but the flat-%
+    # ceiling must still win whenever it's tighter than resistance.
+    strategy = RefinedBreakoutStrategy(stop_loss_pct_fn=lambda: 1.0)  # tighter than resistance
+    candidate = _candidate(resistance_level=10.0)
+    signal = strategy.on_snapshot(candidate, _snapshot(10.2))
+    assert signal is not None
+    assert signal.suggested_stop == 10.2 * 0.99
+    assert signal.suggested_stop > candidate.resistance_level

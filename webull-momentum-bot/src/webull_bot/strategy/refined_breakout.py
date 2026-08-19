@@ -21,6 +21,15 @@ supplied (tests, standalone use).
 stop_price is likewise computed from stop_loss_pct_fn(), wired to the live
 RiskEngine.config.stop_loss_pct -- see that field's docstring. Defaults to
 a fixed 3.0 when not supplied.
+
+stop_price is the TIGHTER (closer to entry) of resistance and the flat
+stop_loss_pct-based price -- i.e. max(), not min() (2026-08-19, see
+momentum_breakout.py's matching docstring note for the real BTOG
+incident this fixes -- the identical bug existed here too, though this
+strategy's own max_breakout_extension_pct bound naturally limited how
+wide it could get in practice). The flat-% price is the risk CEILING the
+user configured; resistance may only tighten the stop below that
+ceiling, never widen it past it.
 """
 from __future__ import annotations
 
@@ -71,7 +80,18 @@ class RefinedBreakoutStrategy(Strategy):
             return None
 
         entry_price = snapshot.last_price
-        stop_price = min(resistance, entry_price * (1 - self._stop_loss_pct_fn() / 100.0))
+        # max(), not min() -- see module docstring's 2026-08-19 BTOG note.
+        # Unlike momentum_breakout/opening_range_breakout (which require a
+        # strictly-positive breakout buffer before firing at all), this
+        # strategy's own gate above allows entry to trigger AT resistance
+        # exactly (0% extension) -- in that case resistance == entry_price,
+        # so max() would pick a zero-risk "stop" right at the entry price.
+        # Fall back to the flat-% stop (always strictly below entry_price,
+        # since stop_loss_pct_fn() > 0) whenever the structural level isn't
+        # a usable stop at all, rather than letting risk_per_share hit zero
+        # and killing the signal outright.
+        flat_pct_stop = entry_price * (1 - self._stop_loss_pct_fn() / 100.0)
+        stop_price = max(resistance, flat_pct_stop) if resistance < entry_price else flat_pct_stop
         risk_per_share = entry_price - stop_price
         if risk_per_share <= 0:
             return None
