@@ -2415,6 +2415,44 @@ broker-response uncertainties (a combo's 2xx response, like `place_order`'s
 own, doesn't confirm each leg individually -- see `place_bracket_entry`'s
 docstring).
 
+**Core-hours only -- extended-hours entries fall back to a plain LIMIT
+order (2026-08-19, real incident: BTCT).** Atomic bracket combo orders
+were rejected pre/after-hours -- `HTTP 417 OAUTH_OPENAPI_PARAM_ERR,
+"invalid support_trading_session, value: ALL"` -- meaning, per the
+"no fallback on rejection" rule above, the trade never happened at all.
+This section had never documented any session/hours constraint, which is
+exactly why the gap went unnoticed: `_attach_broker_bracket` (the older,
+resting-bracket mechanism this feature replaced at fresh-entry time) had
+already hit the identical rejection on 2026-08-12 for a resting OCO
+stop+target combo and been fixed by no-oping outside core hours entirely
+-- but that same session gate was never carried over when
+`submit_entry_signal`/`place_bracket_entry` was added the next day.
+Confirmed against Webull's own official API docs (every combo-order
+example there specifies `support_trading_session: "CORE"` or `"NIGHT"`,
+never `"ALL"` -- `"ALL"` only appears on their plain single-leg order
+examples) and directly by the account owner: **atomic bracket entries
+are core-hours only; pre-market/after-hours entries must be software
+managed limit orders.**
+
+The fix is a single added condition on `submit_entry_signal`'s existing
+early-return (`execution/order_manager.py`) -- `not
+is_within_core_trading_hours(effective_now)` joins the existing
+"broker lacks the capability"/"signal has no suggested_stop/target"
+checks that already fall back to a plain, unbracketed entry order. Three
+things already in place made this a pure wiring fix, not new
+architecture: (1) the plain entry order built just above that check is
+*already* correctly LIMIT-priced for extended hours via
+`_order_type_and_limit_price`; (2) `BracketSubmissionResult(stop_order=
+None, target_order=None)` is already the well-tested contract for "no
+atomic bracket was attempted"; (3) `_confirm_entry_filled` already falls
+through to `_attach_broker_bracket` whenever `stop_order` comes back
+`None`, and that method is already core-hours-gated and already retries
+every tick -- so the resting bracket gets attached automatically the
+moment core hours resume, with the position protected by
+`PositionManager`'s pure-software stop/target checks in the meantime.
+Since the added condition is `False` whenever `is_within_core_trading_hours`
+is `True`, core-hours behavior is provably byte-for-byte unchanged.
+
 **Dashboard visibility.** A `BRACKET_ENTRY_REJECTED` event pops up
 automatically (not just another row in the Risk Events table) --
 `dashboard/static/index.html`'s `bracket-rejected-modal-overlay`,
@@ -2472,8 +2510,9 @@ before finally giving up:
 
 See `tests/test_webull_broker_client.py` (`place_bracket_entry` payload
 shape and rejection propagation), `tests/test_order_manager.py`
-(`submit_entry_signal`'s capability gate, halving rule, and no-fallback
-contract), and `tests/test_trading_loop.py`
+(`submit_entry_signal`'s capability gate, halving rule, no-fallback
+contract, and `test_submit_entry_signal_falls_back_to_plain_entry_outside_core_hours`
+for the core-hours gate), and `tests/test_trading_loop.py`
 (`test_confirm_entry_filled_uses_atomic_bracket_result_without_calling_attach_broker_bracket`,
 `test_submit_entry_schedules_a_retry_on_bracket_entry_rejection`,
 `test_submit_entry_retry_recomputes_and_reattempts_on_the_next_tick`,

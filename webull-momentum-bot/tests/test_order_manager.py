@@ -465,6 +465,39 @@ def test_submit_entry_signal_falls_back_when_signal_has_no_suggested_target():
     assert broker._brackets == []
 
 
+def test_submit_entry_signal_falls_back_to_plain_entry_outside_core_hours():
+    """rtms-v3-follow-up (2026-08-19, real incident: BTCT's atomic bracket
+    was rejected -- HTTP 417 OAUTH_OPENAPI_PARAM_ERR, "invalid
+    support_trading_session, value: ALL" -- meaning the trade never went
+    through at all, since submit_entry_signal's contract on a genuine
+    broker rejection is "no fallback"). Broker DOES support atomic
+    brackets and the signal DOES have both suggested_stop/suggested_target
+    (unlike the two fallback tests above) -- the only thing forcing the
+    fallback here is `now` being outside core trading hours. Extended-
+    hours counterpart to test_submit_entry_signal_uses_atomic_bracket_when_supported,
+    which already covers this exact scenario during core hours and proves
+    the atomic path there is untouched."""
+    broker = _BracketEntryBroker()
+    # allow_extended_hours_trading=True -- otherwise RiskEngine.evaluate's
+    # own trading-hours gate rejects this signal before it ever reaches
+    # submit_entry_signal's atomic-vs-plain decision; see
+    # test_submit_signal_entry_uses_marketable_limit_outside_core_hours'
+    # own note above for the same reasoning.
+    risk_engine = RiskEngine(RiskConfig(allow_extended_hours_trading=True))
+    om = OrderManager(broker, risk_engine, get_settings())
+    result = om.submit_entry_signal(
+        _entry_signal(suggested_target=11.0), snapshot=_entry_snapshot(), open_positions=[],
+        now=_PRE_MARKET_NOW,
+    )
+    assert result.stop_order is None
+    assert result.target_order is None
+    assert broker._brackets == []  # place_bracket_entry never called
+    assert broker._orders == [result.entry_order]
+    # _order_type_and_limit_price's existing extended-hours LIMIT pricing
+    # still applies to the plain entry -- unaffected by this change.
+    assert result.entry_order.order_type == OrderType.LIMIT
+
+
 def test_submit_entry_signal_uses_atomic_bracket_when_supported():
     broker = _BracketEntryBroker()
     risk_engine = RiskEngine(RiskConfig(max_position_size_pct=100.0))

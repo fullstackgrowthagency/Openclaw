@@ -264,20 +264,39 @@ class OrderManager:
 
         Runs the exact same RiskEngine.evaluate sizing/exposure gate as
         submit_signal's entry branch (raises OrderRejected on disapproval,
-        identically). If the connected broker doesn't implement
+        identically). Falls back to a plain, unbracketed entry order --
+        same shape submit_signal would have placed -- for any of three
+        reasons: the connected broker doesn't implement
         place_bracket_entry (PaperBrokerClient/backtests -- checked via
-        getattr, same pattern as OrderManager's resting-order helpers) or
-        the signal itself has no suggested_stop/suggested_target, falls
-        back to a plain, unbracketed entry order -- same shape submit_signal
-        would have placed. That is NOT the same thing as a rejection: a
-        broker/signal that never had the capability to begin with hasn't
-        refused anything.
+        getattr, same pattern as OrderManager's resting-order helpers),
+        the signal itself has no suggested_stop/suggested_target, or
+        (2026-08-19, real incident: BTCT's atomic bracket was rejected --
+        HTTP 417 OAUTH_OPENAPI_PARAM_ERR, "invalid support_trading_session,
+        value: ALL" -- meaning the trade never went through at all, since
+        this method's contract on a genuine rejection is "no fallback")
+        `effective_now` falls outside core trading hours. Atomic bracket
+        combo orders are core-hours only per explicit user confirmation
+        and per Webull's own API docs (every combo-order example there
+        uses support_trading_session "CORE"/"NIGHT", never "ALL") --
+        exactly the same conclusion TradingLoop._attach_broker_bracket
+        already reached a day earlier for the older resting-bracket path,
+        which is why it already no-ops outside core hours. None of these
+        three is a rejection: a broker/signal/session that never had the
+        capability to begin with hasn't refused anything -- the plain
+        entry order built above is already correctly LIMIT-priced for
+        extended hours (_order_type_and_limit_price), and
+        TradingLoop._confirm_entry_filled already falls through to
+        _attach_broker_bracket (itself core-hours-gated, retried every
+        tick) whenever stop_order comes back None here, so the position
+        stays protected by PositionManager's software-only checks in the
+        meantime.
 
-        A broker that DOES support atomic bracket entries and rejects this
-        specific combo request raises BracketEntryRejected instead -- per
-        explicit instruction, callers (TradingLoop._submit_entry) must NOT
-        fall back to a plain unprotected entry on that failure; the trade
-        must not go through at all."""
+        A broker that DOES support atomic bracket entries, is asked for
+        one during core hours, and still rejects this specific combo
+        request raises BracketEntryRejected instead -- per explicit
+        instruction, callers (TradingLoop._submit_entry) must NOT fall
+        back to a plain unprotected entry on that failure; the trade must
+        not go through at all."""
         effective_now = now or datetime.utcnow()
         decision = self.risk_engine.evaluate(
             signal,
@@ -306,7 +325,12 @@ class OrderManager:
         )
 
         place_bracket_entry = getattr(self.broker, "place_bracket_entry", None)
-        if place_bracket_entry is None or signal.suggested_stop is None or signal.suggested_target is None:
+        if (
+            place_bracket_entry is None
+            or signal.suggested_stop is None
+            or signal.suggested_target is None
+            or not is_within_core_trading_hours(effective_now)
+        ):
             return BracketSubmissionResult(entry_order=self.broker.place_order(entry_order))
 
         exit_side = OrderSide.SELL if entry_side == OrderSide.BUY else OrderSide.BUY_TO_COVER
