@@ -467,6 +467,29 @@ class _RegimeOnlyQualifiedMomentumEngine:
         return TriggerDecision(outcome="start_confirmation", reason="test double", phase=MomentumPhase.NONE, rtms=100.0)
 
 
+class _RegimePassMomentumEngine:
+    """Test double that only forces the 5m regime to clear
+    (candidate.latest_metrics.return_5m), unlike _qualify_for_entry (used
+    by the other doubles above) which also stomps spread_pct/MIS-adjacent
+    fields to fixed "healthy" values -- needed by tests that want to
+    control spread_pct/MIS themselves without the regime check (a
+    separate, still-hard fail) getting in the way."""
+
+    def __init__(self):
+        from webull_bot.scoring.rtms import RTMSConfig
+        self.config = RTMSConfig.load()
+
+    def on_snapshot(self, candidate, signal, snapshot, now):
+        if candidate.latest_metrics is not None:
+            candidate.latest_metrics.return_5m = 100.0
+
+    def evaluate_trigger(self, candidate, signal, snapshot, now):
+        from webull_bot.scanner.momentum_qualification import TriggerDecision
+        if candidate.latest_metrics is not None:
+            candidate.latest_metrics.return_5m = 100.0
+        return TriggerDecision(outcome="start_confirmation", reason="test double", phase=candidate.momentum.phase, rtms=None)
+
+
 def _armed_candidate_setup(broker, momentum_engine=None):
     from webull_bot.state_machine import new_candidate, transition
     from webull_bot.enums import CandidateState
@@ -686,6 +709,37 @@ def test_poll_confirmation_ignores_sell_side_order_flow_below_the_sample_floor()
     assert "TEST" in loop._pending_confirmations
 
 
+def test_poll_confirmation_ignores_mis_fade_and_wide_spread():
+    """rtms-v3-follow-up (2026-08-19, real incidents: BTTC cancelled on
+    "spread widened" 9s into its window, BTOG cancelled on "MIS faded"
+    right at the 10s mark). Neither a MIS dip below armed_score_threshold
+    nor a spread widening past max_spread_pct should cancel confirmation
+    anymore -- deliberately does NOT override armed_score_threshold here
+    (unlike the sell-pressure/timing tests above) since a fresh
+    candidate's naturally low cold-start MIS score is exactly the
+    condition this test needs to prove no longer matters."""
+    broker = _FakeBroker()
+    # _RegimePassMomentumEngine (not the default _AlwaysQualifiedMomentumEngine)
+    # -- that default double stomps spread_pct to a fixed 0.1 every tick via
+    # _qualify_for_entry, which would silently defeat this test's wide-spread
+    # snapshot below.
+    loop, candidate = _armed_candidate_setup(broker, momentum_engine=_RegimePassMomentumEngine())
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._start_confirmation(candidate, _confirming_signal(reference_price=5.20), snapshot, _IN_HOURS_NOW)
+
+    later = _IN_HOURS_NOW + timedelta(seconds=2)  # well within the 10s default window
+    # Wide bid/ask (5.00/5.50, ~9.7% spread) -- well past max_spread_pct's
+    # default 2.0%. Price itself hasn't reversed.
+    wide_spread_snapshot = _snapshot(later, 5.20, 5.20, 610_000, 5.00, 5.50, 5.15)
+    loop._poll_confirmation(candidate, wide_spread_snapshot, later)
+
+    assert candidate.latest_score.score < loop.watcher.config.armed_score_threshold  # MIS is faded
+    assert candidate.latest_metrics.spread_pct > loop.watcher.config.max_spread_pct  # spread is wide
+    assert candidate.state == CandidateState.CONFIRMING  # not cancelled by either condition
+    assert "TEST" in loop._pending_confirmations
+
+
 def test_poll_confirmation_succeeds_after_the_window_and_queues_for_ranking():
     broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
@@ -872,6 +926,38 @@ def test_submit_ranked_entries_final_recheck_lets_the_next_ranked_candidate_take
     assert candidate_a.state == CandidateState.ARMED
     assert candidate_b.state in (CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING)
     assert "OTHR" not in loop._pending_confirmations
+
+
+def test_submit_ranked_entries_final_recheck_ignores_mis_fade_and_wide_spread():
+    """rtms-v3-follow-up (2026-08-19, real incidents: BTTC/BTOG both
+    cancelled on a momentary MIS fade or wide spread during confirmation).
+    Same reasoning applies at the final pre-submission recheck: MIS below
+    armed_score_threshold and spread above max_spread_pct must no longer
+    block a candidate here either, as long as regime/structure/target
+    still hold."""
+    from webull_bot.state_machine import transition as _transition
+
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    _transition(candidate, CandidateState.CONFIRMING)
+    _qualify_for_entry(candidate)  # regime cleared, structure intact
+
+    from webull_bot.models import MomentumScore, MomentumScoreComponents
+    components = MomentumScoreComponents(*([0.0] * 11))
+    candidate.latest_score = MomentumScore(
+        symbol="TEST", timestamp=_IN_HOURS_NOW, score=10.0, components=components, weights_version="test",
+    )  # well below armed_score_threshold (70)
+    candidate.latest_metrics.spread_pct = 10.0  # well above max_spread_pct (2.0)
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._pending_confirmations["TEST"] = _pending_confirmation(broker, candidate, _confirming_signal(), snapshot)
+    loop._ready_to_enter = [candidate]
+
+    loop._submit_ranked_entries(_IN_HOURS_NOW)
+
+    assert candidate.state in (CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING)
+    assert "TEST" not in loop._pending_confirmations
+    assert broker._orders != {}
 
 
 # -- atomic bracket entry (2026-08-13, see docs/ARCHITECTURE.md's "Atomic

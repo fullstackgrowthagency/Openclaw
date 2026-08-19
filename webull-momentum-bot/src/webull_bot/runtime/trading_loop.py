@@ -1637,13 +1637,15 @@ class TradingLoop:
         for the incident writeup; candidate.momentum.phase is still
         updated every tick below for dashboard display/ranking, but no
         longer changes which of these branches this method takes):
-        1. FAILS -- price reversed past confirmation_max_pullback_pct, MIS
-           fell back below the armed threshold, the spread widened back
-           out, (2026-08-14) TICK-derived order flow shows net sell-side
+        1. FAILS -- price reversed past confirmation_max_pullback_pct,
+           (2026-08-14) TICK-derived order flow shows net sell-side
            pressure past order_flow_sell_pressure_threshold with enough
            classified volume to trust it, or the 5m momentum regime itself
            failed -- RiskEventType.CONFIRMATION_FAILED, revert to ARMED,
            must re-trigger fresh (not resume this same clock).
+           (2026-08-19: a momentary MIS dip or spread widen during the
+           window no longer cancels here -- see the note further down
+           where those checks used to live.)
         2. Window elapses clean (nothing above failed) -- recompute stop/
            target from the ACTUAL current price, not signal.reference_price
            (which by now is confirmation_window_seconds stale), preserving
@@ -1709,14 +1711,18 @@ class TradingLoop:
         reversed_past_tolerance = snapshot.last_price < pending.reference_price * (
             1 - self.config.confirmation_max_pullback_pct / 100.0
         )
-        mis_faded = (
-            candidate.latest_score is not None
-            and candidate.latest_score.score < self.watcher.config.armed_score_threshold
-        )
-        spread_too_wide = (
-            candidate.latest_metrics is not None
-            and candidate.latest_metrics.spread_pct > self.watcher.config.max_spread_pct
-        )
+        # rtms-v3-follow-up (2026-08-19, real incidents: BTTC cancelled 9s
+        # into its 10s window on "spread widened"; BTOG cancelled right at
+        # the 10s mark on "MIS faded" -- both otherwise-good setups killed
+        # by a momentary dip in a signal that isn't the move itself). Per
+        # explicit user decision, a MIS dip below armed_score_threshold or
+        # a spread widening past max_spread_pct during the confirmation
+        # window are no longer hard fails here -- removed, following the
+        # same reasoning as rtms-v3's regime-only entry gate above. The
+        # checks that stayed (order flow, regime, and the price-reversal
+        # check below) all measure something about the move ITSELF; MIS
+        # and spread are secondary signals that can move around during a
+        # short window without the breakout having stopped being real.
         # TICK-derived order flow (2026-08-14, see
         # TradingLoopConfig.order_flow_sell_pressure_threshold's
         # docstring): net sell-side volume during the confirmation window
@@ -1743,18 +1749,13 @@ class TradingLoop:
             and candidate.latest_metrics.return_5m < self.momentum_engine.config.thresholds["min_return_5m_pct"]
         )
 
-        # These four are ALWAYS hard failures -- never excused by a
+        # These two are ALWAYS hard failures -- never excused by a
         # pullback classification (see the spec's own "structural failure"
-        # list: MIS collapsing, spread blowing out, sustained sell
-        # pressure, or the regime itself failing all remain hard fails
-        # regardless of what phase tracking currently reads).
-        if mis_faded or spread_too_wide or sell_pressure_detected or regime_failed:
-            failure = (
-                "5m momentum regime failed" if regime_failed
-                else "MIS faded" if mis_faded
-                else "spread widened" if spread_too_wide
-                else "sell-side order flow"
-            )
+        # list: sustained sell pressure or the regime itself failing both
+        # remain hard fails regardless of what phase tracking currently
+        # reads).
+        if sell_pressure_detected or regime_failed:
+            failure = "5m momentum regime failed" if regime_failed else "sell-side order flow"
             _cancel(failure)
             return
 
@@ -1899,13 +1900,15 @@ class TradingLoop:
         for the incident writeup. `state` is still read below for
         active_strategy_name; phase/RTMS remain fully populated for the
         dashboard and for _final_entry_rank's ranking weight, just not
-        checked here anymore."""
+        checked here anymore.
+
+        rtms-v3-follow-up (2026-08-19): also dropped the MIS-faded and
+        spread-too-wide checks that used to live here, for the same
+        BTTC/BTOG-incident reasoning as _poll_confirmation's matching
+        note -- see that method's docstring."""
         metrics = candidate.latest_metrics
         state = candidate.momentum
         th = self.momentum_engine.config.thresholds
-
-        if candidate.latest_score is None or candidate.latest_score.score < self.watcher.config.armed_score_threshold:
-            return f"MIS faded below {self.watcher.config.armed_score_threshold:.1f}"
 
         if metrics is None or metrics.return_5m is None or metrics.return_5m < th["min_return_5m_pct"]:
             return f"5m return no longer clears the {th['min_return_5m_pct']:.1f}% regime gate"
@@ -1913,9 +1916,6 @@ class TradingLoop:
         active_strategy = state.active_strategy_name or pending.signal.strategy_name
         if not momentum_structure_intact(candidate, active_strategy, pending.snapshot):
             return "structural level no longer held"
-
-        if metrics.spread_pct > self.watcher.config.max_spread_pct:
-            return "spread too wide"
 
         if pending.signal.suggested_target is not None:
             clearance = evaluate_target_clearance(
