@@ -11,11 +11,10 @@
 # keeps the same safety net MISConfig.load() has). Bump `version` any time
 # a weight/threshold changes.
 #
-# Deliberately does NOT weight return_5m (the hard momentum-regime gate,
-# checked separately and BEFORE RTMS is even computed -- see
-# scanner/momentum_qualification.py) -- a candidate can only reach RTMS
-# scoring once it's already cleared that hard gate, so re-weighting it
-# heavily here would just be measuring the same thing twice.
+# rtms-v4 (2026-08-19) superseded the paragraph that used to be here
+# ("deliberately does NOT weight return_5m... would just be measuring the
+# same thing twice") -- see the rtms-v4 changelog entry below for why that
+# reasoning no longer holds and regime_distance_score was added.
 #
 # rtms-v2 (2026-08-19, real incident): LGHL sat at the top of the
 # candidate list (MIS 78.2, ARMED) but never even attempted an entry.
@@ -50,17 +49,37 @@
 # on each for detail. Kept in this file rather than deleted: cheap, and
 # preserves the tuning history if a future pass wants to reintroduce a
 # softer version of this gate.
-version: "rtms-v3"
+#
+# rtms-v4 (2026-08-19, explicit user request): added regime_distance_score
+# -- how far metrics.return_5m sits above min_return_5m_pct (the 4.00%
+# hard entry gate), NOT return_5m itself -- as a NEW RTMS component, and
+# made it the heaviest-weighted one by a wide margin (0.40 vs. the next-
+# heaviest at 0.12) so it dominates the score and drives ranking the most.
+# This directly reverses the "would just be measuring the same thing
+# twice" reasoning rtms-v1 through v3 used to justify excluding return_5m
+# entirely: that reasoning was about the (now-removed, see rtms-v3 above)
+# ENTRY GATE, where re-checking the same threshold RTMS would score against
+# really would be redundant. It does not apply to RTMS's other job --
+# ranking which of several already-qualified candidates wins a scarce slot
+# (ranking_weights below) -- where "how far past the floor" is a
+# genuinely useful, not-yet-measured signal: BIVI/BTCT-shaped candidates
+# (20+ points clear of the floor) should clearly outrank one that just
+# barely cleared it, and none of the other 8 components measure that
+# distance. The other 8 weights below are rescaled by 0.60 (their old
+# values, which already summed to 1.0, times (1 - 0.40)) so the full set
+# still sums to 1.0.
+version: "rtms-v4"
 
 weights:
-  momentum_15s_score: 0.20                # freshest short-term momentum signal
-  momentum_30s_score: 0.18
-  momentum_60s_score: 0.17
-  price_acceleration_score: 0.15          # is the short-term move itself speeding up
-  trend_efficiency_score: 0.12            # how "clean" (vs. choppy) the move has been
-  fresh_high_reclaim_score: 0.08          # currently at/near a genuinely fresh high, not a stale one
-  order_flow_trade_velocity_score: 0.06   # buy-side pressure, same TICK-derived signal as MIS's order_flow_score
-  volume_acceleration_score: 0.04         # lowest weight on purpose -- volume alone (with no price follow-through) is exactly what this layer exists to NOT qualify on (see Volume Ignition's stricter strategy_phase_policy below)
+  regime_distance_score: 0.40             # heaviest by design (rtms-v4) -- % points return_5m clears min_return_5m_pct by
+  momentum_15s_score: 0.12                # freshest short-term momentum signal (was 0.20, rescaled x0.60 for rtms-v4)
+  momentum_30s_score: 0.108               # was 0.18
+  momentum_60s_score: 0.102               # was 0.17
+  price_acceleration_score: 0.09          # is the short-term move itself speeding up (was 0.15)
+  trend_efficiency_score: 0.072           # how "clean" (vs. choppy) the move has been (was 0.12)
+  fresh_high_reclaim_score: 0.048         # currently at/near a genuinely fresh high, not a stale one (was 0.08)
+  order_flow_trade_velocity_score: 0.036  # buy-side pressure, same TICK-derived signal as MIS's order_flow_score (was 0.06)
+  volume_acceleration_score: 0.024        # lowest weight on purpose -- volume alone (with no price follow-through) is exactly what this layer exists to NOT qualify on (see Volume Ignition's stricter strategy_phase_policy below) (was 0.04)
 
 # Three-point (min/strong/exceptional) scoring curves -- unlike MIS's plain
 # two-point _scale(value, low, high), RTMS's components use a progressive
@@ -72,6 +91,12 @@ weights:
 # is in the units of MomentumMetrics.acceleration_15s (%/s, change in
 # velocity); trend_efficiency_score is 0-1 (net_move/total_path, unitless).
 component_curves:
+  # rtms-v4: value here is metrics.return_5m MINUS min_return_5m_pct
+  # (percentage points cleared past the hard entry floor), not return_5m
+  # itself -- see scoring/rtms.py's compute_rtms_components. 0.0 = right
+  # at the floor; the real incidents that motivated this (BIVI/BTCT, both
+  # 17-22 points clear of the 4.00% floor) land well past exceptional.
+  regime_distance_score: {min: 0.0, strong: 5.0, exceptional: 15.0}
   momentum_15s_score: {min: 0.40, strong: 0.80, exceptional: 1.50}
   momentum_30s_score: {min: 0.75, strong: 1.50, exceptional: 3.00}
   momentum_60s_score: {min: 1.25, strong: 2.50, exceptional: 5.00}

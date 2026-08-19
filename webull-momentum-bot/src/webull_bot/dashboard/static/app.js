@@ -66,7 +66,7 @@ const COLUMN_INFO = {
   rtms: {
     title: "RTMS",
     body:
-      "The Real-Time Momentum Score, 0-100 -- separate from the Score (MIS) column. MIS asks \"is this stock structurally interesting\"; RTMS asks \"is it actually moving RIGHT NOW,\" blending 15s/30s/60s momentum, price acceleration, trend efficiency, fresh-high proximity, order flow, and volume acceleration. Only populated once phase has left NONE. As of rtms-v3 (2026-08-19), RTMS no longer gates entry -- it's shown for context and used only to rank which candidate wins a scarce position slot when several qualify at once (weighted 0.65 alongside MIS and strategy quality).",
+      "The Real-Time Momentum Score, 0-100 -- separate from the Score (MIS) column. MIS asks \"is this stock structurally interesting\"; RTMS asks \"is it actually moving RIGHT NOW.\" As of rtms-v4 (2026-08-19) its single heaviest input by a wide margin is how far the 5-minute return sits above the 4% hard entry floor (40% of the score) -- the rest blends 15s/30s/60s momentum, price acceleration, trend efficiency, fresh-high proximity, order flow, and volume acceleration. Only populated once phase has left NONE. RTMS no longer gates entry (rtms-v3) -- it's shown for context and used only to rank which candidate wins a scarce position slot when several qualify at once (weighted 0.65 alongside MIS and strategy quality).",
   },
   "momentum-block-reason": {
     title: "Momentum",

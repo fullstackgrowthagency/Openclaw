@@ -118,3 +118,65 @@ def test_order_flow_component_ignored_below_sample_floor():
     metrics = _build_metrics(order_flow_imbalance_1m=0.9, order_flow_sample_count_1m=1)
     components = compute_rtms_components(metrics, config, now, current_price=10.0)
     assert components.order_flow_trade_velocity_score is None
+
+
+# -- regime_distance_score (rtms-v4, 2026-08-19, explicit user request) -----
+# Heaviest-weighted RTMS component by a wide margin -- see rtms_weights.yaml's
+# rtms-v4 changelog entry. Measures percentage points metrics.return_5m
+# clears min_return_5m_pct by, NOT return_5m itself.
+
+def test_regime_distance_score_is_the_heaviest_weight():
+    config = RTMSConfig.load()
+    assert config.weights["regime_distance_score"] == max(config.weights.values())
+    # Wide margin, not just technically highest -- "dominates" per the
+    # explicit ask, more than 3x the next-heaviest component.
+    other_weights = [w for k, w in config.weights.items() if k != "regime_distance_score"]
+    assert config.weights["regime_distance_score"] > 3 * max(other_weights)
+
+
+def test_regime_distance_score_zero_right_at_the_floor():
+    config = RTMSConfig.load()
+    now = datetime(2026, 8, 17, 15, 0, 10)
+    # min_return_5m_pct defaults to 4.00 -- exactly at the floor scores 0,
+    # same "0 at/below minimum" contract as every other RTMS curve.
+    metrics = _build_metrics(return_5m=4.00)
+    components = compute_rtms_components(metrics, config, now, current_price=10.0)
+    assert components.regime_distance_score == 0.0
+
+
+def test_regime_distance_score_maxes_out_far_above_the_floor():
+    config = RTMSConfig.load()
+    now = datetime(2026, 8, 17, 15, 0, 10)
+    # BIVI/BTCT-shaped: 17-22 points clear of the 4.00% floor -- both real
+    # incidents this component exists to reward on ranking.
+    metrics = _build_metrics(return_5m=21.72)
+    components = compute_rtms_components(metrics, config, now, current_price=10.0)
+    assert components.regime_distance_score == 100.0
+
+
+def test_regime_distance_score_none_without_a_5m_return():
+    config = RTMSConfig.load()
+    now = datetime(2026, 8, 17, 15, 0, 10)
+    metrics = _build_metrics(return_5m=None)
+    components = compute_rtms_components(metrics, config, now, current_price=10.0)
+    assert components.regime_distance_score is None
+
+
+def test_regime_distance_score_dominates_the_final_rtms_score():
+    """Two candidates identical on every OTHER component -- only distance
+    above the regime floor differs. The one far past the floor must score
+    dramatically higher, proving this component actually drives the score
+    (not just carries the biggest number on paper)."""
+    config = RTMSConfig.load()
+    now = datetime(2026, 8, 17, 15, 0, 10)
+    weak_other_components = dict(
+        return_15s=0.1, return_30s=0.2, return_60s=0.3, acceleration_15s=-0.2,
+        trend_efficiency_15s=0.2, recent_high_15s=None, recent_high_15s_time=None,
+        order_flow_imbalance_1m=None, order_flow_sample_count_1m=0, volume_accel_1m_3m=0.5,
+    )
+    at_floor = _build_metrics(return_5m=4.00, **weak_other_components)
+    far_past_floor = _build_metrics(return_5m=21.72, **weak_other_components)
+
+    score_at_floor, _ = compute_rtms(at_floor, config, now, current_price=10.0)
+    score_far_past, _ = compute_rtms(far_past_floor, config, now, current_price=10.0)
+    assert score_far_past - score_at_floor > 35.0  # dominant, not marginal

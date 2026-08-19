@@ -243,7 +243,14 @@ class RTMSComponents:
     (e.g. order_flow_trade_velocity_score before enough classified TICK
     volume exists) -- compute_rtms excludes a None component from the
     weighted average and renormalizes over the remaining active weights,
-    identical to momentum_ignition_score.compute_score's own contract."""
+    identical to momentum_ignition_score.compute_score's own contract.
+
+    regime_distance_score (rtms-v4, 2026-08-19): the heaviest-weighted
+    component by explicit user request -- how far metrics.return_5m sits
+    above the hard entry gate (min_return_5m_pct), NOT return_5m itself.
+    See scoring/rtms.py's compute_rtms_components for why distance-above-
+    floor rather than the raw return."""
+    regime_distance_score: Optional[float]
     momentum_15s_score: Optional[float]
     momentum_30s_score: Optional[float]
     momentum_60s_score: Optional[float]

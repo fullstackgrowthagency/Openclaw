@@ -119,6 +119,7 @@ def compute_rtms_components(
 ) -> RTMSComponents:
     if metrics is None:
         return RTMSComponents(
+            regime_distance_score=None,
             momentum_15s_score=None, momentum_30s_score=None, momentum_60s_score=None,
             price_acceleration_score=None, trend_efficiency_score=None,
             fresh_high_reclaim_score=None, order_flow_trade_velocity_score=None,
@@ -132,6 +133,16 @@ def compute_rtms_components(
             return None
         c = curves[name]
         return scale3(value, c["min"], c["strong"], c["exceptional"])
+
+    # rtms-v4 (2026-08-19): distance ABOVE the hard entry gate
+    # (min_return_5m_pct), not return_5m itself -- scored via the same
+    # three-point curve as everything else, over "percentage points
+    # cleared past the floor" rather than the raw return, so this stays
+    # meaningful even if min_return_5m_pct itself gets retuned later.
+    regime_distance_score = None
+    if metrics.return_5m is not None:
+        distance_above_floor = metrics.return_5m - th["min_return_5m_pct"]
+        regime_distance_score = _curve("regime_distance_score", distance_above_floor)
 
     momentum_15s_score = _curve("momentum_15s_score", metrics.return_15s)
     momentum_30s_score = _curve("momentum_30s_score", metrics.return_30s)
@@ -159,6 +170,7 @@ def compute_rtms_components(
     volume_acceleration_score = _curve("volume_acceleration_score", metrics.volume_accel_1m_3m)
 
     return RTMSComponents(
+        regime_distance_score=regime_distance_score,
         momentum_15s_score=momentum_15s_score,
         momentum_30s_score=momentum_30s_score,
         momentum_60s_score=momentum_60s_score,
