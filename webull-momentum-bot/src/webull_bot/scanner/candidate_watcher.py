@@ -34,7 +34,7 @@ from typing import Callable
 
 from ..enums import CandidateState, TradeBlockReason
 from ..metrics.rolling import MAX_HISTORY_MINUTES, compute_metrics
-from ..models import Candidate, MarketSnapshot, TickRecord
+from ..models import Candidate, MarketSnapshot, MomentumState, TickRecord
 from ..scoring.momentum_ignition_score import MISConfig, compute_score
 from ..state_machine import transition
 
@@ -179,6 +179,14 @@ class CandidateWatcher:
             elif score < self.config.heating_up_score_threshold * self.config.cooling_off_ratio:
                 transition(candidate, CandidateState.WATCHING, now=snapshot.timestamp, reason=f"MIS {score:.1f} cooled off")
         elif candidate.state == CandidateState.ARMED and score < self.config.heating_up_score_threshold:
+            # Real-Time Momentum Qualification Layer (2026-08-17): a genuine
+            # "no longer hot" cool-off is one of the two seams where
+            # candidate.momentum gets hard-reset (see MomentumState's own
+            # docstring for the other one, COOLDOWN->WATCHING in
+            # trading_loop.py) -- a fresh arm cycle later must not inherit
+            # stale impulse/pullback/phase state from a completely
+            # different momentum episode.
+            candidate.momentum = MomentumState()
             transition(candidate, CandidateState.HEATING_UP, now=snapshot.timestamp, reason=f"MIS {score:.1f} cooled off from armed")
 
         return candidate

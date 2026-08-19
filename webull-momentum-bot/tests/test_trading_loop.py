@@ -113,6 +113,15 @@ def _build_loop(broker, **extra_kwargs) -> TradingLoop:
     position_manager = PositionManager()
 
     trades = []
+    # Real-Time Momentum Qualification Layer (2026-08-17): this whole file
+    # predates RTMS, and most of its scenarios (exit management, position
+    # tracking, order-status polling, ...) have nothing to do with it -- give
+    # every _build_loop caller an always-qualifying test double by default
+    # (see _AlwaysQualifiedMomentumEngine's own docstring) so a candidate
+    # reaching CONFIRMING here isn't blocked on tick-derived metrics these
+    # synthetic bars never produce. A caller that DOES want real RTMS gating
+    # behavior can still pass its own momentum_engine= to override this.
+    extra_kwargs.setdefault("momentum_engine", _AlwaysQualifiedMomentumEngine())
     loop = TradingLoop(
         broker, StaticUniverseProvider(["TEST"]), broad_scanner, watcher, trigger_engine,
         order_manager, position_manager, risk_engine,
@@ -371,6 +380,69 @@ def _watching_candidate_setup(broker):
     return loop, candidate
 
 
+# -- Real-Time Momentum Qualification Layer (2026-08-17) test double --------
+# Most of the tests below construct a CONFIRMING (or already-ready-to-enter)
+# candidate directly, with no real tick/price history behind it -- the real
+# MomentumQualificationEngine's IMPULSING quality gate hard-requires
+# metrics.recent_high_15s (from real tick data these minimal candidates
+# never have), so it can never pass no matter how permissive its config's
+# thresholds are set. These tests are about confirmation-window/ranking
+# MECHANICS, not RTMS gating itself (which has its own dedicated coverage in
+# test_momentum_qualification.py/test_rtms.py/test_momentum_structure.py),
+# so bypass the gate entirely rather than trying to fake up realistic tick
+# history for each one.
+
+def _qualify_for_entry(candidate) -> None:
+    """Forces `candidate` past every Real-Time Momentum Qualification Layer
+    gate (regime/phase/RTMS) -- see the module comment above. Mutates
+    candidate.latest_metrics.return_5m in place when metrics already exist
+    (this runs AFTER CandidateWatcher.update() inside _poll_confirmation,
+    so _poll_confirmation's own regime_failed check -- computed right after
+    -- sees the forced value), else builds a minimal valid MomentumMetrics
+    from scratch for tests that never route through the watcher at all."""
+    from webull_bot.enums import MomentumPhase
+    from webull_bot.models import MomentumMetrics
+
+    candidate.momentum.phase = MomentumPhase.IMPULSING
+    candidate.momentum.rtms = 100.0
+    candidate.momentum.structure_intact = True
+    candidate.momentum.momentum_qualified = True
+    if candidate.latest_metrics is not None:
+        candidate.latest_metrics.return_5m = 100.0
+        candidate.latest_metrics.spread_pct = 0.1
+    else:
+        candidate.latest_metrics = MomentumMetrics(
+            symbol=candidate.symbol, timestamp=_IN_HOURS_NOW, float_turnover=0.1, float_velocity_1m=0.0,
+            float_velocity_3m=0.0, float_velocity_5m=0.0, relative_volume=1.0, relative_volume_1m=1.0,
+            relative_volume_5m=1.0, volume_accel_1m_3m=1.0, volume_1m=0.0, volume_5m=0.0, volume_15m=0.0,
+            dollar_volume_1m=0.0, dollar_volume_5m=0.0, dollar_volume_15m=0.0, dollar_volume_accel_1m_3m=1.0,
+            price_velocity_1m=0.0, price_velocity_3m=0.0, price_velocity_5m=0.0, price_velocity_15m=0.0,
+            price_acceleration=0.0, vwap=candidate.last_price or 5.0, distance_from_vwap_pct=0.0,
+            distance_from_hod_pct=0.0, distance_from_premarket_high_pct=None, distance_from_resistance_pct=None,
+            spread_abs=0.01, spread_pct=0.1, dollar_volume=1_000_000, return_5m=100.0,
+        )
+
+
+class _AlwaysQualifiedMomentumEngine:
+    """Test double for MomentumQualificationEngine, real .config (so
+    threshold/ranking-weight reads elsewhere in TradingLoop still work) but
+    on_snapshot/evaluate_trigger unconditionally qualify -- see
+    _qualify_for_entry above for why."""
+
+    def __init__(self):
+        from webull_bot.scoring.rtms import RTMSConfig
+        self.config = RTMSConfig.load()
+
+    def on_snapshot(self, candidate, signal, snapshot, now):
+        _qualify_for_entry(candidate)
+
+    def evaluate_trigger(self, candidate, signal, snapshot, now):
+        from webull_bot.enums import MomentumPhase
+        from webull_bot.scanner.momentum_qualification import TriggerDecision
+        _qualify_for_entry(candidate)
+        return TriggerDecision(outcome="start_confirmation", reason="test double", phase=MomentumPhase.IMPULSING, rtms=100.0)
+
+
 def _armed_candidate_setup(broker):
     from webull_bot.state_machine import new_candidate, transition
     from webull_bot.enums import CandidateState
@@ -392,6 +464,7 @@ def _armed_candidate_setup(broker):
         broker, StaticUniverseProvider([]), BroadScanner(broker, _SingleSymbolFloatProvider("TEST", 1_000_000)),
         watcher, trigger_engine, order_manager, position_manager, risk_engine,
         config=TradingLoopConfig(universe_rescan_interval_seconds=3600),
+        momentum_engine=_AlwaysQualifiedMomentumEngine(),
     )
     loop.candidates["TEST"] = candidate
     return loop, candidate
@@ -419,11 +492,11 @@ def _confirming_signal(reference_price=5.20, suggested_stop=5.00, suggested_targ
 def test_start_confirmation_stashes_pending_and_does_not_submit_an_order():
     broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
-    from webull_bot.state_machine import transition
-    transition(candidate, CandidateState.CONFIRMING)
 
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     signal = _confirming_signal()
+    # _start_confirmation itself performs ARMED->CONFIRMING now (2026-08-17,
+    # see its docstring) -- candidate starts ARMED via _armed_candidate_setup.
     loop._start_confirmation(candidate, signal, snapshot, _IN_HOURS_NOW)
 
     assert "TEST" in loop._pending_confirmations
@@ -438,8 +511,6 @@ def test_poll_confirmation_takes_no_action_while_still_within_the_window():
     # a fresh test candidate's cold-start MIS (near-zero velocity/
     # acceleration history) has nothing to do with what this test covers.
     loop.watcher.config.armed_score_threshold = -1.0
-    from webull_bot.state_machine import transition
-    transition(candidate, CandidateState.CONFIRMING)
 
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     loop._start_confirmation(candidate, _confirming_signal(), snapshot, _IN_HOURS_NOW)
@@ -456,8 +527,6 @@ def test_poll_confirmation_takes_no_action_while_still_within_the_window():
 def test_poll_confirmation_fails_and_reverts_to_armed_on_a_price_reversal():
     broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
-    from webull_bot.state_machine import transition
-    transition(candidate, CandidateState.CONFIRMING)
 
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     loop._start_confirmation(candidate, _confirming_signal(reference_price=5.20), snapshot, _IN_HOURS_NOW)
@@ -482,7 +551,6 @@ def test_poll_confirmation_fails_on_sell_side_order_flow_with_enough_samples():
     broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
     loop.watcher.config.armed_score_threshold = -1.0  # isolate from cold-start MIS
-    transition(candidate, CandidateState.CONFIRMING)
 
     later = _IN_HOURS_NOW + timedelta(seconds=2)
     # 15 classified prints, net heavily sell-side (imbalance well past the
@@ -515,7 +583,6 @@ def test_poll_confirmation_ignores_sell_side_order_flow_below_the_sample_floor()
     broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
     loop.watcher.config.armed_score_threshold = -1.0
-    transition(candidate, CandidateState.CONFIRMING)
 
     later = _IN_HOURS_NOW + timedelta(seconds=2)
     # Only 3 classified prints -- below order_flow_min_sample_count_for_gate's
@@ -538,8 +605,6 @@ def test_poll_confirmation_succeeds_after_the_window_and_queues_for_ranking():
     broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
     loop.watcher.config.armed_score_threshold = -1.0  # isolate from cold-start MIS, see note above
-    from webull_bot.state_machine import transition
-    transition(candidate, CandidateState.CONFIRMING)
 
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     loop._start_confirmation(candidate, _confirming_signal(), snapshot, _IN_HOURS_NOW)
@@ -563,8 +628,6 @@ def test_poll_confirmation_rejects_when_resistance_sits_before_the_recomputed_ta
     broker = _FakeBroker()
     loop, candidate = _armed_candidate_setup(broker)
     loop.watcher.config.armed_score_threshold = -1.0  # isolate from cold-start MIS, see note above
-    from webull_bot.state_machine import transition
-    transition(candidate, CandidateState.CONFIRMING)
     candidate.static_resistance_levels = [5.40]  # sits before entry(5.30) * 1.10-ish target
 
     snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
@@ -604,6 +667,12 @@ def test_submit_ranked_entries_picks_the_higher_score_when_a_slot_is_scarce():
 
     candidate_a.latest_score = _score(60.0)
     candidate_b.latest_score = _score(90.0)  # higher -- should win the one slot
+    # Real-Time Momentum Qualification Layer (2026-08-17): this test is
+    # purely about the ranking/slot-scarcity mechanics -- see
+    # _qualify_for_entry's docstring for why these directly-constructed
+    # candidates need this to clear _submit_ranked_entries' final recheck.
+    _qualify_for_entry(candidate_a)
+    _qualify_for_entry(candidate_b)
 
     snapshot_a = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
     snapshot_b = MarketSnapshot(
@@ -631,6 +700,90 @@ def _pending_confirmation(broker, candidate, signal, snapshot):
         signal=signal, momentum_event=None, started_at=_IN_HOURS_NOW,
         reference_price=signal.reference_price, snapshot=snapshot,
     )
+
+
+# -- Scenario G (Real-Time Momentum Qualification Layer spec, 2026-08-17):
+# a candidate that already won a ranking slot must still pass a FRESH
+# momentum recheck immediately before it actually submits -- see
+# TradingLoop._final_pretrade_recheck. A candidate whose momentum decayed
+# (or was never real to begin with) between winning the slot and this final
+# check must be skipped WITHOUT consuming the slot, so the next-ranked
+# candidate still gets a chance -- not entered on stale qualification.
+
+def test_submit_ranked_entries_final_recheck_blocks_a_candidate_whose_momentum_has_gone_stale():
+    from webull_bot.enums import MomentumPhase, RiskEventType
+
+    from webull_bot.state_machine import transition as _transition
+
+    broker = _FakeBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    _transition(candidate, CandidateState.CONFIRMING)
+    _qualify_for_entry(candidate)
+    # ... but momentum has since decayed back to PULLING_BACK -- exactly the
+    # "stale queued confirmation" scenario: it looked good when it won the
+    # ranking, but is no longer entry-eligible by the time its slot opens up.
+    candidate.momentum.phase = MomentumPhase.PULLING_BACK
+
+    snapshot = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    loop._pending_confirmations["TEST"] = _pending_confirmation(broker, candidate, _confirming_signal(), snapshot)
+    loop._ready_to_enter = [candidate]
+
+    loop._submit_ranked_entries(_IN_HOURS_NOW)
+
+    assert candidate.state == CandidateState.ARMED  # skipped, not entered
+    assert "TEST" not in loop._pending_confirmations
+    assert broker._orders == {}
+    assert loop.risk_engine.events[-1].event_type == RiskEventType.MOMENTUM_QUALIFICATION_LOST.value
+
+
+def test_submit_ranked_entries_final_recheck_lets_the_next_ranked_candidate_take_the_slot():
+    from webull_bot.enums import MomentumPhase
+
+    from webull_bot.state_machine import new_candidate, transition as _transition
+
+    broker = _FakeBroker()
+    loop, candidate_a = _armed_candidate_setup(broker)
+    loop.risk_engine.config.max_simultaneous_positions = 1
+    _transition(candidate_a, CandidateState.CONFIRMING)
+    _qualify_for_entry(candidate_a)
+    candidate_a.momentum.phase = MomentumPhase.PULLING_BACK  # stale -- must be skipped
+
+    candidate_b = new_candidate("OTHR")
+    _transition(candidate_b, CandidateState.WATCHING)
+    _transition(candidate_b, CandidateState.HEATING_UP)
+    _transition(candidate_b, CandidateState.ARMED)
+    _transition(candidate_b, CandidateState.CONFIRMING)
+    _qualify_for_entry(candidate_b)  # still genuinely qualified
+    loop.candidates["OTHR"] = candidate_b
+
+    from webull_bot.models import MomentumScore, MomentumScoreComponents
+    def _score(value):
+        components = MomentumScoreComponents(*([0.0] * 11))
+        return MomentumScore(symbol="X", timestamp=_IN_HOURS_NOW, score=value, components=components, weights_version="test")
+
+    candidate_a.latest_score = _score(90.0)  # ranks HIGHER than b -- but stale
+    candidate_b.latest_score = _score(75.0)  # still clears the armed_score_threshold(70) floor
+
+    snapshot_a = _snapshot(_IN_HOURS_NOW, 5.20, 5.20, 600_000, 5.19, 5.21, 5.15)
+    snapshot_b = MarketSnapshot(
+        symbol="OTHR", timestamp=_IN_HOURS_NOW, last_price=3.00, bid=2.99, ask=3.01, bid_size=500, ask_size=500,
+        cumulative_volume=600_000, vwap=2.95, high_of_day=3.00, low_of_day=2.90, open_price=2.95,
+    )
+    loop._pending_confirmations["TEST"] = _pending_confirmation(broker, candidate_a, _confirming_signal(), snapshot_a)
+    loop._pending_confirmations["OTHR"] = _pending_confirmation(
+        broker, candidate_b,
+        _confirming_signal(reference_price=3.00, suggested_stop=2.85, suggested_target=3.30), snapshot_b,
+    )
+    loop._ready_to_enter = [candidate_a, candidate_b]
+
+    loop._submit_ranked_entries(_IN_HOURS_NOW)
+
+    # candidate_a outranked candidate_b on raw MIS, but failed the final
+    # recheck -- the one available slot still goes to candidate_b, not
+    # wasted just because the top-ranked candidate turned out stale.
+    assert candidate_a.state == CandidateState.ARMED
+    assert candidate_b.state in (CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING)
+    assert "OTHR" not in loop._pending_confirmations
 
 
 # -- atomic bracket entry (2026-08-13, see docs/ARCHITECTURE.md's "Atomic

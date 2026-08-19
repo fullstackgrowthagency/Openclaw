@@ -1,0 +1,133 @@
+# Real-Time Momentum Score (RTMS) default weights/thresholds -- see
+# scoring/rtms.py's module docstring for what RTMS is and how it's
+# deliberately distinct from the Momentum Ignition Score (weights.yaml/
+# momentum_ignition_score.py). Added 2026-08-17 as part of the Real-Time
+# Momentum Qualification Layer (scanner/momentum_qualification.py).
+#
+# These are starting values, NOT backtested -- same "tune from
+# paper-trading results without touching code" intent as weights.yaml.
+# Weights already sum to 1.0 as literal percentages; RTMSConfig.load()
+# still normalizes by dividing by the sum (a no-op given these values, but
+# keeps the same safety net MISConfig.load() has). Bump `version` any time
+# a weight/threshold changes.
+#
+# Deliberately does NOT weight return_5m (the hard momentum-regime gate,
+# checked separately and BEFORE RTMS is even computed -- see
+# scanner/momentum_qualification.py) -- a candidate can only reach RTMS
+# scoring once it's already cleared that hard gate, so re-weighting it
+# heavily here would just be measuring the same thing twice.
+version: "rtms-v1"
+
+weights:
+  momentum_15s_score: 0.20                # freshest short-term momentum signal
+  momentum_30s_score: 0.18
+  momentum_60s_score: 0.17
+  price_acceleration_score: 0.15          # is the short-term move itself speeding up
+  trend_efficiency_score: 0.12            # how "clean" (vs. choppy) the move has been
+  fresh_high_reclaim_score: 0.08          # currently at/near a genuinely fresh high, not a stale one
+  order_flow_trade_velocity_score: 0.06   # buy-side pressure, same TICK-derived signal as MIS's order_flow_score
+  volume_acceleration_score: 0.04         # lowest weight on purpose -- volume alone (with no price follow-through) is exactly what this layer exists to NOT qualify on (see Volume Ignition's stricter strategy_phase_policy below)
+
+# Three-point (min/strong/exceptional) scoring curves -- unlike MIS's plain
+# two-point _scale(value, low, high), RTMS's components use a progressive
+# curve so "barely qualifies" and "extremely strong" read as meaningfully
+# different scores, not both maxed out. See scoring/rtms.py's _scale3 for
+# the ascending version and _fresh_high_reclaim_score for the (descending,
+# seconds-based) special case. Values for momentum_15s/30s/60s_score are in
+# the same % units as MomentumMetrics.return_15s/30s/60s; price_acceleration_score
+# is in the units of MomentumMetrics.acceleration_15s (%/s, change in
+# velocity); trend_efficiency_score is 0-1 (net_move/total_path, unitless).
+component_curves:
+  momentum_15s_score: {min: 0.40, strong: 0.80, exceptional: 1.50}
+  momentum_30s_score: {min: 0.75, strong: 1.50, exceptional: 3.00}
+  momentum_60s_score: {min: 1.25, strong: 2.50, exceptional: 5.00}
+  price_acceleration_score: {min: 0.0, strong: 0.30, exceptional: 0.80}
+  trend_efficiency_score: {min: 0.55, strong: 0.75, exceptional: 0.90}
+  # Not a min/strong/exceptional VALUE curve like the others -- these are
+  # seconds-since-the-recent-high thresholds (smaller/fresher = better, so
+  # the scoring direction is inverted -- see
+  # scoring/rtms.py's _fresh_high_reclaim_score), plus proximity_pct, the
+  # max % below the recent 15s high current price can sit and still score
+  # anything at all.
+  fresh_high_reclaim_score: {min_seconds: 8.0, strong_seconds: 4.0, exceptional_seconds: 2.0, proximity_pct: 0.35}
+  order_flow_trade_velocity_score: {min: -0.1, strong: 0.2, exceptional: 0.5}
+  volume_acceleration_score: {min: 1.3, strong: 2.0, exceptional: 3.0}
+
+# Hard gates and phase-transition thresholds -- see
+# scanner/momentum_qualification.py's MomentumQualificationEngine for
+# exactly where each is applied.
+thresholds:
+  # The hard momentum-regime gate: a candidate cannot enter CONFIRMING at
+  # all until its trailing 5-minute return clears this, regardless of how
+  # high MIS or RTMS reads.
+  min_return_5m_pct: 5.00
+
+  # IGNITING classification -- informational only, never entry-eligible.
+  # A candidate approaching the regime gate with rising short-term
+  # velocity gets flagged this way well before it can actually qualify.
+  igniting_min_return_5m_pct: 4.0
+
+  # IMPULSING quality gate -- ALL of these must hold simultaneously (see
+  # MomentumQualificationEngine._meets_impulsing_quality).
+  impulsing_min_return_60s_pct: 1.25
+  impulsing_min_return_30s_pct: 0.75
+  impulsing_min_return_15s_pct: 0.40
+  impulsing_min_return_5s_pct: 0.0
+  impulsing_min_trend_efficiency_15s: 0.55
+  impulsing_high_proximity_pct: 0.35
+  impulsing_high_freshness_seconds: 4.0
+
+  # PULLING_BACK classification -- a retracement inside these bounds (AND
+  # structurally intact, see scanner/momentum_structure.py) is tracked, not
+  # rejected.
+  max_pullback_retracement_ratio: 0.50
+  max_absolute_pullback_pct: 1.5
+
+  # Tolerance used by momentum_structure_intact when checking whether a
+  # resistance/VWAP/pullback-low level "held" -- a tiny undershoot still
+  # counts as intact rather than requiring an exact hold.
+  structure_reclaim_tolerance_pct: 0.15
+
+  # RTMS gates at each stage of the pipeline.
+  rtms_entry_threshold: 70.0                    # required to start CONFIRMING out of IMPULSING
+  rtms_reaccelerating_threshold: 70.0           # required to (re)start CONFIRMING out of REACCELERATING
+  rtms_final_threshold: 65.0                    # final pre-submission recheck, IMPULSING path
+  rtms_reaccelerating_final_threshold: 60.0     # final pre-submission recheck, REACCELERATING path -- slightly more lenient, since a re-acceleration is by definition still building
+
+  # Minimum classified TICK prints before order_flow_trade_velocity_score
+  # trusts order_flow_imbalance_1m at all -- same reasoning and same
+  # starting value as weights.yaml's min_order_flow_sample_count, kept as
+  # its own value here (not shared) so RTMS's tuning stays independent of
+  # MIS's.
+  min_order_flow_sample_count: 8
+
+  # _reference_price_at's (metrics/rolling.py) tick-lookup tolerance --
+  # kept here (not hardcoded) so it can be tuned alongside everything else
+  # this layer depends on.
+  reference_price_pad_seconds: 1.0
+  reference_price_fallback_pad_seconds: 3.0
+
+# Batch-ranking weights for TradingLoop._submit_ranked_entries' final_entry_rank
+# (see scoring/strategy_quality.py for the strategy_quality component).
+ranking_weights:
+  rtms: 0.65
+  mis: 0.20
+  strategy_quality: 0.15
+
+# Which MomentumPhase values each of the 8 existing strategies is allowed
+# to trigger CONFIRMING from (scanner/momentum_qualification.py's
+# evaluate_trigger). Breakout/reclaim-style strategies naturally allow a
+# healthy pullback-then-reaccelerate re-entry; volatility_contraction has
+# no native structural level to validate a pullback against, and
+# volume_ignition is deliberately restricted to IMPULSING only -- it must
+# no longer qualify on volume/float-velocity/price-above-VWAP alone (see
+# strategy/volume_ignition.py), and never out of a pullback.
+strategy_phase_policy:
+  momentum_breakout: [impulsing, reaccelerating]
+  refined_breakout: [impulsing, reaccelerating]
+  opening_range_breakout: [impulsing, reaccelerating]
+  breakout_pullback: [impulsing, reaccelerating]
+  ignition_pullback: [impulsing, reaccelerating]
+  vwap_reclaim: [impulsing, reaccelerating]
+  volatility_contraction: [impulsing]
+  volume_ignition: [impulsing]

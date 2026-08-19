@@ -45,6 +45,7 @@ from webull_bot.risk.risk_engine import RiskEngine
 from webull_bot.runtime.trading_loop import TradingLoop
 from webull_bot.scanner.broad_scanner import BroadScanner
 from webull_bot.scanner.candidate_watcher import CandidateWatcher
+from webull_bot.scanner.momentum_qualification import MomentumQualificationEngine
 from webull_bot.scanner.trigger_engine import TriggerEngine
 from webull_bot.strategy.breakout_pullback import BreakoutPullbackStrategy
 from webull_bot.strategy.ignition_pullback import IgnitionPullbackStrategy
@@ -211,6 +212,15 @@ def build_trading_loop(
     get_recent_ticks_fn = lambda symbol: (  # noqa: E731
         broker.get_recent_ticks(symbol, max_age_seconds=90.0) if hasattr(broker, "get_recent_ticks") else []
     )
+    if momentum_event_tracker is not None:
+        # scripts/run_dashboard.py's _build_loop_for_user constructs
+        # momentum_event_tracker before this function (and therefore
+        # `broker`) exists -- hand it the same tick-lookup closure now that
+        # it's available, so its 5s/10s/15s outcome windows (see
+        # collection/event_recorder.py's FINE_OUTCOME_WINDOWS) resolve from
+        # real tick timestamps instead of falling back to wall-clock/
+        # current-snapshot precision.
+        momentum_event_tracker.bind_recent_ticks_fn(get_recent_ticks_fn)
 
     # Handed the same closures as the strategies below so its
     # room_to_target_score/order_flow_score MIS components
@@ -241,6 +251,13 @@ def build_trading_loop(
     order_manager = OrderManager(broker, risk_engine, settings)
     position_manager = PositionManager()
 
+    # Real-Time Momentum Qualification Layer (2026-08-17, see
+    # scanner/momentum_qualification.py) -- the Tier 2.5 gate between
+    # trigger_engine's strategy match and CONFIRMING. RTMSConfig.load()
+    # reads scoring/rtms_weights.yaml, same yaml-driven-config pattern as
+    # MISConfig above.
+    momentum_engine = MomentumQualificationEngine()
+
     return TradingLoop(
         broker, universe_provider, broad_scanner, watcher, trigger_engine,
         order_manager, position_manager, risk_engine,
@@ -249,6 +266,7 @@ def build_trading_loop(
         on_state_transition=on_state_transition,
         on_score_computed=on_score_computed,
         momentum_event_tracker=momentum_event_tracker,
+        momentum_engine=momentum_engine,
     )
 
 

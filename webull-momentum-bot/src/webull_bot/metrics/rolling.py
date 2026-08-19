@@ -29,12 +29,14 @@ from .calculations import (
     dollar_volume,
     dollar_volume_from_avg_price,
     float_velocity,
+    mid_or_last,
     order_flow_imbalance,
     price_acceleration,
     price_range_pct,
     price_velocity_pct,
     relative_volume,
     trade_velocity,
+    trend_efficiency,
     volume_acceleration,
 )
 
@@ -176,6 +178,58 @@ def _order_flow_since(ticks: Sequence[TickRecord], now: datetime, minutes: float
     return buy_volume, sell_volume, sample_count, total_count
 
 
+def _reference_price_at(
+    ticks: Sequence[TickRecord], target_time: datetime,
+    *, pad_seconds: float = 1.0, fallback_pad_seconds: float = 3.0,
+) -> Optional[float]:
+    """Price anchor for a historical window boundary (e.g. "the price
+    ~15 seconds ago"), robust to a single abnormal trade print: the
+    median of all trade prices within +/-pad_seconds of target_time, so
+    one bad print among several nearby real ones can't skew the reading.
+    Falls back to the single nearest print within fallback_pad_seconds
+    when nothing landed inside the tighter pad_seconds window (tick
+    activity is sparse right around target_time but not absent nearby).
+    Returns None when nothing is close enough at all -- the tick buffer
+    doesn't reach back this far yet (e.g. a candidate that only just
+    started streaming) -- callers must treat None as "not measurable",
+    never as 0."""
+    close = [t.price for t in ticks if abs((t.timestamp - target_time).total_seconds()) <= pad_seconds]
+    if close:
+        ordered = sorted(close)
+        mid = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[mid]
+        return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+    nearest: Optional[tuple[float, float]] = None  # (distance_seconds, price)
+    for t in ticks:
+        distance = abs((t.timestamp - target_time).total_seconds())
+        if distance > fallback_pad_seconds:
+            continue
+        if nearest is None or distance < nearest[0]:
+            nearest = (distance, t.price)
+    return nearest[1] if nearest is not None else None
+
+
+def _recent_window_high(
+    ticks: Sequence[TickRecord], now: datetime, window_seconds: float = 15.0,
+) -> tuple[Optional[float], Optional[datetime]]:
+    """Highest trade print (and when it happened) among ticks in the
+    trailing window_seconds -- feeds the IMPULSING quality gate's "recent
+    high made within the last ~4s" freshness check and RTMS's
+    fresh_high_reclaim_score (scanner/momentum_qualification.py,
+    scoring/rtms.py). (None, None) when there's no tick data in the
+    window yet."""
+    cutoff = now - timedelta(seconds=window_seconds)
+    best: Optional[tuple[float, datetime]] = None
+    for t in ticks:
+        if t.timestamp < cutoff:
+            continue
+        if best is None or t.price > best[0]:
+            best = (t.price, t.timestamp)
+    return (best[0], best[1]) if best is not None else (None, None)
+
+
 def compute_metrics(
     free_float_shares: Optional[float],
     history: list[MarketSnapshot],
@@ -270,6 +324,53 @@ def compute_metrics(
     )
     trade_velocity_val = trade_velocity(total_ticks_1m, 60.0) if ticks else None
 
+    # -- Real-Time Momentum Qualification Layer (2026-08-17) --------------
+    # Short-window (5s/15s/30s/60s) returns/velocity/acceleration, derived
+    # from the TICK buffer (not `history`'s snapshot windows -- see
+    # MomentumMetrics.return_5s's docstring for why: the snapshot poll
+    # cadence is too coarse on its own for these). mid_now uses the
+    # midpoint-preferring reference price (mid_or_last) as the CURRENT
+    # side of every return calc; historical boundaries use
+    # _reference_price_at's own median-of-nearby-prints robustness
+    # instead, since there's no historical bid/ask to take a midpoint of.
+    mid_now = mid_or_last(latest.bid, latest.ask, latest.last_price)
+
+    def _tick_return_velocity_accel(window_seconds: float) -> tuple[Optional[float], Optional[float], Optional[float]]:
+        ref = _reference_price_at(ticks, now - timedelta(seconds=window_seconds))
+        if ref is None:
+            return None, None, None
+        ret = price_velocity_pct(mid_now, ref)
+        vel = ret / window_seconds
+        prior_ref = _reference_price_at(ticks, now - timedelta(seconds=2 * window_seconds))
+        if prior_ref is None:
+            return ret, vel, None
+        prior_ret = price_velocity_pct(ref, prior_ref)
+        prior_vel = prior_ret / window_seconds
+        return ret, vel, price_acceleration(vel, prior_vel)
+
+    return_5s, velocity_5s, acceleration_5s = _tick_return_velocity_accel(5.0)
+    return_15s, velocity_15s, acceleration_15s = _tick_return_velocity_accel(15.0)
+    return_30s, velocity_30s, acceleration_30s = _tick_return_velocity_accel(30.0)
+    return_60s, velocity_60s, acceleration_60s = _tick_return_velocity_accel(60.0)
+
+    ticks_15s = sorted((t for t in ticks if t.timestamp >= now - timedelta(seconds=15)), key=lambda t: t.timestamp)
+    ticks_60s = sorted((t for t in ticks if t.timestamp >= now - timedelta(seconds=60)), key=lambda t: t.timestamp)
+    trend_eff_15s = trend_efficiency([t.price for t in ticks_15s])
+    trend_eff_60s = trend_efficiency([t.price for t in ticks_60s])
+    recent_high_15s, recent_high_15s_time = _recent_window_high(ticks, now, 15.0)
+
+    # return_2m/3m/5m and trend_efficiency_5m: the tick buffer's ~90s
+    # retention physically can't reach back this far, so these fall back
+    # to the existing snapshot-history windows (w2 new, w3/w5 already
+    # sliced above) -- using mid_or_last on BOTH boundaries, unlike the
+    # legacy price_velocity_3m/5m fields above, which use raw last_price
+    # and are left completely untouched by this addition.
+    w2 = _window(history, now, 2)
+    return_2m = price_velocity_pct(mid_now, mid_or_last(w2[0].bid, w2[0].ask, w2[0].last_price)) if w2 else None
+    return_3m = price_velocity_pct(mid_now, mid_or_last(w3[0].bid, w3[0].ask, w3[0].last_price)) if w3 else None
+    return_5m = price_velocity_pct(mid_now, mid_or_last(w5[0].bid, w5[0].ask, w5[0].last_price)) if w5 else None
+    trend_eff_5m = trend_efficiency([mid_or_last(s.bid, s.ask, s.last_price) for s in w5])
+
     return MomentumMetrics(
         symbol=latest.symbol,
         timestamp=now,
@@ -312,4 +413,24 @@ def compute_metrics(
         sell_volume_1m=sell_volume_1m,
         order_flow_imbalance_1m=order_flow_imb_1m,
         order_flow_sample_count_1m=order_flow_sample_count_1m,
+        return_5s=return_5s,
+        return_15s=return_15s,
+        return_30s=return_30s,
+        return_60s=return_60s,
+        return_2m=return_2m,
+        return_3m=return_3m,
+        return_5m=return_5m,
+        velocity_5s=velocity_5s,
+        velocity_15s=velocity_15s,
+        velocity_30s=velocity_30s,
+        velocity_60s=velocity_60s,
+        acceleration_5s=acceleration_5s,
+        acceleration_15s=acceleration_15s,
+        acceleration_30s=acceleration_30s,
+        acceleration_60s=acceleration_60s,
+        trend_efficiency_15s=trend_eff_15s,
+        trend_efficiency_60s=trend_eff_60s,
+        trend_efficiency_5m=trend_eff_5m,
+        recent_high_15s=recent_high_15s,
+        recent_high_15s_time=recent_high_15s_time,
     )

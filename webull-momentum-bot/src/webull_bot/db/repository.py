@@ -338,6 +338,11 @@ def record_momentum_event(
     record.hod_broken = event.hod_broken
     record.vwap_failed = event.vwap_failed
     record.outcome_label = event.outcome_label.value
+    # -- Real-Time Momentum Qualification Layer (2026-08-17) --------------
+    record.outcome_5s = event.outcome_5s
+    record.outcome_10s = event.outcome_10s
+    record.outcome_15s = event.outcome_15s
+    record.momentum_qualification_at_event = event.momentum_qualification_at_event
     session.flush()
     return record
 

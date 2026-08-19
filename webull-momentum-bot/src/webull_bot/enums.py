@@ -30,6 +30,34 @@ class CandidateState(str, Enum):
     REJECTED = "rejected"  # terminal: disqualified before ever arming (float too large, unsupported security, etc.)
 
 
+class MomentumPhase(str, Enum):
+    """Live price-behavior classification for an ARMED/CONFIRMING candidate,
+    tracked on Candidate.momentum -- INDEPENDENT of CandidateState (see
+    Candidate.momentum's own docstring for why this isn't a new
+    CandidateState value). MIS/CandidateState answer "is this stock
+    structurally interesting"; MomentumPhase answers "what is it doing
+    right now" -- added 2026-08-17 as part of the Real-Time Momentum
+    Qualification Layer (scanner/momentum_qualification.py).
+
+    NONE: no momentum regime established (return_5m below the hard gate).
+    IGNITING: approaching the regime with rising short-term velocity --
+        informational only, never entry-eligible.
+    IMPULSING: in the +5%/5m regime AND meeting the short-term
+        velocity/quality thresholds -- entry-eligible.
+    PULLING_BACK: a controlled, structurally-intact retracement from an
+        active impulse -- NOT entry-eligible, but not a rejection either;
+        the candidate keeps being tracked, waiting for REACCELERATING.
+    REACCELERATING: buyers demonstrably returning after a healthy
+        pullback (positive/rising short-term velocity, pullback micro-high
+        reclaimed, RTMS rising) -- entry-eligible, same as IMPULSING.
+    """
+    NONE = "none"
+    IGNITING = "igniting"
+    IMPULSING = "impulsing"
+    PULLING_BACK = "pulling_back"
+    REACCELERATING = "reaccelerating"
+
+
 class TradeBlockReason(str, Enum):
     """A *temporary* condition currently preventing an otherwise-valid
     candidate from being trade-eligible -- distinct from CandidateState.REJECTED,
@@ -198,6 +226,18 @@ class RiskEventType(str, Enum):
     # unprotected entry), the candidate reverts to ARMED, and this event
     # is what tells a human why nothing was opened.
     BRACKET_ENTRY_REJECTED = "bracket_entry_rejected"
+    # Real-Time Momentum Qualification Layer (2026-08-17, see
+    # scanner/momentum_qualification.py). Raised by
+    # TradingLoop._submit_ranked_entries' final pre-submission recheck when
+    # a candidate that already passed CONFIRMING and won a ranking slot no
+    # longer qualifies by the time its turn to actually submit comes up
+    # (RTMS decayed, phase fell back to PULLING_BACK, structure broke,
+    # etc.) -- momentum can fade during the up-to-70s confirmation+slot-wait
+    # window, and this is what prevents submitting a stale entry on a setup
+    # that no longer looks the way it did when it first qualified. The
+    # candidate reverts to ARMED and does NOT consume the open slot -- the
+    # next-ranked candidate gets a chance instead.
+    MOMENTUM_QUALIFICATION_LOST = "momentum_qualification_lost"
 
 
 class MomentumOutcome(str, Enum):

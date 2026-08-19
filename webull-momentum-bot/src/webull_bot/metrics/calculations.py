@@ -116,6 +116,40 @@ def order_flow_imbalance(buy_volume: float, sell_volume: float) -> float:
     return safe_div(buy_volume - sell_volume, buy_volume + sell_volume, default=0.0)
 
 
+def mid_or_last(bid: float, ask: float, last_price: float) -> float:
+    """Bid/ask midpoint when the quote is valid (same validity rule as
+    bid_ask_spread: both sides positive, ask >= bid), else the last trade
+    price. Used as the reference price for the momentum-qualification
+    layer's tick-derived returns (metrics/rolling.py) -- the midpoint is
+    less susceptible to a single abnormal trade print than the raw last
+    trade price, per the explicit "avoid a single abnormal print creating
+    a false momentum signal" requirement."""
+    if bid > 0 and ask > 0 and ask >= bid:
+        return (bid + ask) / 2.0
+    return last_price
+
+
+def trend_efficiency(prices: Sequence[float]) -> float:
+    """Directional trend efficiency over an ordered price sequence:
+    net_move / total_path. 1.0 means every tick moved in the same
+    direction (a clean, efficient move); a low value means price
+    round-tripped a lot to get where it ended up (choppy, not a real
+    impulse). Long-only: net_move is floored at 0.0 (price at or below
+    where the window started scores 0 efficiency, never a negative one --
+    there's no such thing as "efficiently moving down" for a long entry
+    gate). Returns 0.0 for fewer than 2 prices or a flat/zero-length path
+    -- 0.0 is the correct "no measurable efficiency" reading here, not an
+    ambiguous default, so this deliberately does not go through
+    safe_div's own default= parameter."""
+    if len(prices) < 2:
+        return 0.0
+    net_move = max(0.0, prices[-1] - prices[0])
+    total_path = sum(abs(prices[i] - prices[i - 1]) for i in range(1, len(prices)))
+    if total_path <= 0:
+        return 0.0
+    return net_move / total_path
+
+
 def price_range_pct(prices: Sequence[float]) -> float:
     """High-low range of a list of prices as a % of their average -- a
     coarse volatility proxy for detecting a tightening/consolidating range

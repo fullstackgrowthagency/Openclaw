@@ -165,14 +165,21 @@ class BacktestEngine:
         if signal is None:
             return
 
-        # trigger_engine.on_snapshot already moved `candidate` to CONFIRMING
-        # -- stash it for _poll_confirmation on a later bar rather than
-        # submitting immediately. Mirrors runtime/trading_loop.py's
+        # trigger_engine.on_snapshot is a pure "which strategy matches"
+        # function (2026-08-17, see that module's docstring -- the Real-Time
+        # Momentum Qualification Layer needed to run its own gate on a fired
+        # signal before deciding whether CONFIRMING should even start, which
+        # this backtest engine deliberately does NOT model -- see this
+        # module's docstring's "NOT modeled yet" list) -- it no longer
+        # transitions the candidate itself, so this does it directly.
+        # Stashed for _poll_confirmation on a later bar rather than
+        # submitting immediately, mirroring runtime/trading_loop.py's
         # _start_confirmation -- see this module's docstring for why a
         # backtest has to mirror the same entry-selectivity behavior live
         # trading uses (2026-08-13 rework, see docs/ARCHITECTURE.md), not a
         # simplified stand-in that would make backtest results diverge from
         # what actually happens live.
+        transition(candidate, CandidateState.CONFIRMING, now=snapshot.timestamp, reason=f"{signal.strategy_name} triggered")
         self._pending_confirmations[candidate.symbol] = _PendingConfirmation(
             signal=signal, started_at=snapshot.timestamp, reference_price=signal.reference_price, snapshot=snapshot,
         )

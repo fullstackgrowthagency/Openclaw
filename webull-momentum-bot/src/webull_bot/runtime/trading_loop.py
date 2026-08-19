@@ -118,24 +118,27 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Iterable, Optional
 
 from ..brokers.webull.retry import CallPriority
 from ..collection.event_recorder import MomentumEventTracker
-from ..enums import CandidateState, ExitReason, OrderSide, OrderStatus, RiskEventType, SignalAction
+from ..enums import CandidateState, ExitReason, MomentumPhase, OrderSide, OrderStatus, RiskEventType, SignalAction
 from ..execution.order_manager import BracketEntryRejected, BracketSubmissionResult, OrderManager, OrderRejected
 from ..interfaces.broker import BrokerClient
 from ..data.universe import SymbolUniverseProvider
 from ..market_hours import is_within_closing_buffer, is_within_core_trading_hours
 from ..metrics.volume_profile import compute_runway_consumed_pct, evaluate_target_clearance
-from ..models import Candidate, MarketSnapshot, MomentumEvent, MomentumScore, Order, Position, Signal, Trade
+from ..models import Candidate, MarketSnapshot, MomentumEvent, MomentumScore, MomentumState, Order, Position, Signal, Trade
 from ..position.position_manager import PositionManager
 from ..risk.risk_engine import RiskEngine
 from ..scanner.broad_scanner import BroadScanner
 from ..scanner.candidate_watcher import CandidateWatcher
+from ..scanner.momentum_qualification import MomentumQualificationEngine, TriggerDecision
+from ..scanner.momentum_structure import momentum_structure_intact
 from ..scanner.trigger_engine import TriggerEngine
+from ..scoring.strategy_quality import strategy_quality_score
 from ..state_machine import new_candidate, transition
 
 logger = logging.getLogger(__name__)
@@ -623,6 +626,7 @@ class TradingLoop:
         on_state_transition: Optional[Callable[[str, CandidateState, CandidateState, datetime], None]] = None,
         on_score_computed: Optional[Callable[[str, MomentumScore], None]] = None,
         momentum_event_tracker: Optional[MomentumEventTracker] = None,
+        momentum_engine: Optional[MomentumQualificationEngine] = None,
     ):
         self.broker = broker
         self.universe_provider = universe_provider
@@ -655,6 +659,14 @@ class TradingLoop:
         # looking outcome windows over up to 15 minutes) -- see
         # collection/event_recorder.py.
         self.momentum_event_tracker = momentum_event_tracker
+        # Real-Time Momentum Qualification Layer (2026-08-17, see
+        # scanner/momentum_qualification.py) -- the Tier 2.5 gate between
+        # trigger_engine's strategy match and CONFIRMING. None (the
+        # default) falls back to a fresh default-config engine rather than
+        # skipping the gate entirely -- there is no "off" switch by design,
+        # matching every other stage of this pipeline (MIS, resistance
+        # checks, ...), none of which are optional either.
+        self.momentum_engine = momentum_engine or MomentumQualificationEngine()
 
         self.candidates: dict[str, Candidate] = {}
         # Guards structural access (insert/copy) to self.candidates only --
@@ -1414,6 +1426,14 @@ class TradingLoop:
 
         if candidate.state == CandidateState.COOLDOWN:
             if now - candidate.last_updated_at >= timedelta(seconds=self.config.cooldown_seconds):
+                # Real-Time Momentum Qualification Layer (2026-08-17): the
+                # other genuine "starting fresh" seam (see
+                # MomentumState's docstring for the other one,
+                # ARMED->HEATING_UP in candidate_watcher.py) -- a candidate
+                # coming out of cooldown must not inherit stale impulse/
+                # pullback/phase state from a completely different,
+                # already-closed-out momentum episode.
+                candidate.momentum = MomentumState()
                 transition(candidate, CandidateState.WATCHING, now=now, reason="cooldown expired")
             return
 
@@ -1471,13 +1491,30 @@ class TradingLoop:
         # has checked it against the pre-bar level (see candidate_watcher.py).
         self.watcher.update_resistance(candidate, snapshot)
 
+        if candidate.state == CandidateState.ARMED:
+            # Real-Time Momentum Qualification Layer (2026-08-17, see
+            # scanner/momentum_qualification.py): runs every ARMED tick,
+            # not just when a strategy fires -- this is what lets
+            # phase/RTMS/impulse-pullback tracking stay current between a
+            # strategy's own re-fires, which aren't guaranteed every tick.
+            self.momentum_engine.on_snapshot(candidate, signal, snapshot, now)
+
         if signal is None:
             return
-        momentum_event = self._register_momentum_event(candidate, signal, now)
-        # trigger_engine.on_snapshot already transitioned this candidate to
-        # CONFIRMING as a side effect -- this just stashes what
-        # _poll_confirmation needs, it does NOT submit an order (see
-        # enums.CandidateState.CONFIRMING's docstring).
+
+        # trigger_engine.on_snapshot is a pure "which strategy matches"
+        # function now (2026-08-17) -- it no longer transitions the
+        # candidate to CONFIRMING itself. That decision belongs to the
+        # momentum-qualification gate below: a signal firing below the
+        # momentum regime, or during an unhealthy pullback, must leave the
+        # candidate ARMED, not move it to CONFIRMING and immediately fail
+        # it. Every fired signal is logged via _register_momentum_event
+        # regardless of outcome, satisfying the "log every trigger, entered
+        # or not" requirement.
+        decision = self.momentum_engine.evaluate_trigger(candidate, signal, snapshot, now)
+        momentum_event = self._register_momentum_event(candidate, signal, now, decision=decision)
+        if decision.outcome != "start_confirmation":
+            return
         self._start_confirmation(candidate, signal, snapshot, now, momentum_event=momentum_event)
 
     def _notify_score(self, candidate: Candidate) -> None:
@@ -1504,7 +1541,10 @@ class TradingLoop:
                 logger.exception("on_state_transition callback raised for %s.", candidate.symbol)
         self._persisted_transition_counts[candidate.symbol] = total
 
-    def _register_momentum_event(self, candidate: Candidate, signal: Signal, now: datetime) -> Optional[MomentumEvent]:
+    def _register_momentum_event(
+        self, candidate: Candidate, signal: Signal, now: datetime,
+        decision: Optional[TriggerDecision] = None,
+    ) -> Optional[MomentumEvent]:
         if self.momentum_event_tracker is None:
             return None
         event = MomentumEvent(
@@ -1515,6 +1555,7 @@ class TradingLoop:
             score_at_event=candidate.latest_score.score if candidate.latest_score else None,
             metrics_at_event=candidate.latest_metrics,
             price_at_event=signal.reference_price,
+            momentum_qualification_at_event=self._momentum_qualification_snapshot(candidate, decision),
         )
         try:
             self.momentum_event_tracker.register(event)
@@ -1522,6 +1563,28 @@ class TradingLoop:
             logger.exception("momentum_event_tracker.register failed for %s.", candidate.symbol)
             return None
         return event
+
+    def _momentum_qualification_snapshot(
+        self, candidate: Candidate, decision: Optional[TriggerDecision],
+    ) -> dict:
+        """Real-Time Momentum Qualification Layer (2026-08-17): dump of
+        candidate.momentum (phase, RTMS + components, impulse/pullback
+        state, active_strategy_name, structure_intact) plus this specific
+        trigger's accept/reject decision, if any -- stashed onto
+        MomentumEvent.momentum_qualification_at_event so every logged
+        trigger (entered or not) carries full qualification context for
+        later offline analysis. `confirmation_price`/`actual_entry_price`
+        are added later, in place, by _poll_confirmation's success path and
+        _submit_entry respectively -- see MomentumEvent's docstring."""
+        data = asdict(candidate.momentum)
+        for key, value in list(data.items()):
+            if isinstance(value, datetime):
+                data[key] = value.isoformat()
+        data["phase"] = candidate.momentum.phase.value
+        if decision is not None:
+            data["decision_outcome"] = decision.outcome
+            data["decision_reason"] = decision.reason
+        return data
 
     def _notify_order_update(self, order: Order) -> None:
         if self.on_order_update is not None:
@@ -1534,11 +1597,18 @@ class TradingLoop:
         self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot, now: datetime,
         momentum_event: Optional[MomentumEvent] = None,
     ) -> None:
-        """trigger_engine.on_snapshot already moved `candidate` to CONFIRMING
-        as a side effect before calling here -- this just records what
-        _poll_confirmation needs to evaluate the window on later ticks.
-        Does NOT submit an order; see enums.CandidateState.CONFIRMING's
-        docstring for why."""
+        """Moves `candidate` to CONFIRMING and records what _poll_confirmation
+        needs to evaluate the window on later ticks. Does NOT submit an
+        order; see enums.CandidateState.CONFIRMING's docstring for why.
+
+        (2026-08-17) Previously trigger_engine.on_snapshot performed the
+        ARMED->CONFIRMING transition itself as a side effect before this was
+        ever called. It's a pure function now (see that module's docstring)
+        -- the momentum-qualification gate (momentum_engine.evaluate_trigger,
+        called in _process_candidate_inner) decides whether a fired signal
+        ever reaches this method at all, so the transition happens here,
+        the sole remaining place ARMED->CONFIRMING actually occurs."""
+        transition(candidate, CandidateState.CONFIRMING, now=now, reason=f"{signal.strategy_name} triggered, momentum qualified")
         # A genuinely fresh trigger (this is only ever called from
         # trigger_engine's real trigger path in _process_candidate_inner,
         # never from a bracket-entry retry -- see that handling in
@@ -1562,25 +1632,41 @@ class TradingLoop:
         since CandidateWatcher.update()'s transition logic has no branch
         that matches CONFIRMING.
 
-        Three ways this ends:
-        1. FAILS before the window elapses -- price reversed past
-           confirmation_max_pullback_pct, MIS fell back below the armed
-           threshold, the spread widened back out, or (2026-08-14)
-           TICK-derived order flow shows net sell-side pressure past
-           order_flow_sell_pressure_threshold with enough classified
-           volume to trust it -- RiskEventType.CONFIRMATION_FAILED, revert
-           to ARMED, must re-trigger fresh (not resume this same clock).
-        2. Window elapses clean -- recompute stop/target from the ACTUAL
-           current price, not signal.reference_price (which by now is
-           confirmation_window_seconds stale), preserving the ORIGINAL
-           strategy's risk/reward shape rather than recomputing generically.
-           Then run the target-clearance/resistance-runway hard gates; a
-           failure here reverts to ARMED with RiskEventType
-           .RESISTANCE_BEFORE_TARGET. Passing queues the candidate onto
-           self._ready_to_enter for this tick's batch-ranking pass
-           (_submit_ranked_entries) instead of submitting immediately --
-           see that method for why.
-        3. Already cleared confirmation on an earlier tick but never won a
+        Four ways this ends:
+        1. FAILS -- price reversed past confirmation_max_pullback_pct (and
+           the momentum-qualification layer did NOT already validate that
+           exact reversal as a healthy pullback -- see below), MIS fell
+           back below the armed threshold, the spread widened back out,
+           (2026-08-14) TICK-derived order flow shows net sell-side
+           pressure past order_flow_sell_pressure_threshold with enough
+           classified volume to trust it, or (2026-08-17) the 5m momentum
+           regime itself failed, or the momentum engine's own
+           impulse/pullback tracking already reset the phase to NONE
+           (structure broken / retracement too large, on its own more
+           sophisticated criteria) -- RiskEventType.CONFIRMATION_FAILED,
+           revert to ARMED, must re-trigger fresh (not resume this same
+           clock).
+        2. PULLING BACK (2026-08-17, see scanner/momentum_qualification.py)
+           -- a controlled, structurally-intact retracement from the
+           triggering impulse. NOT a failure: the confirmation stays
+           pending (this method just keeps returning "still waiting" every
+           tick) until either REACCELERATING is detected (falls through to
+           case 3 below) or `total_timeout` elapses with no separate,
+           longer clock for this state -- see this class's own
+           confirmation_ready_max_wait_seconds docstring.
+        3. Window elapses clean, phase is IMPULSING or REACCELERATING --
+           recompute stop/target from the ACTUAL current price, not
+           signal.reference_price (which by now is confirmation_window_seconds
+           stale), preserving the ORIGINAL strategy's risk/reward shape
+           rather than recomputing generically. Then run the
+           target-clearance/resistance-runway hard gates; a failure here
+           reverts to ARMED with RiskEventType.RESISTANCE_BEFORE_TARGET.
+           Passing queues the candidate onto self._ready_to_enter for this
+           tick's batch-ranking pass (_submit_ranked_entries) instead of
+           submitting immediately -- see that method for why (which now
+           also includes a final momentum-qualification recheck
+           immediately before actually submitting).
+        4. Already cleared confirmation on an earlier tick but never won a
            slot -- keeps re-queuing onto self._ready_to_enter (recomputed
            fresh off the current price every tick) until either it wins a
            slot or confirmation_ready_max_wait_seconds' extra grace period
@@ -1595,10 +1681,42 @@ class TradingLoop:
         pending.snapshot = snapshot
 
         self.watcher.update(candidate, snapshot)
+        # Real-Time Momentum Qualification Layer (2026-08-17): keep
+        # phase/RTMS/impulse-pullback tracking current while CONFIRMING
+        # too, not just while ARMED -- a pullback that starts
+        # mid-confirmation needs the same tracking one starting
+        # pre-trigger would get (see scanner/momentum_qualification.py).
+        self.momentum_engine.on_snapshot(candidate, pending.signal, snapshot, now)
         self._notify_score(candidate)
 
         elapsed_seconds = (now - pending.started_at).total_seconds()
         total_timeout = self.config.confirmation_window_seconds + self.config.confirmation_ready_max_wait_seconds
+
+        def _timing_str() -> str:
+            # Distinguish "still inside the base confirmation window" from
+            # "already cleared it and is now waiting for a slot" (see this
+            # method's own docstring, case 3) -- these checks run every
+            # tick across the WHOLE total_timeout span (window + wait), not
+            # just the first confirmation_window_seconds, so elapsed_seconds
+            # routinely exceeds the window on a candidate that's simply
+            # queued for a slot. Always phrasing it as "Ns into a Ms
+            # window" when N > M read as if the window itself had somehow
+            # run over, which it never does -- this makes the wait-phase
+            # case explicit instead.
+            if elapsed_seconds <= self.config.confirmation_window_seconds:
+                return f"{elapsed_seconds:.0f}s into a {self.config.confirmation_window_seconds:.0f}s window"
+            wait_elapsed = elapsed_seconds - self.config.confirmation_window_seconds
+            return (
+                f"cleared the {self.config.confirmation_window_seconds:.0f}s window, "
+                f"{wait_elapsed:.0f}s into waiting for a position slot"
+            )
+
+        def _cancel(failure: str, event_type: RiskEventType = RiskEventType.CONFIRMATION_FAILED) -> None:
+            reason = f"{candidate.symbol} failed confirmation ({failure}, {_timing_str()})"
+            candidate.entry_block_reason = reason
+            self._pending_confirmations.pop(candidate.symbol, None)
+            self.risk_engine.record_operational_event(event_type, candidate.symbol, reason, now)
+            transition(candidate, CandidateState.ARMED, now=now, reason=reason)
 
         reversed_past_tolerance = snapshot.last_price < pending.reference_price * (
             1 - self.config.confirmation_max_pullback_pct / 100.0
@@ -1627,37 +1745,59 @@ class TradingLoop:
             and candidate.latest_metrics.order_flow_sample_count_1m >= self.config.order_flow_min_sample_count_for_gate
             and candidate.latest_metrics.order_flow_imbalance_1m <= self.config.order_flow_sell_pressure_threshold
         )
-        if reversed_past_tolerance or mis_faded or spread_too_wide or sell_pressure_detected:
+        # Real-Time Momentum Qualification Layer: the 5m momentum regime
+        # itself materially failing during confirmation is just as hard a
+        # failure as the four checks above -- no amount of "still
+        # technically confirming" matters once the underlying premise
+        # (this is a real momentum runner) no longer holds.
+        regime_failed = (
+            candidate.latest_metrics is not None and candidate.latest_metrics.return_5m is not None
+            and candidate.latest_metrics.return_5m < self.momentum_engine.config.thresholds["min_return_5m_pct"]
+        )
+
+        # These four are ALWAYS hard failures -- never excused by a
+        # pullback classification (see the spec's own "structural failure"
+        # list: MIS collapsing, spread blowing out, sustained sell
+        # pressure, or the regime itself failing all remain hard fails
+        # regardless of what phase tracking currently reads).
+        if mis_faded or spread_too_wide or sell_pressure_detected or regime_failed:
             failure = (
-                "price reversed" if reversed_past_tolerance
+                "5m momentum regime failed" if regime_failed
                 else "MIS faded" if mis_faded
                 else "spread widened" if spread_too_wide
                 else "sell-side order flow"
             )
-            # Distinguish "still inside the base confirmation window" from
-            # "already cleared it and is now waiting for a slot" (see this
-            # method's own docstring, case 3) -- these checks run every
-            # tick across the WHOLE total_timeout span (window + wait), not
-            # just the first confirmation_window_seconds, so elapsed_seconds
-            # routinely exceeds the window on a candidate that's simply
-            # queued for a slot. Always phrasing it as "Ns into a Ms
-            # window" when N > M read as if the window itself had somehow
-            # run over, which it never does -- this makes the wait-phase
-            # case explicit instead.
-            if elapsed_seconds <= self.config.confirmation_window_seconds:
-                timing = f"{elapsed_seconds:.0f}s into a {self.config.confirmation_window_seconds:.0f}s window"
-            else:
-                wait_elapsed = elapsed_seconds - self.config.confirmation_window_seconds
-                timing = (
-                    f"cleared the {self.config.confirmation_window_seconds:.0f}s window, "
-                    f"{wait_elapsed:.0f}s into waiting for a position slot"
-                )
-            reason = f"{candidate.symbol} failed confirmation ({failure}, {timing})"
-            candidate.entry_block_reason = reason
-            self._pending_confirmations.pop(candidate.symbol, None)
-            self.risk_engine.record_operational_event(RiskEventType.CONFIRMATION_FAILED, candidate.symbol, reason, now)
-            transition(candidate, CandidateState.ARMED, now=now, reason=reason)
+            _cancel(failure)
             return
+
+        # A raw price reversal past confirmation_max_pullback_pct is
+        # DIFFERENT: scanner/momentum_qualification.py's own, more
+        # sophisticated retracement/structure check already ran (via the
+        # on_snapshot call above) and may have already validated this
+        # exact reversal as a healthy, structurally-intact PULLING_BACK --
+        # in which case this cruder price-vs-original-trigger check is
+        # superseded, not an independent second failure. Only cancels here
+        # when the momentum engine did NOT reach that classification (a
+        # pullback outside its own tolerance already reset the phase back
+        # to NONE, handled below; PULLING_BACK survives untouched).
+        if reversed_past_tolerance and candidate.momentum.phase != MomentumPhase.PULLING_BACK:
+            _cancel("price reversed")
+            return
+
+        if candidate.momentum.phase == MomentumPhase.NONE:
+            # The momentum engine already reset this impulse on its own
+            # criteria (structure broken or retracement too large) even
+            # though none of the four checks above happened to catch it --
+            # still a hard failure, not something to keep waiting on.
+            _cancel("momentum setup invalidated (structure broken or retracement too large)")
+            return
+
+        if candidate.momentum.phase == MomentumPhase.PULLING_BACK:
+            candidate.entry_block_reason = (
+                f"{candidate.symbol}: pulling back during confirmation "
+                f"(retracement {candidate.momentum.current_retracement_pct:.1f}%), structure intact -- "
+                "waiting for reacceleration, not cancelled"
+            )
 
         if elapsed_seconds > total_timeout:
             reason = (
@@ -1669,9 +1809,26 @@ class TradingLoop:
             transition(candidate, CandidateState.ARMED, now=now, reason=reason)
             return
 
-        if elapsed_seconds < self.config.confirmation_window_seconds:
-            return  # still waiting, nothing has failed yet
+        if (
+            candidate.momentum.phase in (MomentumPhase.PULLING_BACK, MomentumPhase.IGNITING)
+            or elapsed_seconds < self.config.confirmation_window_seconds
+        ):
+            # Still waiting -- either inside the base window with nothing
+            # having failed yet, pulling back and not yet ready
+            # (REACCELERATING is what promotes out of this, never just
+            # "the window elapsed"), or IGNITING: the regime can be active
+            # (return_5m already >= min_return_5m_pct -- regime_failed above
+            # only catches it falling BELOW that bar, not merely not yet
+            # clearing the separate, stricter IMPULSING quality gate) while
+            # quality still isn't there yet -- e.g. the "recent high" isn't
+            # fresh/close enough. IGNITING must never fall through to the
+            # success path below just because the confirmation clock ran
+            # out; it needs the SAME promotion to IMPULSING/REACCELERATING
+            # everything else here does.
+            return
 
+        # phase is guaranteed IMPULSING or REACCELERATING here -- every
+        # other phase either returned above (PULLING_BACK, IGNITING, NONE).
         original = pending.signal
         confirmed_entry = snapshot.last_price
         stop_pct = (
@@ -1724,6 +1881,8 @@ class TradingLoop:
         # instead of submitting immediately, so a simultaneously-confirming
         # BETTER candidate this same tick can win a scarce slot instead of
         # losing purely to iteration order (see _submit_ranked_entries).
+        if pending.momentum_event is not None and pending.momentum_event.momentum_qualification_at_event is not None:
+            pending.momentum_event.momentum_qualification_at_event["confirmation_price"] = confirmed_entry
         pending.signal = Signal(
             symbol=original.symbol,
             action=original.action,
@@ -1739,6 +1898,70 @@ class TradingLoop:
         if candidate not in self._ready_to_enter:
             self._ready_to_enter.append(candidate)
 
+    def _final_entry_rank(self, candidate: Candidate, signal: Signal) -> float:
+        """0.65*RTMS + 0.20*MIS + 0.15*strategy_quality -- see
+        scoring/rtms_weights.yaml's ranking_weights and
+        scoring/strategy_quality.py. Replaces the plain-MIS sort key
+        _submit_ranked_entries used before the Real-Time Momentum
+        Qualification Layer (2026-08-17) existed: RTMS ("is this stock
+        moving right now") dominates the ranking on purpose, since two
+        candidates can carry similar MIS while one is actively impulsing
+        and the other has already gone quiet."""
+        weights = self.momentum_engine.config.ranking_weights
+        rtms = candidate.momentum.rtms if candidate.momentum.rtms is not None else 0.0
+        mis = candidate.latest_score.score if candidate.latest_score else 0.0
+        quality = strategy_quality_score(
+            signal, candidate, min_risk_reward_ratio=self.risk_engine.config.min_risk_reward_ratio,
+        )
+        return weights["rtms"] * rtms + weights["mis"] * mis + weights["strategy_quality"] * quality
+
+    def _final_pretrade_recheck(
+        self, candidate: Candidate, pending: "PendingConfirmation", now: datetime,
+    ) -> Optional[str]:
+        """Runs immediately before a ranked, slot-winning candidate actually
+        submits an order -- the spec's own final pre-submission recheck.
+        Freshness matters here specifically: a candidate can win a slot in
+        _submit_ranked_entries' ranking and then still sit queued for
+        several ticks (case 4 of _poll_confirmation's docstring) behind a
+        faster-confirming rival before a slot actually opens up, by which
+        point its setup may no longer hold. Returns None if every check
+        passes, otherwise a short human-readable reason -- never raises."""
+        metrics = candidate.latest_metrics
+        state = candidate.momentum
+        th = self.momentum_engine.config.thresholds
+
+        if candidate.latest_score is None or candidate.latest_score.score < self.watcher.config.armed_score_threshold:
+            return f"MIS faded below {self.watcher.config.armed_score_threshold:.1f}"
+
+        if metrics is None or metrics.return_5m is None or metrics.return_5m < th["min_return_5m_pct"]:
+            return f"5m return no longer clears the {th['min_return_5m_pct']:.1f}% regime gate"
+
+        if state.phase not in (MomentumPhase.IMPULSING, MomentumPhase.REACCELERATING):
+            return f"momentum phase is {state.phase.value}, not entry-eligible"
+
+        rtms_floor = (
+            th["rtms_reaccelerating_final_threshold"] if state.phase == MomentumPhase.REACCELERATING
+            else th["rtms_final_threshold"]
+        )
+        if state.rtms is None or state.rtms < rtms_floor:
+            return f"RTMS {state.rtms} below {rtms_floor:.1f}"
+
+        active_strategy = state.active_strategy_name or pending.signal.strategy_name
+        if not momentum_structure_intact(candidate, active_strategy, pending.snapshot):
+            return "structural level no longer held"
+
+        if metrics.spread_pct > self.watcher.config.max_spread_pct:
+            return "spread too wide"
+
+        if pending.signal.suggested_target is not None:
+            clearance = evaluate_target_clearance(
+                pending.signal.reference_price, pending.signal.suggested_target, candidate.static_resistance_levels,
+            )
+            if not clearance.target_clear:
+                return "target no longer clear of resistance"
+
+        return None
+
     def _submit_ranked_entries(self, now: datetime) -> None:
         """Runs once per _process_all_candidates pass, after every candidate
         has already been processed this tick -- see self._ready_to_enter's
@@ -1747,13 +1970,18 @@ class TradingLoop:
         iteration order, not the best one available, whenever multiple
         candidates wanted a scarce position slot at the same time.
 
-        Ranks by current MIS (candidate.latest_score.score) descending and
-        submits the best min(available_slots, len(ready)) of them. The rest
-        are simply left CONFIRMING, not discarded -- _poll_confirmation
-        re-queues them onto self._ready_to_enter again next tick (with a
-        freshly recomputed entry price), so a candidate that loses out this
-        tick naturally gets re-ranked against whatever's ready next tick
-        instead of having to re-earn confirmation from scratch."""
+        Ranks by _final_entry_rank (2026-08-17: RTMS/MIS/strategy_quality
+        blend, replacing the old plain-MIS sort key) descending, then walks
+        the full ranked list -- not just the top `available_slots` -- since
+        a candidate can now fail _final_pretrade_recheck and be skipped
+        WITHOUT consuming a slot, letting the next-ranked candidate still
+        get a chance this same tick. Zero candidates passing the recheck
+        means zero trades this tick, per the spec's explicit "never fill a
+        slot just because one is open." A candidate that fails the recheck
+        reverts to ARMED (RiskEventType.MOMENTUM_QUALIFICATION_LOST), not
+        left dangling in CONFIRMING/_ready_to_enter. Any candidate that
+        neither wins a slot nor fails the recheck is simply left CONFIRMING
+        -- _poll_confirmation re-queues it next tick exactly as before."""
         if not self._ready_to_enter:
             return
 
@@ -1764,16 +1992,36 @@ class TradingLoop:
         if available_slots <= 0:
             return
 
-        ranked = sorted(
-            self._ready_to_enter, key=lambda c: c.latest_score.score if c.latest_score else 0.0, reverse=True,
-        )
-        for candidate in ranked[:available_slots]:
-            pending = self._pending_confirmations.pop(candidate.symbol, None)
+        def _rank_key(candidate: Candidate) -> float:
+            pending = self._pending_confirmations.get(candidate.symbol)
+            return self._final_entry_rank(candidate, pending.signal) if pending is not None else 0.0
+
+        ranked = sorted(self._ready_to_enter, key=_rank_key, reverse=True)
+        slots_filled = 0
+        for candidate in ranked:
+            if slots_filled >= available_slots:
+                break
+            pending = self._pending_confirmations.get(candidate.symbol)
             if pending is None:
                 continue  # shouldn't happen -- defensive only
+
+            failure_reason = self._final_pretrade_recheck(candidate, pending, now)
+            if failure_reason is not None:
+                self._pending_confirmations.pop(candidate.symbol, None)
+                reason = f"{candidate.symbol}: failed final pre-submission momentum recheck ({failure_reason})"
+                candidate.entry_block_reason = reason
+                self.risk_engine.record_operational_event(
+                    RiskEventType.MOMENTUM_QUALIFICATION_LOST, candidate.symbol, reason, now,
+                )
+                transition(candidate, CandidateState.ARMED, now=now, reason=reason)
+                self._flush_state_transitions(candidate)
+                continue
+
+            self._pending_confirmations.pop(candidate.symbol, None)
             transition(candidate, CandidateState.TRIGGERED, now=now, reason="confirmed and ranked for entry")
             self._submit_entry(candidate, pending.signal, pending.snapshot, now, momentum_event=pending.momentum_event)
             self._flush_state_transitions(candidate)
+            slots_filled += 1
 
     def _submit_entry(
         self, candidate: Candidate, signal: Signal, snapshot: MarketSnapshot, now: datetime,
@@ -1945,6 +2193,8 @@ class TradingLoop:
             # object and will persist the change on its next on_snapshot()
             # call for this symbol (see _register_momentum_event).
             momentum_event.was_traded = True
+            if momentum_event.momentum_qualification_at_event is not None:
+                momentum_event.momentum_qualification_at_event["actual_entry_price"] = signal.reference_price
         order = bracket_result.entry_order
         self._notify_order_update(order)
         if bracket_result.stop_order is not None:

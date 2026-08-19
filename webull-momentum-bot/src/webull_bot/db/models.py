@@ -392,3 +392,13 @@ class MomentumEventRecord(Base):
     hod_broken: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     vwap_failed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     outcome_label: Mapped[str] = mapped_column(String(16), default="unknown")
+
+    # -- Real-Time Momentum Qualification Layer (2026-08-17) ------------------
+    # See models.MomentumEvent's own docstring on these four fields --
+    # additive nullable columns, picked up by db/session.py's sync_schema()
+    # on next startup with no Alembic migration needed, same as every other
+    # column in this table.
+    outcome_5s: Mapped[dict | None] = mapped_column(_json_type(), nullable=True)
+    outcome_10s: Mapped[dict | None] = mapped_column(_json_type(), nullable=True)
+    outcome_15s: Mapped[dict | None] = mapped_column(_json_type(), nullable=True)
+    momentum_qualification_at_event: Mapped[dict | None] = mapped_column(_json_type(), nullable=True)

@@ -14,13 +14,22 @@ second. Now it moves to CONFIRMING instead: the Signal is still returned
 (so TradingLoop can stash it), but TradingLoop's confirmation-window logic
 (_poll_confirmation) is what actually decides whether this ever becomes a
 real order.
+
+Real-Time Momentum Qualification Layer (2026-08-17, see
+scanner/momentum_qualification.py): on_snapshot no longer transitions the
+candidate to CONFIRMING itself -- it's a pure "which strategy matches"
+function now, returning just the Signal (or None). TradingLoop is the sole
+owner of the ARMED->CONFIRMING decision, since it now needs to run the
+momentum-qualification gate on a fired Signal BEFORE deciding whether
+CONFIRMING should start at all (a signal firing below the momentum regime,
+or during an unhealthy pullback, must leave the candidate ARMED, not move
+it to CONFIRMING and immediately fail it).
 """
 from __future__ import annotations
 
 from ..enums import CandidateState
 from ..interfaces.strategy import Strategy
 from ..models import Candidate, MarketSnapshot, Signal
-from ..state_machine import transition
 
 
 class TriggerEngine:
@@ -34,11 +43,5 @@ class TriggerEngine:
         for strategy in self.strategies:
             signal = strategy.on_snapshot(candidate, snapshot)
             if signal is not None:
-                transition(
-                    candidate,
-                    CandidateState.CONFIRMING,
-                    now=snapshot.timestamp,
-                    reason=f"{strategy.name} v{strategy.version} generated {signal.action.value}; awaiting confirmation",
-                )
                 return signal
         return None

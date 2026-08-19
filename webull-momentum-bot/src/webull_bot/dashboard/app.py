@@ -305,6 +305,27 @@ def create_app(
                 # at least once.
                 "components": asdict(candidate.latest_score.components) if candidate.latest_score else None,
                 "score_weights_version": candidate.latest_score.weights_version if candidate.latest_score else None,
+                # Real-Time Momentum Qualification Layer (2026-08-17, see
+                # scanner/momentum_qualification.py) -- debug/diagnostic
+                # visibility into the live-momentum gate separate from MIS
+                # above. momentum_qualified/block_reason mirror the most
+                # recent evaluate_trigger decision for this candidate;
+                # phase/rtms/returns/impulse-pullback fields are updated
+                # every ARMED/CONFIRMING tick regardless of whether a
+                # strategy actually fired.
+                "momentum_phase": candidate.momentum.phase.value,
+                "rtms": candidate.momentum.rtms,
+                "return_5m": candidate.latest_metrics.return_5m if candidate.latest_metrics else None,
+                "return_15s": candidate.latest_metrics.return_15s if candidate.latest_metrics else None,
+                "trend_efficiency_15s": candidate.latest_metrics.trend_efficiency_15s if candidate.latest_metrics else None,
+                "impulse_high": candidate.momentum.impulse_high,
+                "impulse_size_pct": candidate.momentum.impulse_size_pct,
+                "current_retracement_pct": candidate.momentum.current_retracement_pct,
+                "pullback_low": candidate.momentum.pullback_low,
+                "pullback_micro_high": candidate.momentum.pullback_micro_high,
+                "structure_intact": candidate.momentum.structure_intact,
+                "momentum_qualified": candidate.momentum.momentum_qualified,
+                "momentum_block_reason": candidate.momentum.block_reason,
             })
         rows.sort(key=lambda r: r["score"] or 0, reverse=True)
         return rows

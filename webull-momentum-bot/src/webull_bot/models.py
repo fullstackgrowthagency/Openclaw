@@ -14,6 +14,7 @@ from .enums import (
     CandidateState,
     ExitReason,
     MomentumOutcome,
+    MomentumPhase,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -169,6 +170,169 @@ class MomentumMetrics:
     # a symbol with e.g. one lone classified print in the window doesn't
     # score/gate on a statistically meaningless reading.
     order_flow_sample_count_1m: int = 0
+
+    # -- Real-Time Momentum Qualification Layer (2026-08-17, see
+    # scanner/momentum_qualification.py and scoring/rtms.py) -- short-window
+    # returns/velocity/acceleration derived from TICK-level trade prints
+    # (WebullBrokerClient.get_recent_ticks, ~90s/2000-tick retention),
+    # distinct from price_velocity_1m/3m/5m/15m above (which are
+    # snapshot-history derived and untouched by this addition -- no
+    # existing consumer of those fields is affected). return_5s/15s/30s/60s
+    # use the tick buffer; return_2m/3m/5m fall back to the existing
+    # snapshot-history windows (the tick buffer's ~90s retention can't
+    # reach 2-5 minutes back) -- see metrics/rolling.py's compute_metrics
+    # for exactly how each is derived. All are None (never 0.0) whenever
+    # there isn't enough history yet to measure the window -- every
+    # downstream momentum gate must treat None as "not met" (fail-closed),
+    # never as a neutral/zero reading.
+    return_5s: Optional[float] = None
+    return_15s: Optional[float] = None
+    return_30s: Optional[float] = None
+    return_60s: Optional[float] = None
+    return_2m: Optional[float] = None
+    return_3m: Optional[float] = None
+    return_5m: Optional[float] = None
+
+    # Price velocity (return_pct / window_seconds) at each short window --
+    # reuses calculations.price_velocity_pct's own output divided by the
+    # window length, not a separate calculation.
+    velocity_5s: Optional[float] = None
+    velocity_15s: Optional[float] = None
+    velocity_30s: Optional[float] = None
+    velocity_60s: Optional[float] = None
+
+    # Change in velocity itself vs. the immediately preceding same-length
+    # window (calculations.price_acceleration, reused verbatim -- not
+    # reimplemented) -- is the short-term move itself speeding up or
+    # slowing down. None whenever either the current or the prior window's
+    # velocity isn't measurable yet.
+    acceleration_5s: Optional[float] = None
+    acceleration_15s: Optional[float] = None
+    acceleration_30s: Optional[float] = None
+    acceleration_60s: Optional[float] = None
+
+    # Directional trend efficiency (calculations.trend_efficiency:
+    # net_move / total_path, long-only) over the trailing window -- how
+    # "clean" the move has been, not just how big. 0.0 (not None) when the
+    # window doesn't have enough ticks yet -- see trend_efficiency's own
+    # docstring for why 0.0 is the correct "no measurable efficiency"
+    # reading here, unlike the return_*/velocity_*/acceleration_* fields
+    # above. trend_efficiency_5m is logged for future research only --
+    # deliberately not used as a hard gate anywhere yet.
+    trend_efficiency_15s: float = 0.0
+    trend_efficiency_60s: float = 0.0
+    trend_efficiency_5m: float = 0.0
+
+    # The highest trade print in the trailing 15 seconds, and when it
+    # happened -- feeds the IMPULSING quality gate's "current price within
+    # X% of the recent high, and that high is fresh (made within the last
+    # ~4s)" check, and RTMS's fresh_high_reclaim_score. None whenever the
+    # tick buffer doesn't have any prints in that window yet.
+    recent_high_15s: Optional[float] = None
+    recent_high_15s_time: Optional[datetime] = None
+
+
+@dataclass
+class RTMSComponents:
+    """Each sub-score is normalized to 0-100 before weighting in the RTMS
+    calculator (scoring/rtms.py) -- same shape/contract as
+    MomentumScoreComponents below, but for the Real-Time Momentum Score
+    (RTMS), a live "is this stock moving right now" score deliberately
+    separate from MIS's "is this stock structurally interesting" one. Any
+    component may be None when its underlying metric isn't measurable yet
+    (e.g. order_flow_trade_velocity_score before enough classified TICK
+    volume exists) -- compute_rtms excludes a None component from the
+    weighted average and renormalizes over the remaining active weights,
+    identical to momentum_ignition_score.compute_score's own contract."""
+    momentum_15s_score: Optional[float]
+    momentum_30s_score: Optional[float]
+    momentum_60s_score: Optional[float]
+    price_acceleration_score: Optional[float]
+    trend_efficiency_score: Optional[float]
+    fresh_high_reclaim_score: Optional[float]
+    order_flow_trade_velocity_score: Optional[float]
+    volume_acceleration_score: Optional[float]
+
+
+@dataclass
+class RTMSScore:
+    symbol: str
+    timestamp: datetime
+    score: float  # 0-100 final Real-Time Momentum Score
+    components: RTMSComponents
+    weights_version: str
+
+
+@dataclass
+class MomentumState:
+    """Live price-behavior tracking for an ARMED/CONFIRMING candidate --
+    see enums.MomentumPhase's docstring for why this is a field on
+    Candidate rather than a new CandidateState. Reset to a fresh
+    MomentumState() at the two genuine "starting over" seams
+    (ARMED->HEATING_UP cool-off in candidate_watcher.py, COOLDOWN->WATCHING
+    in trading_loop.py's _process_candidate_inner) -- deliberately NOT
+    reset on a CONFIRMING->ARMED revert caused by a healthy pullback
+    (TradingLoop._poll_confirmation), since that candidate needs its
+    impulse/pullback tracking preserved to detect REACCELERATING on the
+    very next tick."""
+    phase: MomentumPhase = MomentumPhase.NONE
+    phase_changed_at: Optional[datetime] = None
+
+    # The current momentum impulse -- see scanner/momentum_qualification.py
+    # for exactly how these ratchet/reset. impulse_high tracks the running
+    # peak since impulse_start_price; impulse_size_pct/current_retracement_pct/
+    # retracement_ratio are recomputed each tick from these two.
+    impulse_start_price: Optional[float] = None
+    impulse_start_time: Optional[datetime] = None
+    impulse_high: Optional[float] = None
+    impulse_high_time: Optional[datetime] = None
+    impulse_size_pct: Optional[float] = None
+    current_retracement_pct: Optional[float] = None
+    retracement_ratio: Optional[float] = None
+
+    # Set only while phase is PULLING_BACK/REACCELERATING -- pullback_low is
+    # the lowest price seen since the pullback began (distinct from, and
+    # generally shallower than, Candidate.pullback_low, which is the
+    # BreakoutPullbackStrategy's OWN tracked low used for its trigger
+    # condition); pullback_micro_high is the short-term reclaim level
+    # tracked during stabilization, used to detect REACCELERATING without
+    # requiring a full reclaim of impulse_high.
+    pullback_low: Optional[float] = None
+    pullback_low_time: Optional[datetime] = None
+    pullback_micro_high: Optional[float] = None
+
+    # The strategy whose structural level (resistance/VWAP/pullback low)
+    # governs the CURRENT impulse's pullback validation
+    # (scanner/momentum_structure.py) -- set when the impulse starts (from
+    # whichever strategy's signal was firing then, if any) and reused on
+    # later ticks where no fresh signal fires (a strategy doesn't
+    # necessarily re-fire every tick during a pullback, but the phase
+    # tracking here runs every tick regardless). None if the impulse
+    # started from pure price action before any of the 8 strategies had
+    # actually fired yet -- momentum_structure_intact is skipped (treated
+    # as intact) in that case, same fail-open contract as an unknown
+    # resistance level.
+    active_strategy_name: Optional[str] = None
+
+    # This tick's RTMS (and the components that produced it), plus the
+    # prior tick's RTMS/5s-velocity -- needed for REACCELERATING's "RTMS
+    # rising"/"velocity increasing" checks, which compare against the
+    # immediately preceding tick, not a fixed window.
+    rtms: Optional[float] = None
+    rtms_components: Optional[RTMSComponents] = None
+    prior_rtms: Optional[float] = None
+    prior_velocity_5s: Optional[float] = None
+
+    # Whether the firing strategy's own structural level (resistance/VWAP/
+    # pullback low -- see scanner/momentum_structure.py) is currently
+    # intact; None before it's ever been checked this arm cycle.
+    structure_intact: Optional[bool] = None
+
+    # Dashboard-visible summary of the most recent qualification decision
+    # -- see scanner/momentum_qualification.py's TriggerDecision.
+    momentum_qualified: bool = False
+    block_reason: Optional[str] = None
+    last_evaluated_at: Optional[datetime] = None
 
 
 @dataclass
@@ -367,6 +531,11 @@ class Candidate:
     # on the dashboard so "why didn't this obviously-hot candidate trade" has
     # a real answer instead of silence. Cleared on the next successful arm.
     entry_block_reason: Optional[str] = None
+
+    # -- Real-Time Momentum Qualification Layer (2026-08-17) ------------------
+    # Live phase/RTMS/impulse-pullback tracking -- see MomentumState's own
+    # docstring for the full contract and its two reset seams.
+    momentum: MomentumState = field(default_factory=MomentumState)
 
 
 @dataclass
@@ -579,3 +748,27 @@ class MomentumEvent:
     hod_broken: Optional[bool] = None
     vwap_failed: Optional[bool] = None
     outcome_label: MomentumOutcome = MomentumOutcome.UNKNOWN
+
+    # -- Real-Time Momentum Qualification Layer (2026-08-17) ------------------
+    # Finer-grained forward-outcome windows than outcome_30s/1m/3m/5m/10m/15m
+    # above -- needed because a momentum-qualification-specific trigger can
+    # fail or succeed within seconds, well before the 30s window fills in.
+    # Same "filled in asynchronously as time passes" contract as the
+    # outcome_* fields above (see collection/event_recorder.py's
+    # MomentumEventTracker) -- these three additionally include mfe_pct/
+    # mae_pct in their dict at each checkpoint (reusing the tracker's
+    # already-running max_favorable_excursion_pct/max_adverse_excursion_pct
+    # values, not a separate computation).
+    outcome_5s: Optional[dict] = None
+    outcome_10s: Optional[dict] = None
+    outcome_15s: Optional[dict] = None
+    # Snapshot of the momentum-qualification decision at the moment this
+    # event was recorded (phase, RTMS + components, impulse/pullback state,
+    # strategy name, decision, rejection_reason if any), plus
+    # confirmation_price/actual_entry_price filled in later at the two
+    # checkpoints where those become known (TradingLoop._poll_confirmation's
+    # success path, TradingLoop._submit_entry) -- see
+    # scanner/momentum_qualification.py. None for any event recorded before
+    # this layer existed, or (rarely) if the qualification engine wasn't
+    # available at the call site.
+    momentum_qualification_at_event: Optional[dict] = None
