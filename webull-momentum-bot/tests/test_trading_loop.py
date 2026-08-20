@@ -4046,6 +4046,59 @@ def test_poll_broker_bracket_finalizes_partial_exit_on_target_fill_and_reprotect
     assert broker._lone_stops[0].order_type == OrderType.TRAILING_STOP
 
 
+def test_poll_broker_bracket_finalizes_full_exit_on_a_full_quantity_target_fill():
+    # Real incident (2026-08-20): OrderManager.submit_entry_signal now
+    # sizes the entry-time atomic bracket's target leg at the FULL entry
+    # quantity, not half (Webull rejected the half/full mismatch outright
+    # -- see docs/ARCHITECTURE.md's "Atomic bracket entry" section). A
+    # target-leg fill covering the position's full quantity must be
+    # treated as a genuine EXIT, not a SCALE_OUT -- unlike
+    # test_poll_broker_bracket_finalizes_partial_exit_on_target_fill_and_reprotects_remainder
+    # above (whose target leg, placed by _attach_broker_bracket, is
+    # genuinely half). Simulates the entry-time bracket directly (bypasses
+    # _attach_broker_bracket, which always halves) since nothing else in
+    # this test file constructs a full-quantity resting target leg.
+    broker = _RestingBroker()
+    loop, candidate = _armed_candidate_setup(broker)
+    from webull_bot.state_machine import transition
+
+    transition(candidate, CandidateState.CONFIRMING)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00,
+        stop_price=4.50, target_price=5.50, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+        broker_stop_order_id="stop-full-0", broker_target_order_id="target-full-0",
+    )
+    loop._positions["TEST"] = position
+    broker._resting_orders["stop-full-0"] = Order(
+        symbol="TEST", side=OrderSide.SELL, order_type=OrderType.STOP, quantity=10,
+        stop_price=4.50, status=OrderStatus.SUBMITTED, broker_order_id="stop-full-0",
+    )
+    target_order = Order(
+        symbol="TEST", side=OrderSide.SELL, order_type=OrderType.LIMIT, quantity=10,
+        limit_price=5.50, status=OrderStatus.FILLED, broker_order_id="target-full-0",
+    )
+    broker._resting_orders["target-full-0"] = target_order
+
+    trades = []
+    loop.on_trade_closed = trades.append
+    handled = loop._poll_broker_bracket(candidate, position, _IN_HOURS_NOW)
+
+    assert handled is True
+    assert "TEST" not in loop._positions  # fully closed, not left open at quantity 0
+    assert candidate.state.value == "cooldown"
+    assert len(trades) == 1
+    assert trades[0].exit_reason == ExitReason.PROFIT_TARGET  # not PARTIAL_PROFIT_TARGET
+    assert trades[0].quantity == 10
+    # No re-protection attempted -- there's no remainder to protect.
+    assert len(broker._brackets) == 0
+    assert len(broker._lone_stops) == 0
+
+
 def test_sync_broker_protective_orders_replaces_stop_when_price_moved():
     broker = _RestingBroker()
     loop, candidate = _armed_candidate_setup(broker)

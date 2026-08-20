@@ -2875,13 +2875,21 @@ class TradingLoop:
         itself failed -- left for the next tick, same as any other broker
         poll failure in this loop).
 
-        The target leg (when present) is always sized at half the position
-        (see _attach_broker_bracket) and never re-armed after one partial,
-        so a target-leg fill is unconditionally a SCALE_OUT, never a full
-        EXIT -- unlike the pure-software path, there's no "too small to
-        split, downgrade to a full exit" branch to replicate here since
-        _attach_broker_bracket already made that same call before ever
-        placing the leg.
+        The target leg's size varies by which call placed it (2026-08-20):
+        _attach_broker_bracket (every re-arm after the first) always sizes
+        it at half the position, so a fill there is a SCALE_OUT -- but
+        OrderManager.submit_entry_signal's very first, entry-time atomic
+        bracket sizes BOTH legs at the FULL entry quantity (see that
+        method's docstring for why: Webull's atomic MASTER+STOP_LOSS+
+        STOP_PROFIT combo rejects a half/full mismatch between those two
+        legs with OAUTH_OPENAPI_ERROR_STOP_LOSS_QUANTITY -- confirmed live
+        2026-08-20, HUIZ/ZSTK). So a target-leg fill is only a SCALE_OUT
+        when it covers LESS than the currently-tracked position.quantity;
+        a fill covering the full remaining quantity (the common case for
+        every position's very first bracket) is a genuine full EXIT, not
+        a partial -- routing that through _finalize_partial_exit instead
+        would leave position.quantity at 0 without ever actually removing
+        the position from tracking.
 
         Checks _get_open_orders_for_tick's batched result first: a leg
         still listed there is confirmed still resting with NO individual
@@ -2910,10 +2918,21 @@ class TradingLoop:
             if status_order.status != OrderStatus.FILLED:
                 continue
 
-            exit_reason = ExitReason.PARTIAL_PROFIT_TARGET if is_target else ExitReason.STOP_LOSS
+            # A target-leg fill is only a partial SCALE_OUT when it covers
+            # LESS than the position's full tracked quantity (a
+            # half-sized re-arm from _attach_broker_bracket) -- a fill
+            # covering the full quantity (the entry-time atomic bracket's
+            # target leg, sized full per submit_entry_signal's docstring)
+            # is a genuine full EXIT. See this method's own docstring.
+            is_partial_target = is_target and status_order.quantity < position.quantity
+            exit_reason = (
+                ExitReason.PARTIAL_PROFIT_TARGET if is_partial_target
+                else ExitReason.PROFIT_TARGET if is_target
+                else ExitReason.STOP_LOSS
+            )
             exit_signal = Signal(
                 symbol=candidate.symbol,
-                action=SignalAction.SCALE_OUT if is_target else SignalAction.EXIT,
+                action=SignalAction.SCALE_OUT if is_partial_target else SignalAction.EXIT,
                 generated_at=now,
                 strategy_name=position.strategy_name,
                 strategy_version="broker_bracket",

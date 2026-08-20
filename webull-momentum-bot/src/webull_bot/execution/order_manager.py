@@ -346,26 +346,37 @@ class OrderManager:
             updated_at=signal.generated_at,
             strategy_name=signal.strategy_name,
         )
-        # Mirrors TradingLoop._attach_broker_bracket's own halving rule
-        # exactly: the take-profit leg is a partial exit (sell half, keep
-        # half riding the stop/trailing-stop -- see PositionManager's
-        # SCALE_OUT design), so a target leg is only included at all if
-        # half the entry quantity rounds to at least one whole share.
-        target_quantity = int(decision.max_shares // 2)
-        target_order = None
-        if target_quantity >= 1:
-            target_order = Order(
-                symbol=signal.symbol,
-                side=exit_side,
-                order_type=OrderType.LIMIT,
-                quantity=target_quantity,
-                limit_price=signal.suggested_target,
-                status=OrderStatus.PENDING,
-                client_order_id=str(uuid.uuid4()),
-                created_at=signal.generated_at,
-                updated_at=signal.generated_at,
-                strategy_name=signal.strategy_name,
-            )
+        # Sized at the FULL entry quantity, matching stop_order above --
+        # NOT halved the way TradingLoop._attach_broker_bracket's later
+        # re-arms are (see that method's own halving rule for the
+        # still-intact partial-scale-out design used there). Real incident
+        # (2026-08-20, HUIZ/ZSTK): Webull's atomic MASTER+STOP_LOSS+
+        # STOP_PROFIT combo (place_bracket_entry) rejected a half-target/
+        # full-stop mismatch outright -- HTTP 417
+        # OAUTH_OPENAPI_ERROR_STOP_LOSS_QUANTITY, "The number of take-
+        # profit orders and the number of stop-loss orders must be the
+        # same" -- meaning neither trade went through at all (this
+        # method's whole contract is "no fallback to unprotected entry on
+        # a genuine rejection"). Matching both legs to the full quantity
+        # trades away the entry-time bracket's own partial-profit-take (a
+        # target hit now closes the whole position immediately, rather
+        # than selling half and letting the remainder ride) in exchange
+        # for the combo actually being accepted -- explicit user decision.
+        # See runtime/trading_loop.py's _poll_broker_bracket, which now
+        # determines SCALE_OUT vs a full EXIT from the ACTUAL filled
+        # quantity rather than assuming every target-leg fill is a half.
+        target_order = Order(
+            symbol=signal.symbol,
+            side=exit_side,
+            order_type=OrderType.LIMIT,
+            quantity=decision.max_shares,
+            limit_price=signal.suggested_target,
+            status=OrderStatus.PENDING,
+            client_order_id=str(uuid.uuid4()),
+            created_at=signal.generated_at,
+            updated_at=signal.generated_at,
+            strategy_name=signal.strategy_name,
+        )
 
         try:
             entry_result, stop_result, target_result = place_bracket_entry(entry_order, stop_order, target_order)

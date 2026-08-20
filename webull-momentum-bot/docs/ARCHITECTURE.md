@@ -2445,13 +2445,12 @@ call, `combo_type` distinguishing which is which.
   path here), raises a new `RiskEventType.BRACKET_ENTRY_REJECTED` event,
   and reverts the candidate to `ARMED`. No order, no position, no
   fallback -- exactly the explicit instruction.
-- The take-profit leg is sized at HALF the entry quantity, mirroring
-  `_attach_broker_bracket`'s own existing halving rule (target hit is a
-  partial exit -- see "Position management" -- not a full close); the
-  stop-loss leg always covers the full quantity. An entry too small to
-  split into a whole-share partial exit gets a two-leg `MASTER`+`STOP_LOSS`
-  combo with no take-profit leg at all, same as the existing
-  `_attach_broker_bracket` behavior for that edge case.
+- **Both legs are sized at the FULL entry quantity (2026-08-20, see
+  incident below)** -- NOT the half-target/full-stop split
+  `_attach_broker_bracket`'s own later re-arms still use (target hit
+  there is a partial exit -- see "Position management" -- not a full
+  close). A target-leg fill on the entry-time bracket therefore closes
+  the whole position immediately, not half of it.
 
 **Threading the result through fill confirmation.** The three Order
 objects `place_bracket_entry` returns have to survive until the entry
@@ -2579,13 +2578,62 @@ before finally giving up:
 
 See `tests/test_webull_broker_client.py` (`place_bracket_entry` payload
 shape and rejection propagation), `tests/test_order_manager.py`
-(`submit_entry_signal`'s capability gate, halving rule, no-fallback
-contract, and `test_submit_entry_signal_falls_back_to_plain_entry_outside_core_hours`
+(`submit_entry_signal`'s capability gate, matching-quantity legs,
+no-fallback contract, and
+`test_submit_entry_signal_falls_back_to_plain_entry_outside_core_hours`
 for the core-hours gate), and `tests/test_trading_loop.py`
 (`test_confirm_entry_filled_uses_atomic_bracket_result_without_calling_attach_broker_bracket`,
 `test_submit_entry_schedules_a_retry_on_bracket_entry_rejection`,
 `test_submit_entry_retry_recomputes_and_reattempts_on_the_next_tick`,
 `test_submit_entry_gives_up_after_retries_exhausted_with_no_fallback`).
+
+**Real incident (2026-08-20): the original half-target/full-stop split
+was rejected outright by Webull, blocking every entry that reached this
+path.** HUIZ and ZSTK both hit `HTTP 417
+OAUTH_OPENAPI_ERROR_STOP_LOSS_QUANTITY, "The number of take-profit
+orders and the number of stop-loss orders must be the same."` -- meaning
+neither trade went through at all, per this feature's own "no fallback"
+contract. The original design (documented above until this incident)
+assumed Webull's atomic `MASTER`+`STOP_LOSS`+`STOP_PROFIT` combo would
+tolerate a `STOP_LOSS` leg covering the full entry quantity paired with a
+`STOP_PROFIT` leg covering only half (mirroring `_attach_broker_bracket`'s
+later, separately-confirmed-working `combo_type=OCO` shape) -- that
+assumption was never actually live-verified for THIS specific combo type,
+and turned out to be wrong. Webull's exact validation rule (count of
+`STOP_PROFIT`/`STOP_LOSS` legs, their share quantities, or both) isn't
+spelled out in their public docs and wasn't worth further live
+experimentation to pin down exactly, given real entries were being
+blocked.
+
+**Fix (explicit user decision between two options -- see this section's
+"both legs FULL quantity" note above):** `OrderManager.submit_entry_signal`
+now sizes the `STOP_LOSS` and `STOP_PROFIT` legs identically, both at the
+full entry quantity, guaranteeing the combo is accepted regardless of
+which exact rule Webull enforces. The traded-away alternative (keep both
+legs at half quantity, immediately follow up with a second, independent
+resting stop order for the untargeted remainder) would have preserved the
+original partial-scale-out-at-target design, but requires tracking a
+SECOND resting stop order per position -- today `Position` only carries
+one `broker_stop_order_id`/`broker_target_order_id` pair, and every piece
+of protective-order management (breakeven/trailing sync, cancellation on
+exit, external-close cleanup) assumes exactly one of each. Revisit that
+option if the full-quantity-target behavior below turns out to cost more
+in missed upside than it's worth.
+
+**Consequence: `_poll_broker_bracket` (`runtime/trading_loop.py`) can no
+longer assume every target-leg fill is a half-position `SCALE_OUT`.**
+`_attach_broker_bracket`'s later re-arms (after a partial exit, or a
+breakeven/trailing resync) still size the target leg at half -- unchanged,
+that's a different Webull combo type (`OCO`, no `MASTER` leg, separately
+confirmed live 2026-08-11) not known to share this constraint. So a
+target-leg fill is now classified as a genuine full `EXIT` (not
+`PARTIAL_PROFIT_TARGET`/`SCALE_OUT`) whenever the filled order's own
+`quantity` covers the position's full remaining size, and only treated as
+a partial when it covers less -- determined from the actual filled
+quantity each time, not a blanket assumption. Getting this wrong in
+either direction is a real bug: treating a full close as a `SCALE_OUT`
+would leave `position.quantity` at `0` without ever removing the position
+from tracking.
 
 ## Extra position-based confirmation for a TRIGGERED entry (2026-08-11)
 

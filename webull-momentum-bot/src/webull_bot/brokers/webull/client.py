@@ -1676,13 +1676,19 @@ class WebullBrokerClient(BrokerClient):
         hours exists without a resting broker-side bracket already placed
         against it.
 
-        target_order may be None -- mirrors
-        TradingLoop._attach_broker_bracket's own halving rule (the
-        take-profit leg is a partial exit, sells half the position, so an
-        entry too small to split into a whole-share partial exit gets a
-        MASTER+STOP_LOSS combo with no take-profit leg at all, rather than
-        a target leg for zero shares). Webull's combo_type table allows
-        0-1 STOP_PROFIT legs per combo.
+        target_order may still be None -- this method itself places
+        whatever combo of legs it's handed, MASTER+STOP_LOSS alone if so.
+        In practice OrderManager.submit_entry_signal (the only real
+        caller) always passes a real target_order now: an earlier version
+        omitted it for a too-small-to-halve position (mirroring
+        TradingLoop._attach_broker_bracket's own halving rule), but that
+        combo_type=STOP_LOSS-with-no-STOP_PROFIT shape, along with a
+        half-target/full-stop quantity mismatch, was confirmed live
+        (2026-08-20, HUIZ/ZSTK) to be rejected outright by Webull's atomic
+        combo -- HTTP 417 OAUTH_OPENAPI_ERROR_STOP_LOSS_QUANTITY, "The
+        number of take-profit orders and the number of stop-loss orders
+        must be the same." submit_entry_signal now always sizes both legs
+        at the full entry quantity instead -- see that method's docstring.
 
         No try/except here, deliberately: a rejection must propagate to
         the caller as a hard failure. Per explicit instruction (2026-08-13):

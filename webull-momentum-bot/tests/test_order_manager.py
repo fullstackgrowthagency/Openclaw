@@ -517,17 +517,24 @@ def test_submit_entry_signal_uses_atomic_bracket_when_supported():
     assert result.target_order.side == OrderSide.SELL
     assert result.target_order.order_type == OrderType.LIMIT
     assert result.target_order.limit_price == 11.0
-    # Target leg is a partial exit -- HALF the entry quantity (mirrors
-    # TradingLoop._attach_broker_bracket's own halving rule).
-    assert result.target_order.quantity == int(result.entry_order.quantity // 2)
+    # Target leg matches the stop leg's FULL entry quantity (2026-08-20,
+    # real incident: Webull rejected a half-target/full-stop mismatch with
+    # OAUTH_OPENAPI_ERROR_STOP_LOSS_QUANTITY for HUIZ/ZSTK -- see
+    # docs/ARCHITECTURE.md's "Atomic bracket entry" section). Deliberately
+    # NOT halved the way TradingLoop._attach_broker_bracket's later re-arms
+    # still are -- a target hit on this entry-time bracket now closes the
+    # whole position, not half of it.
+    assert result.target_order.quantity == result.entry_order.quantity
     assert len(broker._brackets) == 1
 
 
-def test_submit_entry_signal_omits_target_leg_when_quantity_too_small_to_split():
-    broker = _BracketEntryBroker()
+def test_submit_entry_signal_matches_target_and_stop_quantity_even_for_a_tiny_position():
     # A tiny position size ceiling forces decision.max_shares down to 1
-    # share, whose half (0) is too small to give the target leg any real
-    # quantity at all.
+    # share -- unlike the pre-2026-08-20 halving design, the target leg is
+    # still included (never omitted) and still matches the stop leg's
+    # quantity exactly, since Webull's atomic combo rejects a mismatch
+    # between the two regardless of how small the position is.
+    broker = _BracketEntryBroker()
     risk_engine = RiskEngine(RiskConfig(max_position_size_pct=0.05))
     om = OrderManager(broker, risk_engine, get_settings())
     result = om.submit_entry_signal(
@@ -535,8 +542,9 @@ def test_submit_entry_signal_omits_target_leg_when_quantity_too_small_to_split()
         now=datetime(2026, 8, 11, 15, 0, 0),
     )
     assert result.entry_order.quantity == 1
-    assert result.stop_order is not None  # stop still protects the full (1-share) position
-    assert result.target_order is None
+    assert result.stop_order is not None
+    assert result.target_order is not None
+    assert result.target_order.quantity == result.stop_order.quantity == 1
 
 
 def test_submit_entry_signal_raises_bracket_entry_rejected_on_broker_rejection():
