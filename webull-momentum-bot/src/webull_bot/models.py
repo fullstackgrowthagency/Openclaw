@@ -730,6 +730,17 @@ class Position:
     # flag from a completely different episode.
     unprotected_alert_logged: bool = False
 
+    # True once TradingLoop._maybe_raise_stale_market_data_alert has
+    # already raised a RiskEventType.POSITION_MARKET_DATA_STALE event for
+    # this position's current dead-feed stretch -- same one-alert-per-
+    # episode idea as unprotected_alert_logged above, just keyed off
+    # get_last_known_price_age_seconds instead of the broker-bracket
+    # state. Reset to False by _manage_position the moment a fresh
+    # snapshot is cached again, so a LATER stretch without live data can
+    # raise its own fresh alert rather than staying suppressed by a flag
+    # from an earlier, already-resolved one.
+    market_data_stale_alert_logged: bool = False
+
 
 @dataclass
 class Trade:

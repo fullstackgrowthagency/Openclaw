@@ -2291,6 +2291,110 @@ def test_manage_position_wires_the_unprotected_alert_check_end_to_end():
     assert any(e.event_type == RiskEventType.POSITION_UNPROTECTED_TOO_LONG.value for e in loop.risk_engine.events)
 
 
+def test_maybe_raise_stale_market_data_alert_fires_after_the_threshold():
+    # Real incident (2026-08-20): a position's price feed died silently --
+    # neither streaming nor the REST fallback in _process_candidate_inner
+    # produced a fresh snapshot -- for several minutes, with nothing
+    # surfacing why beyond the dashboard's own passive staleness badge.
+    # This is the visibility fix for that gap, mirroring
+    # _maybe_raise_unprotected_position_alert's exact shape.
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
+    stale_at = _IN_HOURS_NOW
+    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+
+    loop._maybe_raise_stale_market_data_alert(candidate, stale_at)
+    assert loop.risk_engine.events == []
+
+    loop._maybe_raise_stale_market_data_alert(
+        candidate, stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1),
+    )
+
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.POSITION_MARKET_DATA_STALE.value]
+    assert len(alerts) == 1
+    assert alerts[0].symbol == "TEST"
+    assert loop._positions["TEST"].market_data_stale_alert_logged is True
+
+
+def test_maybe_raise_stale_market_data_alert_only_fires_once_per_episode():
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
+    stale_at = _IN_HOURS_NOW
+    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    past_threshold = stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1)
+
+    loop._maybe_raise_stale_market_data_alert(candidate, past_threshold)
+    loop._maybe_raise_stale_market_data_alert(candidate, past_threshold + timedelta(seconds=30))
+
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.POSITION_MARKET_DATA_STALE.value]
+    assert len(alerts) == 1
+
+
+def test_maybe_raise_stale_market_data_alert_is_a_noop_without_any_cached_snapshot():
+    # No tick has ever been processed for this symbol yet (e.g. the instant
+    # after adoption/entry) -- get_last_known_price_age_seconds has nothing
+    # to measure an age against, so this must never fire on a false "stale
+    # forever" reading of a position that just hasn't started yet.
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
+
+    loop._maybe_raise_stale_market_data_alert(
+        candidate, _IN_HOURS_NOW + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1),
+    )
+
+    assert not any(e.event_type == RiskEventType.POSITION_MARKET_DATA_STALE.value for e in loop.risk_engine.events)
+
+
+def test_process_candidate_inner_wires_the_stale_market_data_alert_on_snapshot_failure(monkeypatch):
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
+    stale_at = _IN_HOURS_NOW
+    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+
+    def _boom(symbol):
+        raise RuntimeError("Webull returned no snapshot for TEST")
+
+    monkeypatch.setattr(broker, "get_snapshot", _boom)
+
+    loop._process_candidate_inner(
+        candidate, stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1),
+    )
+
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.POSITION_MARKET_DATA_STALE.value]
+    assert len(alerts) == 1
+    assert alerts[0].symbol == "TEST"
+
+
+def test_manage_position_resets_the_stale_market_data_alert_flag():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
+    position = loop._positions["TEST"]
+    position.market_data_stale_alert_logged = True
+
+    fresh_snapshot = _snapshot(_IN_HOURS_NOW, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    loop._manage_position(candidate, fresh_snapshot, _IN_HOURS_NOW)
+
+    assert position.market_data_stale_alert_logged is False
+
+
 def test_engage_kill_switch_and_flatten_blocks_new_entries_immediately():
     broker = PaperBrokerClient()
     broker.connect()

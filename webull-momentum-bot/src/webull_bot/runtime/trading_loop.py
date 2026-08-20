@@ -427,6 +427,21 @@ class TradingLoopConfig:
     # processing; this value instead governs whether the DASHBOARD should
     # keep presenting an old cached number as if it's current.
     last_known_price_stale_after_seconds: float = 30.0
+    # How old a MANAGING/ENTERED position's cached _last_known_snapshots
+    # entry can get before _maybe_raise_stale_market_data_alert raises a
+    # RiskEventType.POSITION_MARKET_DATA_STALE event -- turning
+    # last_known_price_stale_after_seconds' passive dashboard badge above
+    # into an actual entry on the Risk Events panel a human is more
+    # likely to notice. Real incident (2026-08-20): a position's price
+    # feed died silently (both the stream and the REST fallback in
+    # _process_candidate_inner failing every cycle) for several minutes
+    # with nothing surfacing why. Deliberately the same 60.0 default as
+    # unprotected_position_alert_seconds above (same "long enough that an
+    # ordinary transient blip self-heals, short enough that a genuinely
+    # dead feed gets flagged within about a minute" reasoning) -- these
+    # are two independent config knobs, not the same value reused, so
+    # tune them separately if experience says otherwise.
+    stale_market_data_alert_seconds: float = 60.0
     # Maximum number of symbols _reconcile_streaming_subscriptions will
     # keep actively subscribed to live streaming at once -- see that
     # method and brokers/webull/client.py's corrected
@@ -1510,6 +1525,8 @@ class TradingLoop:
                 snapshot = prefetched_snapshot if prefetched_snapshot is not None else self.broker.get_snapshot(candidate.symbol)
             except Exception:
                 logger.warning("get_snapshot failed for %s this cycle; skipping.", candidate.symbol, exc_info=True)
+                if candidate.state in (CandidateState.ENTERED, CandidateState.MANAGING):
+                    self._maybe_raise_stale_market_data_alert(candidate, now)
                 return
 
         try:
@@ -2731,6 +2748,48 @@ class TradingLoop:
             now,
         )
 
+    def _maybe_raise_stale_market_data_alert(self, candidate: Candidate, now: datetime) -> None:
+        """Visibility, not a new fetch mechanism: streaming/REST both keep
+        being retried every tick regardless (this doesn't change that) --
+        what it adds is a single, one-time
+        RiskEventType.POSITION_MARKET_DATA_STALE event (surfaced on the
+        dashboard's existing Risk Events panel, same as
+        _maybe_raise_unprotected_position_alert above) once an open
+        position's cached price (get_last_known_price_age_seconds -- the
+        exact same age the dashboard's own /api/positions staleness badge
+        already reads) has gone TradingLoopConfig.stale_market_data_alert_seconds
+        or longer without a fresh snapshot. Called from
+        _process_candidate_inner's REST-fallback exception handler for
+        ENTERED/MANAGING candidates -- that's the only place a snapshot
+        fetch can fail for an open position (see that method), so it's
+        the only place this stretch can start growing.
+
+        No-op if this position hasn't had a single tick processed yet
+        (get_last_known_price_age_seconds returns None -- nothing to
+        measure an age against, e.g. the instant after adoption/entry) or
+        if this exact dead-feed stretch already raised its one alert
+        (position.market_data_stale_alert_logged, reset by
+        _manage_position the moment a fresh snapshot is cached again)."""
+        position = self._positions.get(candidate.symbol)
+        if position is None or position.market_data_stale_alert_logged:
+            return
+        age_seconds = self.get_last_known_price_age_seconds(candidate.symbol, now)
+        if age_seconds is None or age_seconds < self.config.stale_market_data_alert_seconds:
+            return
+        position.market_data_stale_alert_logged = True
+        self.risk_engine.record_operational_event(
+            RiskEventType.POSITION_MARKET_DATA_STALE,
+            candidate.symbol,
+            (
+                f"{candidate.symbol}'s price feed has had no fresh snapshot (streaming or REST) "
+                f"for at least {age_seconds:.0f}s -- the displayed price is stale and may not "
+                f"reflect the current market. The bot keeps retrying every tick, but this is worth "
+                f"checking (a halted/delisted symbol, a Webull data gap for this ticker, or "
+                f"sustained rate-limit contention)."
+            ),
+            now,
+        )
+
     def _cancel_broker_protective_orders(self, symbol: str, position: Position) -> None:
         """Cancels any resting broker-side stop/target orders still
         attached to `position` -- called before this loop submits its own
@@ -2982,6 +3041,12 @@ class TradingLoop:
             transition(candidate, CandidateState.EXITED, now=now, reason="position tracking lost")
             transition(candidate, CandidateState.COOLDOWN, now=now, reason="post-trade cooldown")
             return
+
+        # This tick just cached a fresh snapshot above, so any prior dead-
+        # feed episode is over -- reset so a LATER stretch without live
+        # data raises its own fresh RiskEventType.POSITION_MARKET_DATA_STALE
+        # alert rather than staying suppressed by this one's flag.
+        position.market_data_stale_alert_logged = False
 
         if position.broker_stop_order_id is not None or position.broker_target_order_id is not None:
             if self._poll_broker_bracket(candidate, position, now):

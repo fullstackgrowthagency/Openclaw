@@ -2409,6 +2409,57 @@ about the retry behavior itself -- `_attach_broker_bracket` keeps trying
 forever either way, alerted or not -- it only makes an otherwise-silent
 failure visible to a human.
 
+### Visibility for a dead market-data feed on an open position (2026-08-20)
+
+**Real incident, reported directly by the user:** a `MANAGING` position's
+displayed price on the dashboard froze -- the "may not reflect the
+current market" staleness badge (`last_known_price_stale_after_seconds`,
+30s -- see "Real session VWAP"/`get_last_known_price`'s docstring for the
+2026-08-19 BTCT/BTOG incident that badge itself fixed) showed several
+hundred seconds old. Root cause, traced end to end: `TradingLoop.
+_last_known_snapshots[symbol]` -- the cache `/api/positions` reads --
+only gets refreshed when `_manage_position` runs, which only happens if
+`_process_candidate_inner` obtained a fresh snapshot that tick (streaming
+or REST). If the REST fallback (`WebullBrokerClient.get_snapshot`) raises
+every single cycle -- confirmed plausible for a halted/delisted/no-quote
+symbol, since that method raises `ValueError` outright when Webull's
+snapshot endpoint returns an empty result -- the cache simply stops
+updating, silently: `_process_candidate_inner`'s except block only logs
+a `logger.warning`, with nothing escalating beyond that passive badge.
+
+**The fix, same shape as the unprotected-bracket alert directly above:**
+`TradingLoop._maybe_raise_stale_market_data_alert` (called from
+`_process_candidate_inner`'s REST-fallback exception handler, for
+`ENTERED`/`MANAGING` candidates only) raises a single
+`RiskEventType.POSITION_MARKET_DATA_STALE` event -- via the same
+`RiskEngine.record_operational_event` -- once
+`get_last_known_price_age_seconds` (the exact age the dashboard's own
+badge already reads) has gone `TradingLoopConfig.
+stale_market_data_alert_seconds` (60.0 default, matching
+`unprotected_position_alert_seconds`'s own reasoning) or longer with no
+fresh snapshot. Fires once per dead-feed "episode"
+(`Position.market_data_stale_alert_logged`, reset by `_manage_position`
+the moment a fresh snapshot is cached again), so a LATER stretch without
+live data raises its own fresh alert rather than staying suppressed by a
+flag from an earlier, already-resolved one -- identical idea to
+`Position.unprotected_alert_logged`. Not a new fetch/retry mechanism:
+streaming and REST both keep being retried every tick exactly as before;
+this only makes an otherwise fully-silent failure visible on the
+dashboard's existing Risk Events panel. See
+`tests/test_trading_loop.py`'s
+`test_maybe_raise_stale_market_data_alert_fires_after_the_threshold`,
+`test_maybe_raise_stale_market_data_alert_only_fires_once_per_episode`,
+`test_maybe_raise_stale_market_data_alert_is_a_noop_without_any_cached_snapshot`,
+`test_process_candidate_inner_wires_the_stale_market_data_alert_on_snapshot_failure`,
+and `test_manage_position_resets_the_stale_market_data_alert_flag`.
+
+**Not yet fixed:** WHY Webull's snapshot endpoint returns nothing for a
+given symbol (halted vs. delisted vs. a genuine data gap) is still
+opaque from this process's own logs alone -- this alert surfaces THAT a
+feed died, not why. Diagnosing a specific occurrence still means reading
+the warning-level logs around the alert's timestamp
+(`journalctl -u webull-dashboard | grep '<SYMBOL>'`).
+
 ## Atomic bracket entry (2026-08-13)
 
 **Reverses the prior decision documented just above** (the "MASTER-anchored
