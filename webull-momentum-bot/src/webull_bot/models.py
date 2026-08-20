@@ -351,7 +351,6 @@ class MomentumScoreComponents:
     volume_acceleration_score: float
     price_acceleration_score: float
     breakout_proximity_score: float
-    trend_quality_score: float
     liquidity_score: float
     # v2 additions (2026-08-09): these three were already computed by
     # metrics/rolling.py's compute_metrics but sat unused on MomentumMetrics

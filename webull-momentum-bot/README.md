@@ -978,7 +978,8 @@ What's implemented and tested:
   don't return real VWAP -- which made `distance_from_vwap_pct`
   deterministically exactly `0.0` on every live tick. That silently broke
   FOUR separate mechanisms at once: `trend_quality_score` (a useless MIS
-  constant), `VWAPReclaimStrategy` and `IgnitionPullbackStrategy` (both
+  constant, removed 2026-08-20 -- see `scoring/weights.yaml`'s v2.7
+  changelog), `VWAPReclaimStrategy` and `IgnitionPullbackStrategy` (both
   structurally unable to ever trigger live), and
   `PositionManager`'s `exit_on_vwap_failure` safety backstop (structurally
   unable to ever fire). A stock trading well below its real session

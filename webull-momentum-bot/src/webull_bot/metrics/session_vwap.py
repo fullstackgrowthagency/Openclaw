@@ -16,7 +16,8 @@ streaming) because Webull's snapshot/streaming APIs simply don't return
 VWAP at all. That makes `distance_from_vwap_pct` deterministically exactly
 0.0 on every live tick, which silently breaks FOUR separate mechanisms
 that all depend on it: scoring/momentum_ignition_score.py's
-trend_quality_score component (a constant, no-signal contribution),
+trend_quality_score component (a constant, no-signal contribution --
+removed 2026-08-20, see scoring/weights.yaml's v2.7 changelog),
 strategy/vwap_reclaim.py and strategy/ignition_pullback.py (both
 structurally unable to ever trigger live -- their own guard conditions
 read `distance_from_vwap_pct <= negative_threshold` / `> 0`, neither of

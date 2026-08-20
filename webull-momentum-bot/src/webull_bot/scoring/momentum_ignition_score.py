@@ -113,9 +113,6 @@ def compute_components(
     else:
         breakout_proximity_score = 0.0
 
-    # Trend quality: being above VWAP and trending up is "healthy" momentum.
-    trend_quality_score = _scale(metrics.distance_from_vwap_pct, -2.0, 5.0)
-
     # Liquidity: tight spread + healthy dollar volume.
     spread_score = 100.0 - _scale(metrics.spread_pct, 0.0, th["max_spread_pct"])
     dollar_volume_score = _scale(metrics.dollar_volume, th["min_dollar_volume"] * 0.25, th["min_dollar_volume"] * 4)
@@ -202,7 +199,6 @@ def compute_components(
         volume_acceleration_score=volume_acceleration_score,
         price_acceleration_score=price_acceleration_score,
         breakout_proximity_score=breakout_proximity_score,
-        trend_quality_score=trend_quality_score,
         liquidity_score=liquidity_score,
         float_turnover_score=float_turnover_score,
         short_term_relative_volume_score=short_term_relative_volume_score,

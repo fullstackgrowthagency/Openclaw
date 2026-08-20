@@ -801,7 +801,7 @@ def test_submit_ranked_entries_picks_the_higher_score_when_a_slot_is_scarce():
 
     from webull_bot.models import MomentumScore, MomentumScoreComponents
     def _score(value):
-        components = MomentumScoreComponents(*([0.0] * 11))
+        components = MomentumScoreComponents(*([0.0] * 10))
         return MomentumScore(symbol="X", timestamp=_IN_HOURS_NOW, score=value, components=components, weights_version="test")
 
     candidate_a.latest_score = _score(60.0)
@@ -900,7 +900,7 @@ def test_submit_ranked_entries_final_recheck_lets_the_next_ranked_candidate_take
 
     from webull_bot.models import MomentumScore, MomentumScoreComponents
     def _score(value):
-        components = MomentumScoreComponents(*([0.0] * 11))
+        components = MomentumScoreComponents(*([0.0] * 10))
         return MomentumScore(symbol="X", timestamp=_IN_HOURS_NOW, score=value, components=components, weights_version="test")
 
     candidate_a.latest_score = _score(90.0)  # ranks HIGHER than b -- but stale
@@ -943,7 +943,7 @@ def test_submit_ranked_entries_final_recheck_ignores_mis_fade_and_wide_spread():
     _qualify_for_entry(candidate)  # regime cleared, structure intact
 
     from webull_bot.models import MomentumScore, MomentumScoreComponents
-    components = MomentumScoreComponents(*([0.0] * 11))
+    components = MomentumScoreComponents(*([0.0] * 10))
     candidate.latest_score = MomentumScore(
         symbol="TEST", timestamp=_IN_HOURS_NOW, score=10.0, components=components, weights_version="test",
     )  # well below armed_score_threshold (70)

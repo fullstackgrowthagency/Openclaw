@@ -3339,6 +3339,9 @@ it, all at once:
    -- `_scale(0.0, -2.0, 5.0)` is a CONSTANT (~28.57) for every candidate,
    every tick, contributing zero real discriminative signal to the score
    that's supposed to separate a healthy uptrend from a fading one.
+   (Removed 2026-08-20 for exactly this reason -- see
+   `scoring/weights.yaml`'s v2.7 changelog and the "Momentum Ignition
+   Score" section below.)
 2. `strategy/vwap_reclaim.py` -- its guard condition
    (`distance_from_vwap_pct <= below_vwap_threshold_pct`, -0.3 default)
    can never be true when the value is pinned at exactly 0.0. Structurally
@@ -3521,6 +3524,16 @@ outranks one that merely looks structurally attractive (tight spread,
 near a breakout level) but isn't actually trading heavily yet. See
 `weights.yaml`'s own v2 comment for the exact before/after weights --
 still first-pass, unvalidated numbers, same as v1.
+
+**v2.7 (2026-08-20): removed `trend_quality_score`.** It scored
+`distance_from_vwap_pct`, which is hardcoded to exactly `0.0` on every
+live tick for real Webull data (see "Real session VWAP" above) -- a
+constant, zero-signal component. The freed weight was redistributed
+proportionally across the other 14 components rather than handed to a
+new one; see `weights.yaml`'s own v2.7 comment for the exact rescale
+math. The companion strategy added at the same request,
+`strategy/momentum_regime.py`'s `MomentumRegimeStrategy`, is unrelated to
+this score -- see "Entry strategies" above for that.
 
 ## Data collection
 

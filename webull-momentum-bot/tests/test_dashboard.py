@@ -157,7 +157,7 @@ def test_candidates_exposes_component_breakdown_when_scored(loop, client):
         symbol="TEST", timestamp=datetime.utcnow(), score=61.5, weights_version="v2-test",
         components=MomentumScoreComponents(
             float_score=10, float_velocity_score=20, relative_volume_score=90, volume_acceleration_score=10,
-            price_acceleration_score=10, breakout_proximity_score=10, trend_quality_score=10, liquidity_score=10,
+            price_acceleration_score=10, breakout_proximity_score=10, liquidity_score=10,
             float_turnover_score=10, short_term_relative_volume_score=10, dollar_volume_acceleration_score=10,
         ),
     )
@@ -401,7 +401,7 @@ def _momentum_score(**overrides) -> MomentumScore:
         symbol="TEST", timestamp=datetime.utcnow(), score=72.5, weights_version="v2-test",
         components=MomentumScoreComponents(
             float_score=50, float_velocity_score=50, relative_volume_score=90, volume_acceleration_score=50,
-            price_acceleration_score=50, breakout_proximity_score=50, trend_quality_score=50, liquidity_score=50,
+            price_acceleration_score=50, breakout_proximity_score=50, liquidity_score=50,
             float_turnover_score=50, short_term_relative_volume_score=50, dollar_volume_acceleration_score=50,
         ),
     )

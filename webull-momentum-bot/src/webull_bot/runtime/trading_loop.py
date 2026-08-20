@@ -1402,7 +1402,8 @@ class TradingLoop:
         streaming APIs don't return VWAP at all, which silently made
         `distance_from_vwap_pct` exactly 0.0 on every live tick --
         breaking scoring/momentum_ignition_score.py's trend_quality_score
-        (a no-signal constant), strategy/vwap_reclaim.py and
+        (a no-signal constant, removed 2026-08-20 -- see
+        scoring/weights.yaml's v2.7 changelog), strategy/vwap_reclaim.py and
         strategy/ignition_pullback.py (structurally unable to ever trigger
         live), and position/position_manager.py's exit_on_vwap_failure
         safety backstop (structurally unable to ever fire), all at once.

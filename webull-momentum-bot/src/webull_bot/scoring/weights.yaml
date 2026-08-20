@@ -15,7 +15,7 @@
 #
 # Bump `version` any time you change a weight or threshold so MomentumScore
 # records stay traceable to the formula that produced them.
-version: "v2.6-momentum-regime-score"
+version: "v2.7-remove-trend-quality"
 
 # v2 (2026-08-09): added float_turnover_score/short_term_relative_volume_score/
 # dollar_volume_acceleration_score -- metrics/rolling.py already computed
@@ -119,22 +119,45 @@ version: "v2.6-momentum-regime-score"
 # versions which relied on MISConfig.load()'s automatic normalize-to-1.0
 # as a no-op) specifically so this file's own weights: block still reads
 # as each component's actual share, per this file's header comment.
+#
+# v2.7 (2026-08-20, explicit user request): removed trend_quality_score.
+# It was a known dead component -- distance_from_vwap_pct is exactly 0.0
+# on every live tick for real Webull data (see docs/ARCHITECTURE.md's
+# "Real session VWAP" incident writeup), which made
+# _scale(0.0, -2.0, 5.0) a CONSTANT (~28.57) for every candidate, every
+# tick -- zero real discriminative signal, just diluting the weighted
+# average. Unlike every prior version bump, the freed weight (2.98%) is
+# NOT handed to any single new component -- there isn't one this time --
+# it's redistributed proportionally back across the remaining 14 by
+# scaling each by 1/0.9702 (0.9702 = 1.0000 - 0.0298, i.e. what the other
+# 14 summed to before this removal), which preserves every component's
+# *relative* weighting exactly, same intent as every prior rescale just
+# run in the opposite direction. momentum_regime_score is bumped an extra
+# 0.0001 (1.0307 * 0.1800 = 0.1855, not 0.1856) purely so this block
+# still sums to exactly 1.0000, same rounding move as the v2.5 comment on
+# price_momentum_score above.
+#
+# Companion change from the same user request, unrelated to MIS scoring:
+# strategy/momentum_regime.py's MomentumRegimeStrategy, a new entry
+# Strategy that fires ENTER_LONG directly whenever metrics.return_5m
+# clears the RTMS regime bar, independent of any price-structure
+# condition. It does not read this file and is not gated by
+# armed_score_threshold -- see that strategy's own docstring.
 weights:
-  float_score: 0.0357                           # structural (float size) -- 0.0435 * 0.82
-  float_velocity_score: 0.0713                  # popularity: 5m float turnover rate -- 0.0870 * 0.82
-  float_turnover_score: 0.0595                  # today's cumulative float turnover -- 0.0725 * 0.82
-  relative_volume_score: 0.0713                 # popularity: whole-session RVOL -- 0.0870 * 0.82
-  short_term_relative_volume_score: 0.0893      # windowed (5m) RVOL, the freshest "hot right now" signal -- 0.1089 * 0.82
-  volume_acceleration_score: 0.0535             # 0.0653 * 0.82
-  dollar_volume_acceleration_score: 0.0535      # 0.0653 * 0.82
-  price_acceleration_score: 0.0595              # fast price movement is itself a popularity signal -- 0.0725 * 0.82
-  breakout_proximity_score: 0.0316              # 0.0385 * 0.82
-  trend_quality_score: 0.0298                   # 0.0363 * 0.82
-  liquidity_score: 0.0417                       # 0.0508 * 0.82
-  room_to_target_score: 0.0448                  # v2.2 -- 0.0546 * 0.82
-  order_flow_score: 0.0556                      # v2.3 -- 0.0678 * 0.82
-  price_momentum_score: 0.1229                  # v2.5 -- 0.15 * 0.82 (rounded down 0.0001 so the block sums to exactly 1.0000)
-  momentum_regime_score: 0.1800                 # v2.6: new -- see comment above
+  float_score: 0.0368                           # structural (float size) -- 0.0357 / 0.9702
+  float_velocity_score: 0.0735                  # popularity: 5m float turnover rate -- 0.0713 / 0.9702
+  float_turnover_score: 0.0613                  # today's cumulative float turnover -- 0.0595 / 0.9702
+  relative_volume_score: 0.0735                 # popularity: whole-session RVOL -- 0.0713 / 0.9702
+  short_term_relative_volume_score: 0.0920      # windowed (5m) RVOL, the freshest "hot right now" signal -- 0.0893 / 0.9702
+  volume_acceleration_score: 0.0551             # 0.0535 / 0.9702
+  dollar_volume_acceleration_score: 0.0551      # 0.0535 / 0.9702
+  price_acceleration_score: 0.0613              # fast price movement is itself a popularity signal -- 0.0595 / 0.9702
+  breakout_proximity_score: 0.0326              # 0.0316 / 0.9702
+  liquidity_score: 0.0430                       # 0.0417 / 0.9702
+  room_to_target_score: 0.0462                  # v2.2 -- 0.0448 / 0.9702
+  order_flow_score: 0.0573                      # v2.3 -- 0.0556 / 0.9702
+  price_momentum_score: 0.1267                  # v2.5 -- 0.1229 / 0.9702
+  momentum_regime_score: 0.1856                 # v2.6 -- 0.1800 / 0.9702 (rounded up 0.0001 so the block sums to exactly 1.0000)
 
 # Thresholds used to normalize raw metrics into 0-100 sub-scores, and to
 # drive DISCOVERED -> WATCHING -> HEATING_UP -> ARMED transitions. All

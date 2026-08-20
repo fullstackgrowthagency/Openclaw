@@ -686,7 +686,8 @@ class WebullBrokerClient(BrokerClient):
         # before it ever reaches scoring/strategy logic. Real incident
         # (2026-08-14): leaving this last_price placeholder unreplaced made
         # distance_from_vwap_pct exactly 0.0 on every live tick, silently
-        # breaking trend_quality_score, vwap_reclaim/ignition_pullback, and
+        # breaking trend_quality_score (removed 2026-08-20 -- see
+        # scoring/weights.yaml's v2.7 changelog), vwap_reclaim/ignition_pullback, and
         # PositionManager's exit_on_vwap_failure backstop all at once -- see
         # docs/ARCHITECTURE.md's "Real session VWAP" section.
         vwap = last_price

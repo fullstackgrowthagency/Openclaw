@@ -256,7 +256,7 @@ def _score(**overrides) -> MomentumScore:
         symbol="TEST", timestamp=datetime(2026, 1, 1, 9, 31), score=72.5, weights_version="v1-test",
         components=MomentumScoreComponents(
             float_score=80, float_velocity_score=70, relative_volume_score=60, volume_acceleration_score=50,
-            price_acceleration_score=40, breakout_proximity_score=30, trend_quality_score=20, liquidity_score=10,
+            price_acceleration_score=40, breakout_proximity_score=30, liquidity_score=10,
             float_turnover_score=90, short_term_relative_volume_score=85, dollar_volume_acceleration_score=75,
         ),
     )
@@ -302,19 +302,19 @@ def test_component_summary_averages_and_weights_only_the_latest_version(session)
     record_momentum_score(session, _score(
         weights_version="v1-old", timestamp=datetime(2026, 1, 1, 9, 30), components=MomentumScoreComponents(
             float_score=10, float_velocity_score=10, relative_volume_score=10, volume_acceleration_score=10,
-            price_acceleration_score=10, breakout_proximity_score=10, trend_quality_score=10, liquidity_score=10,
+            price_acceleration_score=10, breakout_proximity_score=10, liquidity_score=10,
             float_turnover_score=10, short_term_relative_volume_score=10, dollar_volume_acceleration_score=10,
         )))
     record_momentum_score(session, _score(
         weights_version="v2-current", timestamp=datetime(2026, 1, 1, 9, 31), components=MomentumScoreComponents(
             float_score=20, float_velocity_score=20, relative_volume_score=80, volume_acceleration_score=20,
-            price_acceleration_score=20, breakout_proximity_score=20, trend_quality_score=20, liquidity_score=20,
+            price_acceleration_score=20, breakout_proximity_score=20, liquidity_score=20,
             float_turnover_score=60, short_term_relative_volume_score=90, dollar_volume_acceleration_score=20,
         )))
     record_momentum_score(session, _score(
         weights_version="v2-current", timestamp=datetime(2026, 1, 1, 9, 32), components=MomentumScoreComponents(
             float_score=20, float_velocity_score=20, relative_volume_score=80, volume_acceleration_score=20,
-            price_acceleration_score=20, breakout_proximity_score=20, trend_quality_score=20, liquidity_score=20,
+            price_acceleration_score=20, breakout_proximity_score=20, liquidity_score=20,
             float_turnover_score=60, short_term_relative_volume_score=90, dollar_volume_acceleration_score=20,
         )))
     session.commit()
