@@ -976,7 +976,8 @@ touches position sizing, stop enforcement, or order placement.
 Registered in `main.py`'s `build_trading_loop()`, in this order (most
 selective/confirmed pattern first, most permissive last -- since only the
 first match per tick fires, a broad catch-all placed early would prevent
-more specific patterns from ever getting a chance):
+more specific patterns from ever getting a chance). All 9 read only
+already-computed `MomentumMetrics`/`Candidate` fields:
 
 1. **`RefinedBreakoutStrategy`** (`strategy/refined_breakout.py`) -- a
    stricter breakout: price must be between the resistance level and
@@ -1053,6 +1054,22 @@ more specific patterns from ever getting a chance):
    trailing-stop/VWAP-failure/time-limit exits. This is the entry for a
    symbol whose resistance is too far away to be a useful reference at
    all -- the original motivating case for this whole batch of strategies.
+9. **`MomentumRegimeStrategy`** (`strategy/momentum_regime.py`, added
+   2026-08-20 at explicit user request) -- the single most permissive
+   strategy of all, registered last. Fires purely on
+   `metrics.return_5m >= min_return_5m_pct` (default 4.0%, same value as
+   `scanner/momentum_qualification.py`'s RTMS hard-gate on
+   `min_return_5m_pct` in `scoring/rtms_weights.yaml`, but a deliberately
+   separate config surface -- the two are not wired together) plus a
+   spread guard. No breakout level, pullback, VWAP position, or any other
+   structural condition required at all -- every strategy above this one
+   additionally demands some price-structure condition a pure, fast
+   vertical move doesn't necessarily satisfy, so a candidate already
+   clearing RTMS's own regime bar could otherwise generate zero signal
+   whatsoever. Unrelated to `momentum_ignition_score.py`'s separate
+   `momentum_regime_score` MIS component (which only influences the
+   WATCHING->ARMED transition, never fires a signal itself) -- see
+   "Momentum Ignition Score" below.
 
 **State isolation**: with several pullback/phase-tracking strategies now
 registered simultaneously, any *new* stateful strategy added here keeps its
@@ -1070,7 +1087,7 @@ explicitly deferred -- it needs a new market-data feed this bot doesn't
 have wired up yet, unlike every strategy above, which only reads
 already-computed `MomentumMetrics`/`Candidate` fields.
 
-**Verification status**: all 8 strategies have dedicated unit tests
+**Verification status**: all 9 strategies have dedicated unit tests
 (`tests/test_<strategy_name>.py`) covering their entry conditions, but none
 have been backtested or run live yet -- their config defaults are
 unvalidated starting points (same framing as `scoring/weights.yaml`), not

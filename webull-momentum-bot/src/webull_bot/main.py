@@ -50,6 +50,7 @@ from webull_bot.scanner.trigger_engine import TriggerEngine
 from webull_bot.strategy.breakout_pullback import BreakoutPullbackStrategy
 from webull_bot.strategy.ignition_pullback import IgnitionPullbackStrategy
 from webull_bot.strategy.momentum_breakout import MomentumBreakoutStrategy
+from webull_bot.strategy.momentum_regime import MomentumRegimeStrategy
 from webull_bot.strategy.opening_range_breakout import OpeningRangeBreakoutStrategy
 from webull_bot.strategy.refined_breakout import RefinedBreakoutStrategy
 from webull_bot.strategy.volatility_contraction import VolatilityContractionBreakoutStrategy
@@ -250,6 +251,7 @@ def build_trading_loop(
         IgnitionPullbackStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn),
         VolatilityContractionBreakoutStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn),
         VolumeIgnitionStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn),
+        MomentumRegimeStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn),
     ])
     order_manager = OrderManager(broker, risk_engine, settings)
     position_manager = PositionManager()
