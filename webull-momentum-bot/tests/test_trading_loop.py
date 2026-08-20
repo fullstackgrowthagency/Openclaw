@@ -2954,6 +2954,93 @@ def test_reconcile_drops_a_position_no_longer_at_the_broker():
     assert candidate.state.value == "cooldown"
 
 
+def test_reconcile_is_unaffected_when_no_position_snapshot_loader_is_configured():
+    # load_position_snapshot defaults to None (see _armed_candidate_setup,
+    # which never passes it) -- this must behave byte-for-byte like it did
+    # before the 2026-08-20 restart-blind-spot fix: no load attempted, no
+    # exception, _recovered_snapshot_positions stays empty.
+    broker = _FakeBroker()
+    loop, _candidate = _armed_candidate_setup(broker)
+
+    assert loop._load_position_snapshot is None
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)  # must not raise
+
+    assert loop._recovered_snapshot_positions == {}
+
+
+def test_reconcile_records_a_trade_for_a_position_that_closed_during_a_restart():
+    # Real incident (2026-08-19/20, BTCT + a second BTOG): the service
+    # restarted twice in quick succession; the second restart's first
+    # reconcile pass started with self._positions == {} AND broker_symbols
+    # == {} (broker already showed zero positions, confirmed independently
+    # via a fresh scripts/find_account_id.py run and a Webull PaperTrade
+    # UI screenshot), so set(self._positions.keys()) - broker_symbols was
+    # empty -- nothing was ever flagged missing, no warning logged, no
+    # Trade record written, no trace either position ever closed. This is
+    # the persisted-snapshot recovery path that closes that gap: a symbol
+    # recovered from load_position_snapshot() (standing in here for what
+    # would have been loaded from PositionRecord/db/repository.py) gets
+    # the exact same missing-from-broker confirmation treatment a
+    # this-process-lifetime position already gets.
+    from webull_bot.state_machine import transition
+    from webull_bot.enums import CandidateState, ExitReason
+
+    broker = _FakeBroker()  # no positions -- simulates it having already closed at the broker
+    loop, candidate = _armed_candidate_setup(broker)
+    trades = []
+    loop.on_trade_closed = trades.append
+    transition(candidate, CandidateState.CONFIRMING)
+    transition(candidate, CandidateState.TRIGGERED)
+    transition(candidate, CandidateState.ENTERED)
+    transition(candidate, CandidateState.MANAGING)
+
+    # Nothing in self._positions -- simulates a fresh process restart.
+    # Instead, a persisted snapshot (from the prior process's lifetime) is
+    # what load_position_snapshot returns.
+    recovered = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=6.00, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._load_position_snapshot = lambda: [recovered]
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+    assert "TEST" in loop._recovered_snapshot_positions  # flagged: not silently dropped
+    assert not trades  # not yet confirmed -- one miss so far
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)  # confirm across 2 passes (default config)
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.symbol == "TEST"
+    assert trade.exit_reason == ExitReason.EXTERNAL_CLOSE
+    assert trade.entry_price == pytest.approx(5.00)
+    assert "TEST" not in loop._recovered_snapshot_positions
+    assert "TEST" not in loop._positions
+
+
+def test_reconcile_adopts_a_recovered_snapshot_position_still_open_at_the_broker():
+    # Guards against the "merge recovery state directly into
+    # self._positions" mistake this design deliberately avoids -- a
+    # recovered symbol the broker still reports open must fall through
+    # the EXISTING adoption loop untouched (bracket-attach/streaming-
+    # resubscribe), not be silently skipped or falsely flagged missing.
+    broker = _FakeBroker()
+    broker._positions.append(Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=None,
+        target_price=None, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="",
+    ))
+    loop, _candidate = _armed_candidate_setup(broker)
+    loop._load_position_snapshot = lambda: [Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=10, avg_entry_price=5.00, stop_price=4.50,
+        target_price=6.00, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )]
+
+    loop.reconcile_positions_from_broker(_IN_HOURS_NOW)
+
+    assert "TEST" in loop._positions  # adopted normally
+    assert "TEST" not in loop._recovered_snapshot_positions  # recovery bookkeeping cleared
+
+
 def test_reconcile_records_a_trade_for_an_externally_closed_position_using_a_real_fill():
     # Real gap (2026-08-12): a position (BIVI) correctly detected as
     # closed externally and removed from tracking never showed up in

@@ -209,9 +209,47 @@ class FillRecord(Base):
 
 
 class PositionRecord(Base):
+    """Upsert-based snapshot of currently-open positions (2026-08-20
+    restart-blind-spot fix) -- one row per (user_id, bot_id, symbol) while
+    a position is open, deleted the moment it closes (via any path:
+    _finalize_exit, reconcile's confirmed-missing drop, or a full
+    kill-switch/manual/EOD-flatten close -- all of those route through one
+    of those two). This is NOT a historical ledger (see TradeRecord for
+    that) -- closed_at/realized_pnl below predate this repurposing and are
+    legacy/unused by the new write path (upsert_open_position/
+    delete_open_position in db/repository.py), kept only because
+    sync_schema() only adds columns, never drops them, and no row had ever
+    existed in this table before this repurposing.
+
+    Written only on lifecycle transitions (entry filled, partial exit
+    quantity change, adoption from broker) -- NOT on every tick's MFE/MAE
+    update -- to keep this off TradingLoop's hot path (see
+    TradingLoop.get_last_known_price's docstring for the same rate-limit-
+    pressure rationale applied elsewhere in this codebase).
+    max_favorable_excursion/max_adverse_excursion are therefore
+    intentionally NOT tracked here; a Position rebuilt from this table
+    always starts those at 0.0 -- the same "best-effort, not exact"
+    tradeoff _build_trade_for_external_close already accepts for
+    exit_price.
+
+    Read once at process startup by reconcile_positions_from_broker's
+    first call (see TradingLoop._load_position_snapshot), specifically to
+    detect a position that closed at the broker WHILE this process was
+    down/restarting -- see that method's docstring. sync_schema() is
+    additive-only and won't retroactively add the UniqueConstraint below
+    to an already-existing `positions` table, so db/repository.py's
+    upsert/delete functions use query-then-insert-or-update (like
+    record_order already does) rather than relying on it firing."""
     __tablename__ = "positions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "bot_id", "symbol", name="uq_positions_user_bot_symbol"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # See ScannerEvent.user_id's comment -- same nullable-for-backfill
+    # rationale.
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), nullable=True, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     side: Mapped[str] = mapped_column(String(16))
     quantity: Mapped[float] = mapped_column(Float)
@@ -220,10 +258,17 @@ class PositionRecord(Base):
     target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     strategy_name: Mapped[str] = mapped_column(String(64))
     opened_at: Mapped[datetime] = mapped_column(DateTime, index=True)
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
-    max_favorable_excursion: Mapped[float] = mapped_column(Float, default=0.0)
-    max_adverse_excursion: Mapped[float] = mapped_column(Float, default=0.0)
+    # Best-effort external-close cleanup only (see reconcile's
+    # stale_position cleanup branch) -- None for anything adopted before
+    # broker-side bracket support existed, or a broker that doesn't
+    # support resting orders; harmless either way, cleanup is just
+    # skipped.
+    broker_stop_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    broker_target_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # legacy, unused
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)  # legacy, unused
+    max_favorable_excursion: Mapped[float] = mapped_column(Float, default=0.0)  # legacy, unused
+    max_adverse_excursion: Mapped[float] = mapped_column(Float, default=0.0)  # legacy, unused
 
 
 class TradeRecord(Base):

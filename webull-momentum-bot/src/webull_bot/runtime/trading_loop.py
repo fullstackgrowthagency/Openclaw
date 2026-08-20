@@ -637,6 +637,9 @@ class TradingLoop:
         on_order_update: Optional[Callable[[Order], None]] = None,
         on_state_transition: Optional[Callable[[str, CandidateState, CandidateState, datetime], None]] = None,
         on_score_computed: Optional[Callable[[str, MomentumScore], None]] = None,
+        on_position_snapshot_upsert: Optional[Callable[[Position], None]] = None,
+        on_position_snapshot_delete: Optional[Callable[[str], None]] = None,
+        load_position_snapshot: Optional[Callable[[], list[Position]]] = None,
         momentum_event_tracker: Optional[MomentumEventTracker] = None,
         momentum_engine: Optional[MomentumQualificationEngine] = None,
     ):
@@ -666,6 +669,23 @@ class TradingLoop:
         # Called with the freshly computed MomentumScore every time
         # CandidateWatcher.update() produces one.
         self.on_score_computed = on_score_computed
+        # Write-through persistence for the "currently open positions"
+        # snapshot (db/models.py's PositionRecord, 2026-08-20
+        # restart-blind-spot fix) -- upsert called whenever self._positions
+        # gains a symbol or that symbol's quantity changes, delete called
+        # whenever a symbol leaves self._positions. NOT called on plain
+        # per-tick price/MFE updates -- see PositionRecord's docstring for
+        # why this stays off the hot tick path. load_position_snapshot is
+        # read exactly once, at reconcile_positions_from_broker's very
+        # first call, to recover visibility into a position that closed at
+        # the broker WHILE this process was down for a restart -- see that
+        # method's docstring for the incident this closes (BTCT/BTOG,
+        # 2026-08-19/20: two positions closed at the broker during a
+        # restart with zero trace -- no warning, no Trade record -- because
+        # self._positions starts empty on every restart by design).
+        self.on_position_snapshot_upsert = on_position_snapshot_upsert
+        self.on_position_snapshot_delete = on_position_snapshot_delete
+        self._load_position_snapshot = load_position_snapshot
         # Optional collaborator (not a callback) since momentum-event
         # tracking needs ongoing state across many ticks (filling forward-
         # looking outcome windows over up to 15 minutes) -- see
@@ -733,6 +753,25 @@ class TradingLoop:
         self._pending_entry_position_checked: set[str] = set()
         self._pending_exit_orders: dict[str, tuple[Order, Signal]] = {}  # symbol -> (order, exit signal)
         self._positions: dict[str, Position] = {}          # symbol -> our own tracked open position
+        # symbol -> Position reconstructed from the persisted open-positions
+        # snapshot (db/repository.get_open_positions_snapshot), for a symbol
+        # not yet in self._positions this process's own lifetime. Populated
+        # exactly once, at reconcile_positions_from_broker's very first
+        # call (see that method), and ONLY used to extend the
+        # missing-from-broker comparison there -- deliberately never merged
+        # directly into self._positions, which would make the adoption loop
+        # further down wrongly skip bracket-attach/streaming-resubscribe
+        # for a symbol that turns out to still be genuinely open at the
+        # broker. Entries are removed the moment they're resolved either
+        # way: found again at the broker (falls through to normal
+        # adoption) or confirmed closed (a Trade gets built and recorded).
+        self._recovered_snapshot_positions: dict[str, Position] = {}
+        # Guards the one-time load above -- deliberately NOT keyed off
+        # self._last_position_reconcile, which _process_all_candidates
+        # already sets to `now` (see that method) BEFORE calling
+        # reconcile_positions_from_broker, so it's never None from inside
+        # that method's own body even on its first-ever call.
+        self._position_snapshot_load_attempted = False
         # symbol -> consecutive reconcile_positions_from_broker passes it's
         # been absent from broker.get_positions() -- see
         # TradingLoopConfig.position_missing_confirmations_required's
@@ -1552,6 +1591,22 @@ class TradingLoop:
             except Exception:
                 logger.exception("on_state_transition callback raised for %s.", candidate.symbol)
         self._persisted_transition_counts[candidate.symbol] = total
+
+    def _notify_position_snapshot_upsert(self, position: Position) -> None:
+        if self.on_position_snapshot_upsert is None:
+            return
+        try:
+            self.on_position_snapshot_upsert(position)
+        except Exception:
+            logger.exception("on_position_snapshot_upsert callback raised for %s.", position.symbol)
+
+    def _notify_position_snapshot_delete(self, symbol: str) -> None:
+        if self.on_position_snapshot_delete is None:
+            return
+        try:
+            self.on_position_snapshot_delete(symbol)
+        except Exception:
+            logger.exception("on_position_snapshot_delete callback raised for %s.", symbol)
 
     def _register_momentum_event(
         self, candidate: Candidate, signal: Signal, now: datetime,
@@ -2438,6 +2493,7 @@ class TradingLoop:
             position.unprotected_alert_logged = False
         else:
             self._attach_broker_bracket(candidate, position, now)
+        self._notify_position_snapshot_upsert(position)
         self._ensure_streaming_subscribed([candidate.symbol])
         transition(candidate, CandidateState.ENTERED, now=now, reason="entry order filled")
         transition(candidate, CandidateState.MANAGING, now=now, reason="managing open position")
@@ -3201,6 +3257,7 @@ class TradingLoop:
 
         self.risk_engine.record_trade_closed(candidate.symbol, trade.pnl, now=now)
         self._positions.pop(candidate.symbol, None)
+        self._notify_position_snapshot_delete(candidate.symbol)
         if self.on_trade_closed is not None:
             try:
                 self.on_trade_closed(trade)
@@ -3224,6 +3281,7 @@ class TradingLoop:
         self.risk_engine.record_trade_closed(candidate.symbol, trade.pnl, now=now)
         position.quantity -= order.quantity
         position.partial_exit_taken = True
+        self._notify_position_snapshot_upsert(position)
         if self.on_trade_closed is not None:
             try:
                 self.on_trade_closed(trade)
@@ -3366,8 +3424,39 @@ class TradingLoop:
         have quietly gone back to computing the wrong thing). No
         get_account_equity() call needed at all now -- a flat % is
         well-defined regardless of share count, so there's no degenerate
-        case to fall back from either."""
+        case to fall back from either.
+
+        One-time, first-call-only load of the persisted open-positions
+        snapshot (see PositionRecord / TradingLoop's on_position_snapshot_*
+        hooks) happens right below, before the broker.get_positions() call
+        -- self._position_snapshot_load_attempted is only ever False on
+        this method's very first invocation for this process's lifetime,
+        which is exactly the moment self._positions is guaranteed to still
+        be empty regardless of what was genuinely open at the broker a
+        moment before this process started. Without this, a position that
+        closed at the broker WHILE this process was down/restarting is
+        completely invisible: set(self._positions.keys()) is empty, so the
+        missing-symbol diff below has nothing to compare against and never
+        fires at all -- confirmed live 2026-08-19/20 (BTCT, a second
+        BTOG): no warning log, no Trade record, no trace the position ever
+        closed. Loaded into a SEPARATE dict (_recovered_snapshot_positions),
+        never directly into self._positions -- see that field's docstring
+        for why merging it in here would break the adoption loop below for
+        a symbol that turns out to still be genuinely open."""
         now = now or datetime.utcnow()
+        if not self._position_snapshot_load_attempted:
+            self._position_snapshot_load_attempted = True
+            if self._load_position_snapshot is not None:
+                try:
+                    for snap_position in self._load_position_snapshot():
+                        if snap_position.symbol not in self._positions:
+                            self._recovered_snapshot_positions[snap_position.symbol] = snap_position
+                except Exception:
+                    logger.exception(
+                        "reconcile_positions_from_broker: failed to load the persisted position "
+                        "snapshot; continuing without it -- any position that closed at the broker "
+                        "during this restart may go undetected this pass."
+                    )
         try:
             # _get_positions_for_tick, not broker.get_positions() directly:
             # this call and _maybe_verify_entry_via_positions' own can land
@@ -3387,8 +3476,14 @@ class TradingLoop:
         # inheriting stale history.
         for symbol in broker_symbols & self._missing_from_broker_counts.keys():
             del self._missing_from_broker_counts[symbol]
+        # A recovered-snapshot symbol the broker still confirms open just
+        # needs ordinary adoption (the loop further down already triggers
+        # on "not in self._positions") -- drop it from recovery
+        # bookkeeping here so it isn't checked twice below.
+        for symbol in broker_symbols & self._recovered_snapshot_positions.keys():
+            del self._recovered_snapshot_positions[symbol]
 
-        for symbol in set(self._positions.keys()) - broker_symbols:
+        for symbol in (set(self._positions.keys()) | set(self._recovered_snapshot_positions.keys())) - broker_symbols:
             if symbol in self._pending_exit_orders:
                 # This process's own exit is already in flight for this
                 # symbol -- let _poll_pending_exit/_dispatch_exit_finalization
@@ -3419,7 +3514,7 @@ class TradingLoop:
                 )
                 continue
 
-            stale_position = self._positions[symbol]
+            stale_position = self._positions.get(symbol) or self._recovered_snapshot_positions[symbol]
             if stale_position.broker_stop_order_id is not None or stale_position.broker_target_order_id is not None:
                 # Whatever closed this position out-of-band (a manual close
                 # in the Webull app, an external script) may not have gone
@@ -3440,7 +3535,9 @@ class TradingLoop:
                     self.on_trade_closed(trade)
                 except Exception:
                     logger.exception("on_trade_closed callback raised for %s (external close).", symbol)
-            del self._positions[symbol]
+            self._positions.pop(symbol, None)
+            self._recovered_snapshot_positions.pop(symbol, None)
+            self._notify_position_snapshot_delete(symbol)
             del self._missing_from_broker_counts[symbol]
             candidate = self.candidates.get(symbol)
             if candidate is not None and candidate.state in (CandidateState.ENTERED, CandidateState.MANAGING):
@@ -3475,6 +3572,7 @@ class TradingLoop:
                 position.target_price = snapshot.last_price * (1 + stop_pct * reward_risk_ratio)
             position.strategy_name = "reconciled_at_startup"
             self._positions[symbol] = position
+            self._notify_position_snapshot_upsert(position)
 
             candidate = existing_candidates.get(symbol)
             if candidate is None or candidate.state not in (CandidateState.ENTERED, CandidateState.MANAGING):

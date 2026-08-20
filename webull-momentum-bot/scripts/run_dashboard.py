@@ -55,11 +55,14 @@ from webull_bot.dashboard.app import create_app
 from webull_bot.db.models import BrokerCredential, User
 from webull_bot.db.repository import (
     DBBackedEventRecorder,
+    delete_open_position,
+    get_open_positions_snapshot,
     get_or_create_default_bot,
     record_momentum_score,
     record_order,
     record_scanner_event,
     record_trade,
+    upsert_open_position,
 )
 from webull_bot.db.session import create_all, get_session_factory
 from webull_bot.main import build_trading_loop
@@ -126,6 +129,40 @@ def _make_score_persister(session_factory, user_id: Optional[int] = None, bot_id
     return on_score_computed
 
 
+def _make_position_snapshot_upsert(session_factory, user_id: Optional[int] = None, bot_id: Optional[int] = None):
+    def on_position_snapshot_upsert(position):
+        with session_factory() as session:
+            try:
+                upsert_open_position(session, position, user_id=user_id, bot_id=bot_id)
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception("Failed to persist open-position snapshot for %s", position.symbol)
+
+    return on_position_snapshot_upsert
+
+
+def _make_position_snapshot_delete(session_factory, user_id: Optional[int] = None, bot_id: Optional[int] = None):
+    def on_position_snapshot_delete(symbol):
+        with session_factory() as session:
+            try:
+                delete_open_position(session, symbol, user_id=user_id, bot_id=bot_id)
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception("Failed to delete open-position snapshot for %s", symbol)
+
+    return on_position_snapshot_delete
+
+
+def _make_position_snapshot_loader(session_factory, user_id: Optional[int] = None, bot_id: Optional[int] = None):
+    def load_position_snapshot():
+        with session_factory() as session:
+            return get_open_positions_snapshot(session, user_id=user_id, bot_id=bot_id)
+
+    return load_position_snapshot
+
+
 def _build_loop_for_user(user_id: Optional[int], user_settings: Settings, session_factory) -> TradingLoop:
     """Same persistence-hook wiring for every account -- single-tenant
     (user_id=None) and every per-user loop in multi-tenant mode alike --
@@ -151,6 +188,9 @@ def _build_loop_for_user(user_id: Optional[int], user_settings: Settings, sessio
         on_order_update=_make_order_persister(session_factory, user_settings.trading_mode.value, user_id, bot_id),
         on_state_transition=_make_state_transition_persister(session_factory, user_id, bot_id),
         on_score_computed=_make_score_persister(session_factory, user_id, bot_id),
+        on_position_snapshot_upsert=_make_position_snapshot_upsert(session_factory, user_id, bot_id),
+        on_position_snapshot_delete=_make_position_snapshot_delete(session_factory, user_id, bot_id),
+        load_position_snapshot=_make_position_snapshot_loader(session_factory, user_id, bot_id),
         momentum_event_tracker=momentum_event_tracker,
     )
 

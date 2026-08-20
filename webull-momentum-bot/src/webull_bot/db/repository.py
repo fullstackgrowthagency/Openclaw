@@ -16,10 +16,10 @@ from typing import Callable, Optional
 from sqlalchemy.orm import Session
 
 from ..collection.event_recorder import EventRecorder
-from ..enums import CandidateState
-from ..models import MomentumEvent, MomentumScore, Order, Trade
+from ..enums import CandidateState, OrderSide
+from ..models import MomentumEvent, MomentumScore, Order, Position, Trade
 from ..scoring.momentum_ignition_score import MISConfig
-from .models import Bot, MomentumEventRecord, MomentumScoreRecord, OrderRecord, ScannerEvent, TradeRecord
+from .models import Bot, MomentumEventRecord, MomentumScoreRecord, OrderRecord, PositionRecord, ScannerEvent, TradeRecord
 
 _DEFAULT_BOT_SLUG = "day-trading-quant"
 _DEFAULT_BOT_NAME = "Day Trading Quant"
@@ -114,6 +114,94 @@ def record_order(
     existing.updated_at = order.updated_at
     session.flush()
     return existing
+
+
+def upsert_open_position(
+    session: Session, position: Position, *, user_id: Optional[int] = None, bot_id: Optional[int] = None,
+) -> PositionRecord:
+    """Write-through counterpart to TradingLoop's self._positions[symbol] =
+    position -- called at every point that dict gains a symbol or has that
+    symbol's quantity change (entry fill, reconcile adoption, partial
+    exit), NEVER on a plain per-tick price/MFE update (see
+    PositionRecord's docstring) -- keeps this off the hot tick path.
+    Upserts by (user_id, bot_id, symbol) the same way record_order upserts
+    by client_order_id, since sync_schema() won't retroactively add
+    PositionRecord's UniqueConstraint to an already-existing table."""
+    existing = (
+        session.query(PositionRecord)
+        .filter(
+            PositionRecord.user_id == user_id,
+            PositionRecord.bot_id == bot_id,
+            PositionRecord.symbol == position.symbol,
+        )
+        .one_or_none()
+    )
+    if existing is None:
+        existing = PositionRecord(user_id=user_id, bot_id=bot_id, symbol=position.symbol)
+        session.add(existing)
+
+    existing.side = position.side.value
+    existing.quantity = position.quantity
+    existing.avg_entry_price = position.avg_entry_price
+    existing.stop_price = position.stop_price
+    existing.target_price = position.target_price
+    existing.strategy_name = position.strategy_name
+    existing.opened_at = position.opened_at
+    existing.broker_stop_order_id = position.broker_stop_order_id
+    existing.broker_target_order_id = position.broker_target_order_id
+    session.flush()
+    return existing
+
+
+def delete_open_position(
+    session: Session, symbol: str, *, user_id: Optional[int] = None, bot_id: Optional[int] = None,
+) -> None:
+    """Write-through counterpart to TradingLoop's self._positions.pop(symbol)
+    -- called from every path that closes a position (full exit, confirmed
+    external close). A no-op if no row exists for this scope/symbol (e.g.
+    this position was never open long enough to have been upserted, or
+    it's already been deleted)."""
+    session.query(PositionRecord).filter(
+        PositionRecord.user_id == user_id,
+        PositionRecord.bot_id == bot_id,
+        PositionRecord.symbol == symbol,
+    ).delete()
+    session.flush()
+
+
+def get_open_positions_snapshot(
+    session: Session, *, user_id: Optional[int] = None, bot_id: Optional[int] = None,
+) -> list[Position]:
+    """Reconstructs Position objects (models.Position, not the ORM row)
+    from this scope's persisted snapshot -- used exactly once, at process
+    startup, by TradingLoop's very first reconcile_positions_from_broker
+    call (see that method and TradingLoop._load_position_snapshot).
+    max_favorable_excursion/max_adverse_excursion are not persisted (see
+    PositionRecord's docstring) so every reconstructed Position starts
+    those at 0.0 -- a Trade built from one of these via
+    _build_trade_for_external_close will carry mfe/mae=0.0, same
+    best-effort tradeoff as its exit_price fallback chain."""
+    rows = (
+        session.query(PositionRecord)
+        .filter(PositionRecord.user_id == user_id, PositionRecord.bot_id == bot_id)
+        .all()
+    )
+    return [
+        Position(
+            symbol=row.symbol,
+            side=OrderSide(row.side),
+            quantity=row.quantity,
+            avg_entry_price=row.avg_entry_price,
+            stop_price=row.stop_price,
+            target_price=row.target_price,
+            trailing_stop_pct=None,
+            opened_at=row.opened_at,
+            strategy_name=row.strategy_name,
+            broker_stop_order_id=row.broker_stop_order_id,
+            broker_target_order_id=row.broker_target_order_id,
+        )
+        for row in rows
+    ]
 
 
 def get_recent_trades(

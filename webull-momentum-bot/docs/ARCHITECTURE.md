@@ -1858,6 +1858,75 @@ reconciliation is logged and skipped, not fatal to the rest -- consistent
 with every other broker-loop failure mode in this file (kill-switch
 flatten, batched snapshot fetch, etc.).
 
+### Positions that closed at the broker during a restart vanished with zero trace (2026-08-19/20)
+
+**A real incident, initially misdiagnosed as a wrong/stale sandbox
+`account_id`.** The dashboard suddenly showed "0 current positions" for
+BTCT/BTOG right after a routine deploy restart. Investigation first
+chased an account-ID mismatch theory (this deployment is multi-tenant --
+see "Multi-tenant auth" below -- so it's genuinely easy to query the
+wrong credentials by accident, e.g. the single-tenant `.env` fallback
+instead of a user's real per-user `BrokerCredential` row). That theory
+was disproven: `scripts/find_account_id.py`, corrected to query the real
+per-user stored credentials, confirmed the configured `account_id` was
+correct all along, and a Webull PaperTrade UI screenshot independently
+confirmed the same account genuinely holds zero positions right now.
+
+**The real root cause: `self._positions` is wiped to `{}` on every
+process restart by design (no persistence of its own), and
+`reconcile_positions_from_broker`'s "closed externally" detection (see
+above) only ever fires by diffing symbols already present in
+`self._positions` against what the broker currently reports.** A position
+that closes at the broker WHILE this process is down for a restart is
+therefore completely invisible on the very next tick: the fresh process
+starts with `self._positions == {}`, the broker also reports nothing for
+it, `set() - set() == set()`, and nothing gets flagged missing at all --
+no warning log, no `Trade` record, no P&L, no trace the position ever
+existed. Reconstructed from real `journalctl`/DB evidence: BTCT (qty
+63821 @ $1.99) and a second BTOG entry (qty 115908 @ $1.09), opened under
+one process's lifetime, closed at the broker at some point before or
+during the next restart -- with neither a `TradeRecord` nor a "no longer
+exists at the broker" log line anywhere. (A third position, an earlier
+BTOG @ $1.24, *was* caught by the existing in-process detection, but
+landed on `_build_trade_for_external_close`'s `avg_entry_price` last
+resort -- a fabricated exact-$0-pnl trade -- because `poll_fills`/stop/
+target/streaming-cache were all unavailable at that exact moment; a
+pre-existing, already-documented limitation, not new.)
+
+**Fix:** repurposed `db/models.py`'s `PositionRecord`/`positions` table
+(defined but 100% unused until now) into an upsert-based "currently open
+positions" snapshot -- one row per `(user_id, bot_id, symbol)` while a
+position is open, deleted the instant it closes. `TradingLoop` gained
+three optional DI hooks (`on_position_snapshot_upsert`,
+`on_position_snapshot_delete`, `load_position_snapshot`, wired in
+`scripts/run_dashboard.py`/`main.py` exactly like `on_trade_closed`
+already is), written at position lifecycle events only (entry fill,
+partial exit, reconcile adoption, full close) -- deliberately NOT on
+every tick's price/MFE update, to keep this off the hot tick path (see
+`get_last_known_price`'s docstring for the same rate-limit-conscious
+tradeoff applied elsewhere). `reconcile_positions_from_broker` loads this
+snapshot exactly once, on its first call for this process's lifetime
+(guarded by a dedicated `self._position_snapshot_load_attempted` flag,
+NOT `self._last_position_reconcile` -- that field is already set to a
+non-`None` value by `_process_all_candidates` before it even calls this
+method, so it can't distinguish a first call from any other one), into a
+separate `self._recovered_snapshot_positions` dict -- deliberately never
+merged directly into `self._positions`, so a recovered symbol that turns
+out to still be genuinely open at the broker falls through the existing
+adoption loop untouched (bracket-attach, streaming-resubscribe intact)
+rather than skipping it. The missing-symbol diff that drives external-
+close detection was extended to union in this recovered set, giving a
+during-restart close the exact same
+`position_missing_confirmations_required`-pass anti-flakiness protection
+any other tracked position already gets, through the completely
+unmodified `_build_trade_for_external_close` path. See
+`tests/test_trading_loop.py`'s
+`test_reconcile_records_a_trade_for_a_position_that_closed_during_a_restart`,
+`test_reconcile_adopts_a_recovered_snapshot_position_still_open_at_the_broker`,
+and `test_reconcile_is_unaffected_when_no_position_snapshot_loader_is_configured`,
+plus `tests/test_repository.py`'s `upsert_open_position`/
+`delete_open_position`/`get_open_positions_snapshot` tests.
+
 ## Position management (exits)
 
 **Important, easy to assume otherwise: `RiskEngine` never sets or

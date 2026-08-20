@@ -39,7 +39,7 @@ from webull_bot.data.universe import (
 )
 from webull_bot.enums import CandidateState
 from webull_bot.execution.order_manager import OrderManager
-from webull_bot.models import MomentumScore, Order, Trade
+from webull_bot.models import MomentumScore, Order, Position, Trade
 from webull_bot.position.position_manager import PositionManager
 from webull_bot.risk.risk_engine import RiskEngine
 from webull_bot.runtime.trading_loop import TradingLoop
@@ -66,6 +66,9 @@ def build_trading_loop(
     on_order_update: Optional[Callable[[Order], None]] = None,
     on_state_transition: Optional[Callable[[str, CandidateState, CandidateState, datetime], None]] = None,
     on_score_computed: Optional[Callable[[str, MomentumScore], None]] = None,
+    on_position_snapshot_upsert: Optional[Callable[[Position], None]] = None,
+    on_position_snapshot_delete: Optional[Callable[[str], None]] = None,
+    load_position_snapshot: Optional[Callable[[], list[Position]]] = None,
     momentum_event_tracker: Optional[MomentumEventTracker] = None,
 ) -> TradingLoop:
     """Builds the full pipeline. `on_trade_closed`/`on_order_update` default to
@@ -265,6 +268,9 @@ def build_trading_loop(
         on_order_update=on_order_update,
         on_state_transition=on_state_transition,
         on_score_computed=on_score_computed,
+        on_position_snapshot_upsert=on_position_snapshot_upsert,
+        on_position_snapshot_delete=on_position_snapshot_delete,
+        load_position_snapshot=load_position_snapshot,
         momentum_event_tracker=momentum_event_tracker,
         momentum_engine=momentum_engine,
     )

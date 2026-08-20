@@ -5,11 +5,21 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from webull_bot.db.models import Base, MomentumEventRecord, MomentumScoreRecord, OrderRecord, ScannerEvent, TradeRecord
+from webull_bot.db.models import (
+    Base,
+    MomentumEventRecord,
+    MomentumScoreRecord,
+    OrderRecord,
+    PositionRecord,
+    ScannerEvent,
+    TradeRecord,
+)
 from webull_bot.db.repository import (
     DBBackedEventRecorder,
+    delete_open_position,
     get_momentum_score_component_summary,
     get_momentum_scores,
+    get_open_positions_snapshot,
     get_performance_summary,
     get_recent_trades,
     record_momentum_event,
@@ -17,9 +27,10 @@ from webull_bot.db.repository import (
     record_order,
     record_scanner_event,
     record_trade,
+    upsert_open_position,
 )
 from webull_bot.enums import CandidateState, ExitReason, MomentumOutcome, OrderSide, OrderStatus, OrderType
-from webull_bot.models import MomentumEvent, MomentumMetrics, MomentumScore, MomentumScoreComponents, Order, Trade
+from webull_bot.models import MomentumEvent, MomentumMetrics, MomentumScore, MomentumScoreComponents, Order, Position, Trade
 
 
 @pytest.fixture
@@ -89,6 +100,85 @@ def test_record_order_inserts_then_updates_same_row(session):
 def test_record_order_requires_client_order_id(session):
     with pytest.raises(ValueError):
         record_order(session, _order(client_order_id=None), trading_mode="paper")
+
+
+def _position(**overrides) -> Position:
+    base = dict(
+        symbol="AAPL", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0,
+        stop_price=9.0, target_price=12.0, trailing_stop_pct=None,
+        opened_at=datetime(2026, 1, 1, 9, 31), strategy_name="momentum_breakout",
+    )
+    base.update(overrides)
+    return Position(**base)
+
+
+def test_upsert_open_position_inserts_then_updates_same_row(session):
+    upsert_open_position(session, _position(quantity=100), user_id=1, bot_id=2)
+    session.commit()
+    assert session.query(PositionRecord).count() == 1
+
+    upsert_open_position(session, _position(quantity=40), user_id=1, bot_id=2)
+    session.commit()
+
+    rows = session.query(PositionRecord).all()
+    assert len(rows) == 1  # updated in place, not a second row
+    assert rows[0].quantity == 40
+
+
+def test_upsert_open_position_scoped_by_user_and_bot(session):
+    upsert_open_position(session, _position(), user_id=1, bot_id=1)
+    upsert_open_position(session, _position(), user_id=2, bot_id=1)
+    session.commit()
+
+    assert session.query(PositionRecord).count() == 2
+
+
+def test_delete_open_position_removes_it(session):
+    upsert_open_position(session, _position(), user_id=1, bot_id=1)
+    session.commit()
+
+    delete_open_position(session, "AAPL", user_id=1, bot_id=1)
+    session.commit()
+
+    assert session.query(PositionRecord).count() == 0
+
+
+def test_delete_open_position_is_a_no_op_when_nothing_exists(session):
+    delete_open_position(session, "AAPL", user_id=1, bot_id=1)  # must not raise
+    session.commit()
+    assert session.query(PositionRecord).count() == 0
+
+
+def test_get_open_positions_snapshot_round_trips_fields(session):
+    upsert_open_position(
+        session,
+        _position(side=OrderSide.SELL_SHORT, quantity=50, avg_entry_price=7.5, stop_price=8.0, target_price=6.0),
+        user_id=1, bot_id=1,
+    )
+    session.commit()
+
+    rows = get_open_positions_snapshot(session, user_id=1, bot_id=1)
+
+    assert len(rows) == 1
+    position = rows[0]
+    assert position.symbol == "AAPL"
+    assert position.side == OrderSide.SELL_SHORT
+    assert position.quantity == 50
+    assert position.avg_entry_price == 7.5
+    assert position.stop_price == 8.0
+    assert position.target_price == 6.0
+    assert position.max_favorable_excursion == 0.0  # not persisted -- see PositionRecord's docstring
+    assert position.max_adverse_excursion == 0.0
+
+
+def test_get_open_positions_snapshot_is_scoped(session):
+    upsert_open_position(session, _position(), user_id=1, bot_id=1)
+    upsert_open_position(session, _position(symbol="MSFT"), user_id=2, bot_id=1)
+    session.commit()
+
+    rows = get_open_positions_snapshot(session, user_id=1, bot_id=1)
+
+    assert [r.symbol for r in rows] == ["AAPL"]
 
 
 def test_get_recent_trades_orders_by_closed_at_desc(session):
