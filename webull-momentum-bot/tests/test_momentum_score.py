@@ -319,3 +319,72 @@ def test_price_momentum_score_blends_both_windows():
     assert only_5m_strong.components.price_momentum_score < both_strong.components.price_momentum_score
     assert only_1m_strong.components.price_momentum_score > 0.0
     assert only_5m_strong.components.price_momentum_score > 0.0
+
+
+# -- momentum_regime_score (2026-08-20, v2.6) -- scores metrics.return_5m, --
+# the SAME metric/threshold scanner/momentum_qualification.py's
+# evaluate_trigger hard-gates ARMED->CONFIRMING entries on, deliberately
+# distinct from price_momentum_score above (which scores price_velocity_5m).
+
+def test_momentum_regime_score_is_none_when_return_5m_unavailable():
+    config = MISConfig.load()
+    score = compute_score(_metrics(return_5m=None), _float_data(5_000_000), config)
+    assert score.components.momentum_regime_score is None
+
+
+def test_momentum_regime_score_is_zero_at_or_below_min():
+    config = MISConfig.load()
+    score = compute_score(_metrics(return_5m=0.5), _float_data(5_000_000), config)
+    assert score.components.momentum_regime_score == 0.0
+
+
+def test_momentum_regime_score_is_mid_at_strong_breakpoint():
+    config = MISConfig.load()
+    score = compute_score(_metrics(return_5m=2.5), _float_data(5_000_000), config)
+    assert score.components.momentum_regime_score == 60.0
+
+
+def test_momentum_regime_score_is_maxed_at_the_regime_threshold():
+    # The whole point: clearing the SAME 4% regime bar
+    # scanner/momentum_qualification.py hard-gates entries on
+    # (scoring/rtms_weights.yaml's min_return_5m_pct) should score this
+    # component at its true maximum, not merely "high."
+    config = MISConfig.load()
+    score = compute_score(_metrics(return_5m=4.00), _float_data(5_000_000), config)
+    assert score.components.momentum_regime_score == 100.0
+
+
+def test_momentum_regime_score_saturates_above_the_regime_threshold():
+    config = MISConfig.load()
+    score = compute_score(_metrics(return_5m=9.0), _float_data(5_000_000), config)
+    assert score.components.momentum_regime_score == 100.0
+
+
+def test_strong_regime_reading_outranks_an_otherwise_identical_flat_candidate():
+    config = MISConfig.load()
+    float_data = _float_data(5_000_000)
+    flat = compute_score(_metrics(return_5m=0.0), float_data, config)
+    regime_confirmed = compute_score(_metrics(return_5m=4.00), float_data, config)
+    assert regime_confirmed.components.momentum_regime_score > flat.components.momentum_regime_score
+    assert regime_confirmed.score > flat.score
+
+
+def test_moderate_candidate_gets_pushed_toward_armed_but_not_alone_by_regime_clearance():
+    # A realistic borderline HEATING_UP candidate: decent but not
+    # near-ARMED on the other 14 components. Clearing the regime threshold
+    # should meaningfully raise the score, but must not by itself reach
+    # weights.yaml's armed_score_threshold (70.0) -- confirming this is a
+    # contributing factor alongside the other components, not a bypass of
+    # the armed_score_threshold check in candidate_watcher.py.
+    config = MISConfig.load()
+    float_data = _float_data(5_000_000)
+    moderate = dict(
+        relative_volume=4.5, relative_volume_5m=6.0, float_velocity_5m=0.035,
+        float_turnover=0.4, volume_accel_1m_3m=1.8, dollar_volume_accel_1m_3m=1.8,
+        price_acceleration=1.5, distance_from_hod_pct=-3.0, distance_from_vwap_pct=1.5,
+        spread_pct=0.4, dollar_volume=900_000, price_velocity_1m=0.8, price_velocity_5m=2.2,
+    )
+    without_regime = compute_score(_metrics(**moderate, return_5m=None), float_data, config)
+    with_regime = compute_score(_metrics(**moderate, return_5m=4.00), float_data, config)
+    assert with_regime.score > without_regime.score
+    assert with_regime.score < config.thresholds["armed_score_threshold"]

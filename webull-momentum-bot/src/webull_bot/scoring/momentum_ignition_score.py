@@ -174,6 +174,27 @@ def compute_components(
     )
     price_momentum_score = (price_momentum_1m_score + price_momentum_5m_score) / 2
 
+    # v2.6 addition (explicit user request): scores metrics.return_5m --
+    # the same 5-minute regime metric/threshold
+    # scanner/momentum_qualification.py's evaluate_trigger hard-gates
+    # ARMED->CONFIRMING entries on (scoring/rtms_weights.yaml's
+    # min_return_5m_pct) -- deliberately a different metric/threshold set
+    # from price_momentum_5m_score above (metrics.price_velocity_5m).
+    # momentum_regime_5m_exceptional is set equal to that same
+    # min_return_5m_pct value in weights.yaml, so clearing the exact bar
+    # RTMS later hard-gates on already maxes this component at 100 here,
+    # not merely scale3's mid-curve value -- see
+    # MomentumScoreComponents.momentum_regime_score's docstring. None
+    # (excluded, not scored as 0) until metrics.return_5m itself is
+    # available -- same contract as room_to_target_score/order_flow_score
+    # above.
+    momentum_regime_score = None
+    if metrics.return_5m is not None:
+        momentum_regime_score = scale3(
+            metrics.return_5m,
+            th["momentum_regime_5m_min"], th["momentum_regime_5m_strong"], th["momentum_regime_5m_exceptional"],
+        )
+
     return MomentumScoreComponents(
         float_score=float_score,
         float_velocity_score=float_velocity_score,
@@ -189,6 +210,7 @@ def compute_components(
         room_to_target_score=room_to_target_score,
         order_flow_score=order_flow_score,
         price_momentum_score=price_momentum_score,
+        momentum_regime_score=momentum_regime_score,
     )
 
 

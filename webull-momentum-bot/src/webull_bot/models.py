@@ -404,6 +404,22 @@ class MomentumScoreComponents:
     # construction in tests keeps working -- in practice this is always a
     # real float, since both source metrics are never None.
     price_momentum_score: Optional[float] = None
+    # v2.6 addition (explicit user request): scores metrics.return_5m --
+    # the SAME metric/threshold scanner/momentum_qualification.py's
+    # evaluate_trigger hard-gates ARMED->CONFIRMING entries on (see
+    # scoring/rtms_weights.yaml's min_return_5m_pct), deliberately NOT
+    # price_velocity_5m (that's price_momentum_score above -- a different
+    # metric with its own, unrelated thresholds). Before this addition, a
+    # candidate got zero MIS credit for clearing the exact regime bar RTMS
+    # later hard-gates entries on -- this closes that gap by letting a
+    # strong regime reading also help push a candidate toward
+    # armed_score_threshold itself, alongside (not instead of) the other
+    # 13 components. Same None-when-unavailable contract as
+    # room_to_target_score/order_flow_score above: metrics.return_5m is
+    # None (not 0.0) until ~5 minutes of snapshot history exists, and a
+    # brand-new candidate must not be scored as though it failed this
+    # component when it simply isn't measurable yet.
+    momentum_regime_score: Optional[float] = None
 
 
 @dataclass
