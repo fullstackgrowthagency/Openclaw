@@ -42,11 +42,14 @@ from ..auth.routes import build_auth_router
 from ..config import Settings, get_settings
 from ..db.models import Bot, User
 from ..db.repository import (
+    ADJUSTABLE_POSITION_FIELDS,
+    ADJUSTABLE_RISK_FIELDS,
     get_momentum_score_component_summary,
     get_momentum_scores,
     get_or_create_default_bot,
     get_performance_summary,
     get_recent_trades,
+    update_bot_settings,
 )
 from ..runtime.loop_registry import LoopRegistry
 from ..runtime.trading_loop import TradingLoop
@@ -121,19 +124,17 @@ def _last_transition_reason(notes: str) -> str | None:
     return last_line.split(": ", 1)[-1] if ": " in last_line else last_line
 
 
-# The seven RiskConfig fields adjustable from the dashboard's Settings modal
-# -- deliberately a small, curated subset of RiskConfig (not every field),
-# matched to what the Settings UI actually exposes. All are percentages
-# except min_risk_reward_ratio (a ratio, e.g. 2.0 = "at least 2x reward for
+# ADJUSTABLE_RISK_FIELDS (imported above from db/repository.py, the
+# single shared source of truth so this module and BotSettings/
+# update_bot_settings can't drift apart): the seven RiskConfig fields
+# adjustable from the dashboard's Settings modal -- deliberately a small,
+# curated subset of RiskConfig (not every field), matched to what the
+# Settings UI actually exposes. All are percentages except
+# min_risk_reward_ratio (a ratio, e.g. 2.0 = "at least 2x reward for
 # every 1x risked"), max_simultaneous_positions (a whole-number position
 # count, where 0 means unlimited -- see its own validation below), and
 # allow_extended_hours_trading (a bool, added 2026-08-12 -- see its own
 # validation below and RiskConfig's docstring for what it actually gates).
-_ADJUSTABLE_RISK_FIELDS = (
-    "stop_loss_pct", "min_risk_reward_ratio", "max_position_size_pct",
-    "max_total_risk_pct", "max_daily_loss_pct", "max_simultaneous_positions",
-    "allow_extended_hours_trading",
-)
 
 
 class RiskSettingsUpdate(BaseModel):
@@ -146,7 +147,8 @@ class RiskSettingsUpdate(BaseModel):
     allow_extended_hours_trading: Optional[bool] = None
 
 
-# The two PositionManagementConfig fields adjustable from the same Settings
+# ADJUSTABLE_POSITION_FIELDS (also imported from db/repository.py): the
+# two PositionManagementConfig fields adjustable from the same Settings
 # modal -- a separate config object from RiskConfig above (lives on
 # trading_loop.position_manager, not risk_engine), so it gets its own small
 # GET/POST pair rather than being folded into /api/risk-settings. Both are
@@ -155,7 +157,6 @@ class RiskSettingsUpdate(BaseModel):
 # unchanged" -- there's currently no way to use this endpoint to explicitly
 # turn a rule off, only to set it to a positive value. Disabling one
 # entirely still requires a code-level config change.
-_ADJUSTABLE_POSITION_FIELDS = ("trailing_stop_pct", "breakeven_trigger_pct")
 
 
 class PositionSettingsUpdate(BaseModel):
@@ -361,7 +362,7 @@ def create_app(
         any change made through POST /api/risk-settings below), not a static
         default."""
         config = _resolve_loop(request).risk_engine.config
-        return {field: getattr(config, field) for field in _ADJUSTABLE_RISK_FIELDS}
+        return {field: getattr(config, field) for field in ADJUSTABLE_RISK_FIELDS}
 
     @app.post("/api/risk-settings")
     def update_risk_settings(update: RiskSettingsUpdate, request: Request):
@@ -379,7 +380,18 @@ def create_app(
         WHEN a signal is allowed to enter (see RiskConfig's docstring) --
         it does not by itself make the broker accept an extended-hours
         order; see WebullBrokerClient._order_payload's support_trading_
-        session note for that still-separate, still-unverified half."""
+        session note for that still-separate, still-unverified half.
+
+        Also writes through to the BotSettings DB row (db/repository.py's
+        update_bot_settings) so this survives a process restart or a
+        mid-session loop rebuild (e.g. a broker-credential re-verify --
+        see scripts/run_dashboard.py's _build_loop_for_user), instead of
+        only living on this in-memory config until the next rebuild wipes
+        it. The live setattr below still happens unconditionally and
+        first -- the setting is already in effect even if the DB write
+        that follows fails, so a persistence hiccup here is logged, not
+        raised as a 500 (which would misleadingly suggest the settings
+        change itself didn't take)."""
         config = _resolve_loop(request).risk_engine.config
         updates = update.model_dump(exclude_none=True)
         errors = []
@@ -398,7 +410,15 @@ def create_app(
             raise HTTPException(status_code=422, detail=" ".join(errors))
         for field, value in updates.items():
             setattr(config, field, value)
-        return {field: getattr(config, field) for field in _ADJUSTABLE_RISK_FIELDS}
+        user_id = _current_user_id(request)
+        bot_id = _current_bot_id(request)
+        try:
+            with session_factory() as session:
+                update_bot_settings(session, user_id, bot_id, **updates)
+                session.commit()
+        except Exception:
+            logger.exception("Failed to persist risk settings for user_id=%s bot_id=%s", user_id, bot_id)
+        return {field: getattr(config, field) for field in ADJUSTABLE_RISK_FIELDS}
 
     @app.get("/api/position-settings")
     def get_position_settings(request: Request):
@@ -406,7 +426,7 @@ def create_app(
         Settings modal exposes -- read straight off the running
         PositionManager.config, distinct from RiskConfig above."""
         config = _resolve_loop(request).position_manager.config
-        return {field: getattr(config, field) for field in _ADJUSTABLE_POSITION_FIELDS}
+        return {field: getattr(config, field) for field in ADJUSTABLE_POSITION_FIELDS}
 
     @app.post("/api/position-settings")
     def update_position_settings(update: PositionSettingsUpdate, request: Request):
@@ -415,7 +435,10 @@ def create_app(
         restart needed. Only fields present (non-None) in the request body
         are changed. Both are percentages that must be positive and not
         exceed 100 (a trailing stop or breakeven trigger beyond 100% of
-        price is meaningless)."""
+        price is meaningless).
+
+        Also writes through to the BotSettings DB row, same rationale and
+        failure-mode handling as update_risk_settings above."""
         config = _resolve_loop(request).position_manager.config
         updates = update.model_dump(exclude_none=True)
         errors = [f"{field} must be greater than 0." for field, value in updates.items() if value <= 0]
@@ -424,7 +447,15 @@ def create_app(
             raise HTTPException(status_code=422, detail=" ".join(errors))
         for field, value in updates.items():
             setattr(config, field, value)
-        return {field: getattr(config, field) for field in _ADJUSTABLE_POSITION_FIELDS}
+        user_id = _current_user_id(request)
+        bot_id = _current_bot_id(request)
+        try:
+            with session_factory() as session:
+                update_bot_settings(session, user_id, bot_id, **updates)
+                session.commit()
+        except Exception:
+            logger.exception("Failed to persist position settings for user_id=%s bot_id=%s", user_id, bot_id)
+        return {field: getattr(config, field) for field in ADJUSTABLE_POSITION_FIELDS}
 
     @app.post("/api/kill-switch")
     def update_kill_switch(update: KillSwitchUpdate, request: Request):

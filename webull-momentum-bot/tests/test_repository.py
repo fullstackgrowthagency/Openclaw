@@ -7,6 +7,7 @@ from sqlalchemy.pool import StaticPool
 
 from webull_bot.db.models import (
     Base,
+    BotSettings,
     MomentumEventRecord,
     MomentumScoreRecord,
     OrderRecord,
@@ -16,10 +17,13 @@ from webull_bot.db.models import (
 )
 from webull_bot.db.repository import (
     DBBackedEventRecorder,
+    build_position_config_from_settings,
+    build_risk_config_from_settings,
     delete_open_position,
     get_momentum_score_component_summary,
     get_momentum_scores,
     get_open_positions_snapshot,
+    get_or_create_bot_settings,
     get_performance_summary,
     get_recent_trades,
     record_momentum_event,
@@ -27,10 +31,13 @@ from webull_bot.db.repository import (
     record_order,
     record_scanner_event,
     record_trade,
+    update_bot_settings,
     upsert_open_position,
 )
 from webull_bot.enums import CandidateState, ExitReason, MomentumOutcome, OrderSide, OrderStatus, OrderType
 from webull_bot.models import MomentumEvent, MomentumMetrics, MomentumScore, MomentumScoreComponents, Order, Position, Trade
+from webull_bot.position.position_manager import PositionManagementConfig
+from webull_bot.risk.risk_engine import RiskConfig
 
 
 @pytest.fixture
@@ -131,6 +138,78 @@ def test_upsert_open_position_scoped_by_user_and_bot(session):
     session.commit()
 
     assert session.query(PositionRecord).count() == 2
+
+
+def test_get_or_create_bot_settings_is_idempotent(session):
+    row = get_or_create_bot_settings(session, user_id=1, bot_id=1)
+    session.commit()
+    row_again = get_or_create_bot_settings(session, user_id=1, bot_id=1)
+    session.commit()
+
+    assert row.id == row_again.id
+    assert session.query(BotSettings).count() == 1
+
+
+def test_get_or_create_bot_settings_scoped_by_user_and_bot(session):
+    a = get_or_create_bot_settings(session, user_id=1, bot_id=1)
+    b = get_or_create_bot_settings(session, user_id=1, bot_id=2)
+    c = get_or_create_bot_settings(session, user_id=2, bot_id=1)
+    session.commit()
+
+    assert len({a.id, b.id, c.id}) == 3
+    assert session.query(BotSettings).count() == 3
+
+
+def test_update_bot_settings_only_changes_passed_fields(session):
+    update_bot_settings(session, user_id=1, bot_id=1, stop_loss_pct=2.5)
+    session.commit()
+
+    row = get_or_create_bot_settings(session, user_id=1, bot_id=1)
+    assert row.stop_loss_pct == 2.5
+    assert row.min_risk_reward_ratio is None
+    assert row.trailing_stop_pct is None
+
+
+def test_update_bot_settings_upserts_when_no_row_exists(session):
+    assert session.query(BotSettings).count() == 0
+
+    update_bot_settings(session, user_id=1, bot_id=1, breakeven_trigger_pct=7.5)
+    session.commit()
+
+    assert session.query(BotSettings).count() == 1
+    row = session.query(BotSettings).one()
+    assert row.breakeven_trigger_pct == 7.5
+
+
+def test_build_risk_config_from_settings_overrides_only_saved_fields(session):
+    row = get_or_create_bot_settings(session, user_id=1, bot_id=1)
+    row.stop_loss_pct = 3.0
+    session.commit()
+
+    config = build_risk_config_from_settings(row)
+    default = RiskConfig()
+    assert config.stop_loss_pct == 3.0
+    assert config.max_trades_per_day == default.max_trades_per_day
+    assert config.min_risk_reward_ratio == default.min_risk_reward_ratio
+
+
+def test_build_risk_config_from_settings_with_none_row_returns_defaults():
+    assert build_risk_config_from_settings(None) == RiskConfig()
+
+
+def test_build_position_config_from_settings_overrides_only_saved_fields(session):
+    row = get_or_create_bot_settings(session, user_id=1, bot_id=1)
+    row.trailing_stop_pct = 4.0
+    session.commit()
+
+    config = build_position_config_from_settings(row)
+    default = PositionManagementConfig()
+    assert config.trailing_stop_pct == 4.0
+    assert config.breakeven_trigger_pct == default.breakeven_trigger_pct
+
+
+def test_build_position_config_from_settings_with_none_row_returns_defaults():
+    assert build_position_config_from_settings(None) == PositionManagementConfig()
 
 
 def test_delete_open_position_removes_it(session):

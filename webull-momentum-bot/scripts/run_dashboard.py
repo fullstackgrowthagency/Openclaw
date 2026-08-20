@@ -55,8 +55,11 @@ from webull_bot.dashboard.app import create_app
 from webull_bot.db.models import BrokerCredential, User
 from webull_bot.db.repository import (
     DBBackedEventRecorder,
+    build_position_config_from_settings,
+    build_risk_config_from_settings,
     delete_open_position,
     get_open_positions_snapshot,
+    get_or_create_bot_settings,
     get_or_create_default_bot,
     record_momentum_score,
     record_order,
@@ -179,11 +182,28 @@ def _build_loop_for_user(user_id: Optional[int], user_settings: Settings, sessio
         with session_factory() as session:
             bot_id = get_or_create_default_bot(session, user_id).id
             session.commit()
+
+    # Loaded fresh on every call -- covers both the initial process-boot
+    # build (_start_multi_tenant) and every mid-session rebuild
+    # (auth/broker_credential_routes.py's _restart_loop_for, via
+    # LoopRegistry's injected loop_factory below) with this one change, so
+    # a user's dashboard Settings survive a broker-credential save instead
+    # of reverting to RiskConfig/PositionManagementConfig's hardcoded
+    # defaults -- see dashboard/app.py's settings endpoints, which write
+    # through to this same BotSettings row on save.
+    with session_factory() as session:
+        settings_row = get_or_create_bot_settings(session, user_id, bot_id)
+        risk_config = build_risk_config_from_settings(settings_row)
+        position_config = build_position_config_from_settings(settings_row)
+        session.commit()
+
     momentum_event_tracker = MomentumEventTracker(
         DBBackedEventRecorder(session_factory, user_id=user_id, bot_id=bot_id)
     )
     return build_trading_loop(
         settings=user_settings,
+        risk_config=risk_config,
+        position_config=position_config,
         on_trade_closed=_make_trade_persister(session_factory, user_settings.trading_mode.value, user_id, bot_id),
         on_order_update=_make_order_persister(session_factory, user_settings.trading_mode.value, user_id, bot_id),
         on_state_transition=_make_state_transition_persister(session_factory, user_id, bot_id),

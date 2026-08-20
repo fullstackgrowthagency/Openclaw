@@ -40,8 +40,8 @@ from webull_bot.data.universe import (
 from webull_bot.enums import CandidateState
 from webull_bot.execution.order_manager import OrderManager
 from webull_bot.models import MomentumScore, Order, Position, Trade
-from webull_bot.position.position_manager import PositionManager
-from webull_bot.risk.risk_engine import RiskEngine
+from webull_bot.position.position_manager import PositionManagementConfig, PositionManager
+from webull_bot.risk.risk_engine import RiskConfig, RiskEngine
 from webull_bot.runtime.trading_loop import TradingLoop
 from webull_bot.scanner.broad_scanner import BroadScanner
 from webull_bot.scanner.candidate_watcher import CandidateWatcher
@@ -63,6 +63,8 @@ _PAPER_MODE_PLACEHOLDER_WATCHLIST = ["AAPL"]  # replace with symbols you intend 
 def build_trading_loop(
     *,
     settings: Optional[Settings] = None,
+    risk_config: Optional[RiskConfig] = None,
+    position_config: Optional[PositionManagementConfig] = None,
     on_trade_closed: Optional[Callable[[Trade], None]] = None,
     on_order_update: Optional[Callable[[Order], None]] = None,
     on_state_transition: Optional[Callable[[str, CandidateState, CandidateState, datetime], None]] = None,
@@ -76,7 +78,17 @@ def build_trading_loop(
     printing (this module's original behavior); pass your own (and the other
     hooks) to also (or instead) persist to a database -- see
     scripts/run_dashboard.py, which wraps these to write through
-    db/repository.py while still printing trade closures."""
+    db/repository.py while still printing trade closures.
+
+    `risk_config`/`position_config`: pass a pre-built RiskConfig/
+    PositionManagementConfig (e.g. loaded from db/repository.py's
+    BotSettings row via build_risk_config_from_settings/
+    build_position_config_from_settings) so a user's saved dashboard
+    Settings survive this function being called again -- at process
+    restart or at any mid-session loop rebuild (see
+    scripts/run_dashboard.py's _build_loop_for_user). None (the default)
+    constructs each dataclass with its bare hardcoded defaults, exactly
+    as before this parameter existed."""
     settings = settings or get_settings()
     settings.require_non_live_or_authorized()
 
@@ -185,7 +197,7 @@ def build_trading_loop(
 
     # Constructed before watcher/strategies below so each one can be handed a
     # live-reading closure over its config -- see reward_risk_ratio_fn.
-    risk_engine = RiskEngine()
+    risk_engine = RiskEngine(risk_config)
 
     # Every strategy computes its target as entry + risk_per_share * this
     # ratio, read fresh on every signal rather than each hardcoding its own
@@ -254,7 +266,7 @@ def build_trading_loop(
         MomentumRegimeStrategy(reward_risk_ratio_fn=reward_risk_ratio_fn, stop_loss_pct_fn=stop_loss_pct_fn),
     ])
     order_manager = OrderManager(broker, risk_engine, settings)
-    position_manager = PositionManager()
+    position_manager = PositionManager(position_config)
 
     # Real-Time Momentum Qualification Layer (2026-08-17, see
     # scanner/momentum_qualification.py) -- the Tier 2.5 gate between

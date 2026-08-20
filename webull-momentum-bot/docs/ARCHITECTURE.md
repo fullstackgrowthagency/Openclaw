@@ -3838,21 +3838,50 @@ it's opt-in per open of the panel.
 Safety section's kill-switch button for the dashboard's other write path).
 Two separate config objects, two separate endpoint pairs, shown together
 in one modal:
-- `GET`/`POST /api/risk-settings` expose six `RiskConfig` fields (see
+- `GET`/`POST /api/risk-settings` expose seven `RiskConfig` fields (see
   "Risk sizing" above), mutating `trading_loop.risk_engine.config` directly.
 - `GET`/`POST /api/position-settings` expose two `PositionManagementConfig`
   fields (`breakeven_trigger_pct`, `trailing_stop_pct` -- see "Position
   management" above), mutating `trading_loop.position_manager.config`.
 
 Both take effect on the very next evaluation (a `Signal` for risk settings,
-a `check_exit()` call for position settings) -- no restart, and nothing
-persisted to disk or the database, so a restart reverts to each config
-dataclass's hardcoded defaults. Both are deliberately small, curated
-subsets of their respective config objects (`_ADJUSTABLE_RISK_FIELDS` /
-`_ADJUSTABLE_POSITION_FIELDS` in `dashboard/app.py`), not every field --
-matched to what's actually useful to tune without restarting versus a
-rarer, more structural decision (e.g. `max_trades_per_ticker_per_day`)
-better made by editing the config in code. One of the six risk fields,
+a `check_exit()` call for position settings) -- no restart needed. **Both
+also persist to the database** (2026-08-20, fixing a real reported bug --
+a user's saved settings were reverting to each config dataclass's
+hardcoded defaults): each `POST` writes through to a `bot_settings` row
+(`db/models.py`'s `BotSettings`, `db/repository.py`'s
+`update_bot_settings`) in the same request, right after the live
+`setattr` above -- kept as a best-effort write, not something that can
+turn the request into a 500, since the in-memory config has already
+taken the change by the time the DB write runs; a persistence failure is
+logged, not raised. `scripts/run_dashboard.py`'s `_build_loop_for_user`
+loads this same row (`build_risk_config_from_settings`/
+`build_position_config_from_settings`) and hands the resulting
+`RiskConfig`/`PositionManagementConfig` into `build_trading_loop()` every
+time a loop is (re)built -- at initial process boot AND at every
+mid-session rebuild (e.g. `auth/broker_credential_routes.py`'s
+`_restart_loop_for`, triggered by a broker-credential save/re-verify) --
+so a saved setting survives both. `BotSettings` is scoped by
+`(user_id, bot_id)`, not `user_id` alone like `BrokerCredential` -- risk/
+position-management behavior is a property of *how a bot trades*, not
+the account's shared broker connection (see `Bot`'s own docstring), so it
+follows the same `user_id`+`bot_id` scoping already used for
+`TradeRecord`/`PositionRecord` rather than `BrokerCredential`'s
+account-wide, `user_id`-only scoping. Every column is nullable -- `NULL`
+means "not customized, use the code default" -- so a user who's never
+touched a given field keeps tracking that field's hardcoded default even
+if it changes in a future deploy, rather than being frozen at whatever
+value existed on their first save.
+
+Both endpoints are deliberately small, curated
+subsets of their respective config objects (`ADJUSTABLE_RISK_FIELDS` /
+`ADJUSTABLE_POSITION_FIELDS`, defined once in `db/repository.py` and
+imported by `dashboard/app.py` so the two can't drift apart -- and the
+same tuples double as the exact set of `BotSettings` columns persisted),
+not every field -- matched to what's actually useful to tune without
+restarting versus a rarer, more structural decision (e.g.
+`max_trades_per_ticker_per_day`) better made by editing the config in
+code. One of the seven risk fields,
 `max_simultaneous_positions`, is a whole-number position count rather than
 a percentage/ratio like the other five -- its validation is special-cased
 in `update_risk_settings` accordingly: 0 is accepted and means unlimited

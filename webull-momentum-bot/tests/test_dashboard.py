@@ -17,7 +17,7 @@ from webull_bot.brokers.paper.client import PaperBrokerClient
 from webull_bot.config import get_settings
 from webull_bot.dashboard.app import create_app
 from webull_bot.data.universe import StaticUniverseProvider
-from webull_bot.db.models import Base
+from webull_bot.db.models import Base, BotSettings
 from webull_bot.db.repository import record_momentum_score, record_trade
 from webull_bot.enums import CandidateState, ExitReason, OrderSide
 from webull_bot.execution.order_manager import OrderManager
@@ -533,6 +533,49 @@ def test_risk_settings_update_allows_max_simultaneous_positions_over_100(loop, c
     resp = client.post("/api/risk-settings", json={"max_simultaneous_positions": 250})
     assert resp.status_code == 200
     assert loop.risk_engine.config.max_simultaneous_positions == 250
+
+
+def test_risk_settings_update_persists_to_db(loop, client, session_factory):
+    resp = client.post("/api/risk-settings", json={"stop_loss_pct": 2.5})
+    assert resp.status_code == 200
+
+    with session_factory() as session:
+        row = session.query(BotSettings).one()
+        assert row.stop_loss_pct == 2.5
+        assert row.user_id is None  # single-tenant/no-auth fixture -- no session, no user
+        assert row.bot_id is None
+
+
+def test_risk_settings_update_persists_only_changed_fields(loop, client, session_factory):
+    resp = client.post("/api/risk-settings", json={"stop_loss_pct": 2.5})
+    assert resp.status_code == 200
+
+    with session_factory() as session:
+        row = session.query(BotSettings).one()
+        assert row.min_risk_reward_ratio is None
+        assert row.max_position_size_pct is None
+        assert row.allow_extended_hours_trading is None
+
+
+def test_position_settings_update_persists_to_db(loop, client, session_factory):
+    resp = client.post("/api/position-settings", json={"trailing_stop_pct": 4.0})
+    assert resp.status_code == 200
+
+    with session_factory() as session:
+        row = session.query(BotSettings).one()
+        assert row.trailing_stop_pct == 4.0
+        assert row.breakeven_trigger_pct is None
+
+
+def test_risk_settings_and_position_settings_share_one_row(loop, client, session_factory):
+    client.post("/api/risk-settings", json={"stop_loss_pct": 2.5})
+    client.post("/api/position-settings", json={"breakeven_trigger_pct": 7.5})
+
+    with session_factory() as session:
+        assert session.query(BotSettings).count() == 1
+        row = session.query(BotSettings).one()
+        assert row.stop_loss_pct == 2.5
+        assert row.breakeven_trigger_pct == 7.5
 
 
 def test_position_settings_returns_current_config(loop, client):

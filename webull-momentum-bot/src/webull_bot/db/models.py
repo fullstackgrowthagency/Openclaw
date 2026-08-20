@@ -404,6 +404,52 @@ class Bot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class BotSettings(Base):
+    """Persisted counterpart to a TradingLoop's live RiskEngine.config /
+    PositionManager.config -- one row per (user_id, bot_id), covering only
+    the dashboard-adjustable field subsets of RiskConfig/
+    PositionManagementConfig (db/repository.py's ADJUSTABLE_RISK_FIELDS/
+    ADJUSTABLE_POSITION_FIELDS), not every field on either dataclass.
+    Every settings column is nullable and means "not customized -- use
+    that dataclass's hardcoded default" when NULL, so a field's hardcoded
+    default can still change in a future code deploy for every user who
+    has never touched it, instead of a persisted "was the default at
+    signup" value silently pinning them to a now-stale number forever.
+
+    Scoped by (user_id, bot_id) rather than user_id alone (unlike
+    BrokerCredential, which is genuinely account-wide -- see Bot's own
+    docstring above) because risk/position-management behavior is a
+    property of a *bot's* trading logic, not the account's broker
+    connection -- today there's exactly one Bot per user so this is a
+    distinction without a difference in practice, but it means a real
+    second bot type can get its own independent risk profile later with
+    no schema change, only a code change to how loops are resolved per
+    bot. NULL/NULL (both columns) in single-tenant/no-auth mode, exactly
+    like TradeRecord/OrderRecord/etc.'s own user_id/bot_id columns."""
+    __tablename__ = "bot_settings"
+    __table_args__ = (UniqueConstraint("user_id", "bot_id", name="uq_bot_settings_user_bot"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), nullable=True, index=True)
+
+    # RiskConfig subset (db/repository.py's ADJUSTABLE_RISK_FIELDS)
+    stop_loss_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_risk_reward_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_position_size_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_total_risk_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_daily_loss_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_simultaneous_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    allow_extended_hours_trading: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # PositionManagementConfig subset (db/repository.py's ADJUSTABLE_POSITION_FIELDS)
+    trailing_stop_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    breakeven_trigger_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class MomentumEventRecord(Base):
     """
     Traded AND non-traded momentum events, with forward-looking outcome

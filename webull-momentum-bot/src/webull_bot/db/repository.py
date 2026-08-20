@@ -18,12 +18,37 @@ from sqlalchemy.orm import Session
 from ..collection.event_recorder import EventRecorder
 from ..enums import CandidateState, OrderSide
 from ..models import MomentumEvent, MomentumScore, Order, Position, Trade
+from ..position.position_manager import PositionManagementConfig
+from ..risk.risk_engine import RiskConfig
 from ..scoring.momentum_ignition_score import MISConfig
-from .models import Bot, MomentumEventRecord, MomentumScoreRecord, OrderRecord, PositionRecord, ScannerEvent, TradeRecord
+from .models import (
+    Bot,
+    BotSettings,
+    MomentumEventRecord,
+    MomentumScoreRecord,
+    OrderRecord,
+    PositionRecord,
+    ScannerEvent,
+    TradeRecord,
+)
 
 _DEFAULT_BOT_SLUG = "day-trading-quant"
 _DEFAULT_BOT_NAME = "Day Trading Quant"
 _DEFAULT_BOT_KIND = "momentum_quant"
+
+# The dashboard-adjustable subset of RiskConfig/PositionManagementConfig
+# that BotSettings persists -- deliberately a small, curated subset (not
+# every field on either dataclass), matched to what the Settings UI
+# actually exposes (dashboard/app.py's RiskSettingsUpdate/
+# PositionSettingsUpdate). Kept here, not duplicated in dashboard/app.py,
+# so the DB schema, the persistence helpers below, and the dashboard
+# endpoints can't drift apart from each other.
+ADJUSTABLE_RISK_FIELDS = (
+    "stop_loss_pct", "min_risk_reward_ratio", "max_position_size_pct",
+    "max_total_risk_pct", "max_daily_loss_pct", "max_simultaneous_positions",
+    "allow_extended_hours_trading",
+)
+ADJUSTABLE_POSITION_FIELDS = ("trailing_stop_pct", "breakeven_trigger_pct")
 
 
 def get_or_create_default_bot(session: Session, user_id: int) -> Bot:
@@ -44,6 +69,67 @@ def get_or_create_default_bot(session: Session, user_id: int) -> Bot:
         session.add(bot)
         session.flush()
     return bot
+
+
+def get_or_create_bot_settings(session: Session, user_id: Optional[int], bot_id: Optional[int]) -> BotSettings:
+    """One row per (user_id, bot_id) -- see BotSettings' docstring for why
+    bot_id-scoped rather than user_id-only like BrokerCredential. NULL/NULL
+    in single-tenant/no-auth mode, matching every other user_id/bot_id
+    column in this schema. Idempotent, same get-or-create shape as
+    get_or_create_default_bot."""
+    row = (
+        session.query(BotSettings)
+        .filter(BotSettings.user_id == user_id, BotSettings.bot_id == bot_id)
+        .one_or_none()
+    )
+    if row is None:
+        row = BotSettings(user_id=user_id, bot_id=bot_id)
+        session.add(row)
+        session.flush()
+    return row
+
+
+def update_bot_settings(
+    session: Session, user_id: Optional[int], bot_id: Optional[int], **fields,
+) -> BotSettings:
+    """Upserts (via get_or_create_bot_settings) then applies only the
+    fields actually passed -- callers pass the update.model_dump(
+    exclude_none=True) dict from either dashboard settings endpoint, so
+    this one function serves both /api/risk-settings and
+    /api/position-settings without needing to know which config group a
+    field came from."""
+    row = get_or_create_bot_settings(session, user_id, bot_id)
+    for field, value in fields.items():
+        setattr(row, field, value)
+    session.flush()
+    return row
+
+
+def build_risk_config_from_settings(row: Optional[BotSettings]) -> RiskConfig:
+    """RiskConfig with every ADJUSTABLE_RISK_FIELDS field overridden by
+    whatever this row has saved (non-NULL); every other field -- adjustable
+    or not -- keeps RiskConfig's own hardcoded default untouched. row=None
+    returns a bare default RiskConfig, identical to today's pre-persistence
+    behavior."""
+    config = RiskConfig()
+    if row is not None:
+        for field in ADJUSTABLE_RISK_FIELDS:
+            value = getattr(row, field)
+            if value is not None:
+                setattr(config, field, value)
+    return config
+
+
+def build_position_config_from_settings(row: Optional[BotSettings]) -> PositionManagementConfig:
+    """Same contract as build_risk_config_from_settings, for the
+    PositionManagementConfig subset."""
+    config = PositionManagementConfig()
+    if row is not None:
+        for field in ADJUSTABLE_POSITION_FIELDS:
+            value = getattr(row, field)
+            if value is not None:
+                setattr(config, field, value)
+    return config
 
 
 def record_trade(
