@@ -574,6 +574,21 @@ class Candidate:
     # docstring for the full contract and its two reset seams.
     momentum: MomentumState = field(default_factory=MomentumState)
 
+    # True once TradingLoop._maybe_raise_stale_market_data_alert has
+    # already raised a RiskEventType.MARKET_DATA_STALE event for this
+    # candidate's current dead-feed stretch -- same one-alert-per-episode
+    # idea as Position.unprotected_alert_logged. Lives here (not on
+    # Position) so ONE flag covers both open positions and pre-entry
+    # candidates: every Position this codebase tracks has a corresponding
+    # Candidate in TradingLoop.candidates for as long as it's tracked (see
+    # reconcile_positions_from_broker), so Candidate is a strict superset
+    # of what needs this. Reset to False in TradingLoop._process_candidate_inner
+    # the moment a fresh snapshot is cached again for this symbol, so a
+    # LATER stretch without live data raises its own fresh alert rather
+    # than staying suppressed by a flag from an earlier, already-resolved
+    # one.
+    market_data_stale_alert_logged: bool = False
+
 
 @dataclass
 class Signal:
@@ -729,17 +744,6 @@ class Position:
     # can raise a fresh event rather than staying silently suppressed by a
     # flag from a completely different episode.
     unprotected_alert_logged: bool = False
-
-    # True once TradingLoop._maybe_raise_stale_market_data_alert has
-    # already raised a RiskEventType.POSITION_MARKET_DATA_STALE event for
-    # this position's current dead-feed stretch -- same one-alert-per-
-    # episode idea as unprotected_alert_logged above, just keyed off
-    # get_last_known_price_age_seconds instead of the broker-bracket
-    # state. Reset to False by _manage_position the moment a fresh
-    # snapshot is cached again, so a LATER stretch without live data can
-    # raise its own fresh alert rather than staying suppressed by a flag
-    # from an earlier, already-resolved one.
-    market_data_stale_alert_logged: bool = False
 
 
 @dataclass

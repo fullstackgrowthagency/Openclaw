@@ -2314,10 +2314,10 @@ def test_maybe_raise_stale_market_data_alert_fires_after_the_threshold():
         candidate, stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1),
     )
 
-    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.POSITION_MARKET_DATA_STALE.value]
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.MARKET_DATA_STALE.value]
     assert len(alerts) == 1
     assert alerts[0].symbol == "TEST"
-    assert loop._positions["TEST"].market_data_stale_alert_logged is True
+    assert candidate.market_data_stale_alert_logged is True
 
 
 def test_maybe_raise_stale_market_data_alert_only_fires_once_per_episode():
@@ -2334,7 +2334,7 @@ def test_maybe_raise_stale_market_data_alert_only_fires_once_per_episode():
     loop._maybe_raise_stale_market_data_alert(candidate, past_threshold)
     loop._maybe_raise_stale_market_data_alert(candidate, past_threshold + timedelta(seconds=30))
 
-    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.POSITION_MARKET_DATA_STALE.value]
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.MARKET_DATA_STALE.value]
     assert len(alerts) == 1
 
 
@@ -2354,7 +2354,7 @@ def test_maybe_raise_stale_market_data_alert_is_a_noop_without_any_cached_snapsh
         candidate, _IN_HOURS_NOW + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1),
     )
 
-    assert not any(e.event_type == RiskEventType.POSITION_MARKET_DATA_STALE.value for e in loop.risk_engine.events)
+    assert not any(e.event_type == RiskEventType.MARKET_DATA_STALE.value for e in loop.risk_engine.events)
 
 
 def test_process_candidate_inner_wires_the_stale_market_data_alert_on_snapshot_failure(monkeypatch):
@@ -2376,23 +2376,138 @@ def test_process_candidate_inner_wires_the_stale_market_data_alert_on_snapshot_f
         candidate, stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1),
     )
 
-    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.POSITION_MARKET_DATA_STALE.value]
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.MARKET_DATA_STALE.value]
     assert len(alerts) == 1
     assert alerts[0].symbol == "TEST"
 
 
-def test_manage_position_resets_the_stale_market_data_alert_flag():
+def test_process_candidate_inner_resets_the_stale_market_data_alert_flag_for_a_position():
     broker = PaperBrokerClient()
     broker.connect()
     loop = _build_loop(broker)
     candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
-    position = loop._positions["TEST"]
-    position.market_data_stale_alert_logged = True
+    candidate.market_data_stale_alert_logged = True
+    broker.feed_snapshot(_snapshot(_IN_HOURS_NOW, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0))
 
-    fresh_snapshot = _snapshot(_IN_HOURS_NOW, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
-    loop._manage_position(candidate, fresh_snapshot, _IN_HOURS_NOW)
+    loop._process_candidate_inner(candidate, _IN_HOURS_NOW)
 
-    assert position.market_data_stale_alert_logged is False
+    assert candidate.market_data_stale_alert_logged is False
+
+
+# -- same coverage, but for a pre-entry candidate (WATCHING/HEATING_UP/
+# ARMED/CONFIRMING) -- the exact same silent failure mode existed there
+# before the market-data-stale alert was broadened (2026-08-21, at the
+# user's explicit request: "ensure the data is live and accurate for all
+# candidates and open positions") to cover every
+# _STREAMING_ELIGIBLE_STATES member, not just ENTERED/MANAGING. -------
+
+def _armed_candidate(loop, broker, symbol="TEST", price=10.0):
+    from webull_bot.state_machine import new_candidate, transition
+    from webull_bot.enums import CandidateState
+
+    broker.feed_snapshot(MarketSnapshot(
+        symbol=symbol, timestamp=datetime.utcnow(), last_price=price, bid=price - 0.01, ask=price + 0.01,
+        bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=price, high_of_day=price,
+        low_of_day=price, open_price=price,
+    ))
+    candidate = new_candidate(symbol)
+    for state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED):
+        transition(candidate, state)
+    loop.candidates[symbol] = candidate
+    return candidate
+
+
+def test_maybe_raise_stale_market_data_alert_fires_after_the_threshold_for_a_candidate():
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _armed_candidate(loop, broker, symbol="TEST", price=10.0)
+    stale_at = _IN_HOURS_NOW
+    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+
+    loop._maybe_raise_stale_market_data_alert(candidate, stale_at)
+    assert loop.risk_engine.events == []
+
+    loop._maybe_raise_stale_market_data_alert(
+        candidate, stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1),
+    )
+
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.MARKET_DATA_STALE.value]
+    assert len(alerts) == 1
+    assert alerts[0].symbol == "TEST"
+    assert candidate.market_data_stale_alert_logged is True
+
+
+def test_maybe_raise_stale_market_data_alert_only_fires_once_per_episode_for_a_candidate():
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _armed_candidate(loop, broker, symbol="TEST", price=10.0)
+    stale_at = _IN_HOURS_NOW
+    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    past_threshold = stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1)
+
+    loop._maybe_raise_stale_market_data_alert(candidate, past_threshold)
+    loop._maybe_raise_stale_market_data_alert(candidate, past_threshold + timedelta(seconds=30))
+
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.MARKET_DATA_STALE.value]
+    assert len(alerts) == 1
+
+
+def test_maybe_raise_stale_market_data_alert_is_a_noop_without_any_cached_snapshot_for_a_candidate():
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _armed_candidate(loop, broker, symbol="TEST", price=10.0)
+
+    loop._maybe_raise_stale_market_data_alert(
+        candidate, _IN_HOURS_NOW + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1),
+    )
+
+    assert not any(e.event_type == RiskEventType.MARKET_DATA_STALE.value for e in loop.risk_engine.events)
+
+
+def test_process_candidate_inner_wires_the_stale_market_data_alert_on_snapshot_failure_for_a_candidate(monkeypatch):
+    from webull_bot.enums import RiskEventType
+
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _armed_candidate(loop, broker, symbol="TEST", price=10.0)
+    stale_at = _IN_HOURS_NOW
+    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+
+    def _boom(symbol):
+        raise RuntimeError("Webull returned no snapshot for TEST")
+
+    monkeypatch.setattr(broker, "get_snapshot", _boom)
+
+    loop._process_candidate_inner(
+        candidate, stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1),
+    )
+
+    alerts = [e for e in loop.risk_engine.events if e.event_type == RiskEventType.MARKET_DATA_STALE.value]
+    assert len(alerts) == 1
+    assert alerts[0].symbol == "TEST"
+
+
+def test_process_candidate_inner_resets_the_stale_market_data_alert_flag_for_a_candidate():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _armed_candidate(loop, broker, symbol="TEST", price=10.0)
+    candidate.market_data_stale_alert_logged = True
+    broker.feed_snapshot(_snapshot(_IN_HOURS_NOW, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0))
+
+    loop._process_candidate_inner(candidate, _IN_HOURS_NOW)
+
+    assert candidate.market_data_stale_alert_logged is False
 
 
 def test_engage_kill_switch_and_flatten_blocks_new_entries_immediately():
@@ -5359,6 +5474,71 @@ def test_reconcile_streaming_subscriptions_eviction_failure_keeps_the_symbol_cou
     # on a future tick instead.
     assert loop._streaming_requested_symbols == {"OLD", "HOT"}
     assert broker.subscribe_calls == [["HOT"]]
+
+
+def test_reconcile_streaming_subscriptions_resubscribes_a_symbol_whose_stream_has_gone_quiet():
+    # Active remediation (2026-08-21, at the user's explicit request: "is
+    # there any way to ensure it's not stale?"): a subscribed symbol whose
+    # stream has gone silently dead -- the suspected reconnect bug noted
+    # in WebullBrokerClient.subscribe_quotes' docstring -- gets force-
+    # unsubscribed and immediately resubscribed rather than just waiting
+    # on the REST fallback forever.
+    broker = _StreamingBroker()
+    loop, _ = _watching_candidate_setup(broker)
+    loop.candidates.clear()
+    t0 = _IN_HOURS_NOW
+
+    hot = _candidate_in_state("HOT", CandidateState.ARMED, t0)
+    loop._streaming_requested_symbols = {"HOT"}
+    with loop._live_snapshots_lock:
+        loop._live_snapshots["HOT"] = (_snapshot(t0, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0), t0)
+
+    later = t0 + timedelta(seconds=loop.config.stream_stale_resubscribe_seconds + 1)
+    loop._reconcile_streaming_subscriptions([hot], later)
+
+    assert broker.unsubscribe_calls == [["HOT"]]
+    assert broker.subscribe_calls == [["HOT"]]
+    assert loop._streaming_requested_symbols == {"HOT"}
+    with loop._live_snapshots_lock:
+        assert "HOT" not in loop._live_snapshots  # cleared, ready for a fresh push
+
+
+def test_reconcile_streaming_subscriptions_does_not_resubscribe_a_merely_recent_stream():
+    broker = _StreamingBroker()
+    loop, _ = _watching_candidate_setup(broker)
+    loop.candidates.clear()
+    t0 = _IN_HOURS_NOW
+
+    hot = _candidate_in_state("HOT", CandidateState.ARMED, t0)
+    loop._streaming_requested_symbols = {"HOT"}
+    with loop._live_snapshots_lock:
+        loop._live_snapshots["HOT"] = (_snapshot(t0, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0), t0)
+
+    still_fresh = t0 + timedelta(seconds=loop.config.stream_stale_resubscribe_seconds - 1)
+    loop._reconcile_streaming_subscriptions([hot], still_fresh)
+
+    assert broker.unsubscribe_calls == []
+    assert broker.subscribe_calls == []
+
+
+def test_reconcile_streaming_subscriptions_does_not_resubscribe_a_symbol_that_never_streamed_anything():
+    # A symbol whose subscribe_quotes call succeeded but that has never
+    # actually received a pushed message (no live_snapshots entry at all)
+    # is a different, cold-start problem this fix isn't targeting -- see
+    # TradingLoopConfig.stream_stale_resubscribe_seconds' docstring.
+    broker = _StreamingBroker()
+    loop, _ = _watching_candidate_setup(broker)
+    loop.candidates.clear()
+    t0 = _IN_HOURS_NOW
+
+    hot = _candidate_in_state("HOT", CandidateState.ARMED, t0)
+    loop._streaming_requested_symbols = {"HOT"}
+
+    later = t0 + timedelta(seconds=loop.config.stream_stale_resubscribe_seconds + 1)
+    loop._reconcile_streaming_subscriptions([hot], later)
+
+    assert broker.unsubscribe_calls == []
+    assert broker.subscribe_calls == []
 
 
 def test_process_all_candidates_prunes_before_reconciling_streaming_subscriptions():

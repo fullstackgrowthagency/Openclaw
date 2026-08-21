@@ -2451,7 +2451,7 @@ dashboard's existing Risk Events panel. See
 `test_maybe_raise_stale_market_data_alert_only_fires_once_per_episode`,
 `test_maybe_raise_stale_market_data_alert_is_a_noop_without_any_cached_snapshot`,
 `test_process_candidate_inner_wires_the_stale_market_data_alert_on_snapshot_failure`,
-and `test_manage_position_resets_the_stale_market_data_alert_flag`.
+and `test_process_candidate_inner_resets_the_stale_market_data_alert_flag_for_a_position`.
 
 **Not yet fixed:** WHY Webull's snapshot endpoint returns nothing for a
 given symbol (halted vs. delisted vs. a genuine data gap) is still
@@ -2459,6 +2459,80 @@ opaque from this process's own logs alone -- this alert surfaces THAT a
 feed died, not why. Diagnosing a specific occurrence still means reading
 the warning-level logs around the alert's timestamp
 (`journalctl -u webull-dashboard | grep '<SYMBOL>'`).
+
+### Broadening market-data-staleness visibility to candidates, plus one active recovery attempt (2026-08-21)
+
+Following a real diagnosis session (a user-pasted `journalctl` excerpt
+for a stuck position), the user asked: "We need to ensure the data is
+live and accurate for all candidates and open positions." Investigation
+confirmed the section above only ever fixed the ENTERED/MANAGING half of
+the problem -- a pre-entry candidate (WATCHING/HEATING_UP/ARMED/
+CONFIRMING) hitting the exact same repeated-snapshot-fetch-failure path
+in `_process_candidate_inner` got zero risk event and zero dashboard
+signal, forever. `Candidate.last_updated_at` can't substitute as a
+freshness signal -- it only moves on an actual state-machine transition
+(see `TradingLoopConfig.candidate_stale_after_seconds`' own docstring),
+not on a plain tick, so a candidate could sit ARMED for an hour with a
+perfectly live feed and it would never move.
+
+**The fix generalizes the existing mechanism rather than duplicating
+it.** `self._last_known_snapshots` and the "already alerted" flag both
+now cover every `_STREAMING_ELIGIBLE_STATES` member (WATCHING/
+HEATING_UP/ARMED/CONFIRMING/ENTERED/MANAGING), not just ENTERED/MANAGING:
+- `_process_candidate_inner` now caches every eligible candidate's
+  (VWAP-corrected) snapshot into `_last_known_snapshots` right after a
+  successful fetch, and resets `Candidate.market_data_stale_alert_logged`
+  -- both used to happen only in `_manage_position` for positions.
+- `Position.market_data_stale_alert_logged` was deleted; the flag now
+  lives on `Candidate` instead, since every tracked `Position` already
+  has a corresponding `Candidate` in `self.candidates` for as long as
+  it's tracked (see `reconcile_positions_from_broker`) -- `Candidate` is
+  a strict superset of what needs this flag, so keeping it in one place
+  avoids a synchronization burden.
+- `_maybe_raise_stale_market_data_alert` now takes a `Candidate` alone
+  (no more internal `Position` lookup) and is called from
+  `_process_candidate_inner`'s REST-fallback exception handler for any
+  `_STREAMING_ELIGIBLE_STATES` candidate, not just ENTERED/MANAGING.
+- `RiskEventType.POSITION_MARKET_DATA_STALE` was renamed to
+  `MARKET_DATA_STALE` -- it was added this same session, referenced only
+  in `.py` files (no frontend JS filter, nothing persisted to a DB
+  table), and had zero blast radius to rename before ever reaching the
+  VPS.
+- `dashboard/app.py`'s `GET /api/candidates` now exposes the same
+  `price_stale`/`price_age_seconds` fields `/api/positions` already did,
+  reusing the exact same `get_last_known_price_age_seconds`/
+  `last_known_price_stale_after_seconds` computation; `app.js`'s new
+  `candidatePriceCellHtml(c)` mirrors `positionPriceCellHtml(p)` exactly
+  (same `.stale-price` class, same "⚠ Price is Ns old" tooltip).
+
+**Active remediation, not just louder detection.** Asked directly "is
+there any way to ensure it's not stale?", the honest answer is: not for
+a genuinely halted/delisted symbol (no data exists upstream for a
+client-side fix to recover), but this codebase already suspects a
+distinct, recoverable bug -- `WebullBrokerClient.subscribe_quotes`'s own
+docstring flags a "known-but-not-yet-understood reconnect issue" where a
+single symbol's streaming subscription can go silently dead without the
+whole MQTT connection dropping. Nothing before this proactively
+recovered a single stalled subscription; it just fell back to REST and
+waited forever. `_reconcile_streaming_subscriptions` (which already runs
+every tick and already performs `unsubscribe_quotes`/`subscribe_quotes`
+calls for budget eviction) now also force-unsubscribes and immediately
+resubscribes any still-desired, currently-subscribed symbol whose
+`_live_snapshots` entry is older than the new
+`TradingLoopConfig.stream_stale_resubscribe_seconds` (30.0 default,
+looser than `streaming_staleness_seconds`'s 10s since this is a much
+heavier-handed action, not the everyday fallback path). Deliberately
+does NOT touch a symbol with no `_live_snapshots` entry at all -- a
+cold-start gap (never received anything since subscribing) is a
+different problem this fix isn't targeting, still only covered by the
+REST fallback every tick already provides.
+
+See `tests/test_trading_loop.py`'s candidate-side mirrors of every test
+listed above (suffixed `_for_a_candidate`), plus
+`test_reconcile_streaming_subscriptions_resubscribes_a_symbol_whose_stream_has_gone_quiet`,
+`test_reconcile_streaming_subscriptions_does_not_resubscribe_a_merely_recent_stream`,
+and `test_reconcile_streaming_subscriptions_does_not_resubscribe_a_symbol_that_never_streamed_anything`,
+and `tests/test_dashboard.py`'s `test_candidates_flags_a_stale_cached_price`.
 
 ## Atomic bracket entry (2026-08-13)
 

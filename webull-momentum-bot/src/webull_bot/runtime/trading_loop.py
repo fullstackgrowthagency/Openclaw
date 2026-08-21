@@ -415,32 +415,61 @@ class TradingLoopConfig:
     # reconnect issue noted in WebullBrokerClient.subscribe_quotes'
     # docstring) rather than pacing normal operation.
     streaming_staleness_seconds: float = 10.0
-    # How old a MANAGING/ENTERED position's cached _last_known_snapshots
-    # entry can be before dashboard/app.py's /api/positions should flag
-    # its displayed price as stale rather than presenting it as live
-    # (2026-08-19, real incident: BTCT/BTOG showed a frozen price that no
-    # longer matched the market). get_last_known_price itself has no
-    # staleness check at all -- see get_last_known_price_age_seconds'
-    # docstring -- this is deliberately looser than
-    # streaming_staleness_seconds (10s), which governs whether THIS loop
-    # trusts a streamed snapshot enough to use it for its own tick
-    # processing; this value instead governs whether the DASHBOARD should
-    # keep presenting an old cached number as if it's current.
+    # How long a subscribed symbol's stream can go completely quiet (no
+    # pushed message at all, per _live_snapshots' own received_at
+    # timestamp) before _reconcile_streaming_subscriptions proactively
+    # unsubscribes and immediately resubscribes it -- an attempt at
+    # recovering the "known-but-not-yet-understood reconnect issue" noted
+    # in WebullBrokerClient.subscribe_quotes' docstring, where a single
+    # symbol's subscription can apparently go silently dead without the
+    # whole MQTT connection dropping. Deliberately looser than
+    # streaming_staleness_seconds (10s, which only governs whether THIS
+    # tick trusts a cached message enough to use it, falling back to REST
+    # meanwhile) -- this is a much rarer, heavier-handed recovery action,
+    # not the everyday fallback path, so it needs a longer quiet spell
+    # before firing to avoid needlessly resubscribing a symbol that's
+    # just genuinely trading quietly for a few seconds. Does NOT help a
+    # symbol Webull never sends ANY data for in the first place (a
+    # cold-start gap, not a died-mid-stream one) -- that case has no
+    # "was receiving, then stopped" signal to key off; it's still only
+    # covered by the REST fallback every tick already provides. Added
+    # 2026-08-21 at the user's explicit request ("ensure the data is
+    # live... for all candidates and open positions") -- detection/
+    # alerting alone can't fix a genuinely broken feed, but this
+    # suspected class of bug is worth an active recovery attempt, not
+    # just a louder alert.
+    stream_stale_resubscribe_seconds: float = 30.0
+    # How old a tracked candidate's (open position or pre-entry) cached
+    # _last_known_snapshots entry can be before dashboard/app.py's
+    # /api/positions AND /api/candidates should flag its displayed price
+    # as stale rather than presenting it as live (2026-08-19, real
+    # incident: BTCT/BTOG showed a frozen price that no longer matched
+    # the market). get_last_known_price itself has no staleness check at
+    # all -- see get_last_known_price_age_seconds' docstring -- this is
+    # deliberately looser than streaming_staleness_seconds (10s), which
+    # governs whether THIS loop trusts a streamed snapshot enough to use
+    # it for its own tick processing; this value instead governs whether
+    # the DASHBOARD should keep presenting an old cached number as if
+    # it's current.
     last_known_price_stale_after_seconds: float = 30.0
-    # How old a MANAGING/ENTERED position's cached _last_known_snapshots
-    # entry can get before _maybe_raise_stale_market_data_alert raises a
-    # RiskEventType.POSITION_MARKET_DATA_STALE event -- turning
+    # How old a tracked candidate's (open position or pre-entry) cached
+    # _last_known_snapshots entry can get before
+    # _maybe_raise_stale_market_data_alert raises a
+    # RiskEventType.MARKET_DATA_STALE event -- turning
     # last_known_price_stale_after_seconds' passive dashboard badge above
     # into an actual entry on the Risk Events panel a human is more
-    # likely to notice. Real incident (2026-08-20): a position's price
-    # feed died silently (both the stream and the REST fallback in
-    # _process_candidate_inner failing every cycle) for several minutes
-    # with nothing surfacing why. Deliberately the same 60.0 default as
-    # unprotected_position_alert_seconds above (same "long enough that an
-    # ordinary transient blip self-heals, short enough that a genuinely
-    # dead feed gets flagged within about a minute" reasoning) -- these
-    # are two independent config knobs, not the same value reused, so
-    # tune them separately if experience says otherwise.
+    # likely to notice. Real incident (2026-08-20, positions only): a
+    # position's price feed died silently (both the stream and the REST
+    # fallback in _process_candidate_inner failing every cycle) for
+    # several minutes with nothing surfacing why; broadened (2026-08-21)
+    # to cover pre-entry candidates too, since the same silent failure
+    # mode existed there and was simply never surfaced. Deliberately the
+    # same 60.0 default as unprotected_position_alert_seconds above (same
+    # "long enough that an ordinary transient blip self-heals, short
+    # enough that a genuinely dead feed gets flagged within about a
+    # minute" reasoning) -- these are two independent config knobs, not
+    # the same value reused, so tune them separately if experience says
+    # otherwise.
     stale_market_data_alert_seconds: float = 60.0
     # Maximum number of symbols _reconcile_streaming_subscriptions will
     # keep actively subscribed to live streaming at once -- see that
@@ -1374,7 +1403,16 @@ class TradingLoop:
         tick to tick: only the diff (symbols newly in the top N, symbols
         that fell out of it) results in any real subscribe/unsubscribe
         call, exactly like _ensure_streaming_subscribed's own existing
-        membership-check no-op for symbols already subscribed."""
+        membership-check no-op for symbols already subscribed.
+
+        Also recovers a stream that's gone silently dead (2026-08-21, see
+        TradingLoopConfig.stream_stale_resubscribe_seconds' docstring):
+        any symbol we're keeping subscribed anyway (still in `desired`,
+        not part of this tick's ordinary budget eviction) whose last
+        streamed message is older than that threshold gets force-
+        unsubscribed and immediately resubscribed, an active recovery
+        attempt for the suspected per-symbol reconnect bug rather than
+        just waiting on the REST fallback forever."""
         eligible = [c for c in candidates if c.state in self._STREAMING_ELIGIBLE_STATES]
         if not eligible:
             return
@@ -1402,6 +1440,38 @@ class TradingLoop:
                 with self._live_snapshots_lock:
                     for symbol in to_drop:
                         self._live_snapshots.pop(symbol, None)
+
+        still_subscribed = (desired & currently_subscribed) - to_drop
+        stale_streams = []
+        with self._live_snapshots_lock:
+            for symbol in still_subscribed:
+                entry = self._live_snapshots.get(symbol)
+                if entry is None:
+                    continue  # never received anything at all -- a cold-start gap, not this fix's job
+                _, received_at = entry
+                if now - received_at > timedelta(seconds=self.config.stream_stale_resubscribe_seconds):
+                    stale_streams.append(symbol)
+        if stale_streams:
+            stale_streams_sorted = sorted(stale_streams)
+            logger.info(
+                "Resubscribing %d symbol(s) whose stream has gone quiet for over %.0fs: %s",
+                len(stale_streams_sorted), self.config.stream_stale_resubscribe_seconds, stale_streams_sorted,
+            )
+            try:
+                self.broker.unsubscribe_quotes(stale_streams_sorted)
+            except Exception:
+                logger.warning(
+                    "unsubscribe_quotes failed while resubscribing stale streams for %s; will retry next tick.",
+                    stale_streams_sorted, exc_info=True,
+                )
+            else:
+                self._streaming_requested_symbols -= set(stale_streams_sorted)
+                with self._live_snapshots_lock:
+                    for symbol in stale_streams_sorted:
+                        self._live_snapshots.pop(symbol, None)
+                for symbol in stale_streams_sorted:
+                    if symbol not in to_add:
+                        to_add.append(symbol)
 
         if to_add:
             self._ensure_streaming_subscribed(to_add)
@@ -1525,7 +1595,7 @@ class TradingLoop:
                 snapshot = prefetched_snapshot if prefetched_snapshot is not None else self.broker.get_snapshot(candidate.symbol)
             except Exception:
                 logger.warning("get_snapshot failed for %s this cycle; skipping.", candidate.symbol, exc_info=True)
-                if candidate.state in (CandidateState.ENTERED, CandidateState.MANAGING):
+                if candidate.state in self._STREAMING_ELIGIBLE_STATES:
                     self._maybe_raise_stale_market_data_alert(candidate, now)
                 return
 
@@ -1533,6 +1603,20 @@ class TradingLoop:
             self._update_session_vwap(candidate, snapshot)
         except Exception:
             logger.exception("_update_session_vwap failed for %s this cycle; snapshot.vwap left as-is.", candidate.symbol)
+
+        if candidate.state in self._STREAMING_ELIGIBLE_STATES:
+            # Cache this tick's (VWAP-corrected) price for the dashboard's
+            # /api/positions and /api/candidates to read (see
+            # get_last_known_price) -- covers both open positions and
+            # pre-entry candidates now (2026-08-21, broadened from
+            # positions-only at the user's explicit request) since a dead
+            # feed is exactly as invisible pre-entry as it is post-entry.
+            # Also clears any prior dead-feed episode -- this tick just
+            # proved the feed is live again -- so a LATER stretch without
+            # live data raises its own fresh alert instead of staying
+            # suppressed.
+            self._last_known_snapshots[candidate.symbol] = snapshot
+            candidate.market_data_stale_alert_logged = False
 
         if self.momentum_event_tracker is not None:
             try:
@@ -2751,34 +2835,35 @@ class TradingLoop:
     def _maybe_raise_stale_market_data_alert(self, candidate: Candidate, now: datetime) -> None:
         """Visibility, not a new fetch mechanism: streaming/REST both keep
         being retried every tick regardless (this doesn't change that) --
-        what it adds is a single, one-time
-        RiskEventType.POSITION_MARKET_DATA_STALE event (surfaced on the
-        dashboard's existing Risk Events panel, same as
-        _maybe_raise_unprotected_position_alert above) once an open
-        position's cached price (get_last_known_price_age_seconds -- the
-        exact same age the dashboard's own /api/positions staleness badge
-        already reads) has gone TradingLoopConfig.stale_market_data_alert_seconds
-        or longer without a fresh snapshot. Called from
-        _process_candidate_inner's REST-fallback exception handler for
-        ENTERED/MANAGING candidates -- that's the only place a snapshot
-        fetch can fail for an open position (see that method), so it's
-        the only place this stretch can start growing.
+        what it adds is a single, one-time RiskEventType.MARKET_DATA_STALE
+        event (surfaced on the dashboard's existing Risk Events panel,
+        same as _maybe_raise_unprotected_position_alert above) once a
+        tracked candidate's cached price (get_last_known_price_age_seconds
+        -- the exact same age the dashboard's /api/positions AND
+        /api/candidates staleness badges already read) has gone
+        TradingLoopConfig.stale_market_data_alert_seconds or longer
+        without a fresh snapshot. Called from _process_candidate_inner's
+        REST-fallback exception handler for any _STREAMING_ELIGIBLE_STATES
+        candidate (2026-08-21: broadened from ENTERED/MANAGING-only, since
+        a dead feed is exactly as invisible pre-entry as it is post-entry)
+        -- that's the only place a snapshot fetch can fail, so it's the
+        only place this stretch can start growing.
 
-        No-op if this position hasn't had a single tick processed yet
+        No-op if this candidate hasn't had a single tick processed yet
         (get_last_known_price_age_seconds returns None -- nothing to
-        measure an age against, e.g. the instant after adoption/entry) or
-        if this exact dead-feed stretch already raised its one alert
-        (position.market_data_stale_alert_logged, reset by
-        _manage_position the moment a fresh snapshot is cached again)."""
-        position = self._positions.get(candidate.symbol)
-        if position is None or position.market_data_stale_alert_logged:
+        measure an age against, e.g. the instant after discovery/adoption)
+        or if this exact dead-feed stretch already raised its one alert
+        (candidate.market_data_stale_alert_logged, reset by
+        _process_candidate_inner the moment a fresh snapshot is cached
+        again)."""
+        if candidate.market_data_stale_alert_logged:
             return
         age_seconds = self.get_last_known_price_age_seconds(candidate.symbol, now)
         if age_seconds is None or age_seconds < self.config.stale_market_data_alert_seconds:
             return
-        position.market_data_stale_alert_logged = True
+        candidate.market_data_stale_alert_logged = True
         self.risk_engine.record_operational_event(
-            RiskEventType.POSITION_MARKET_DATA_STALE,
+            RiskEventType.MARKET_DATA_STALE,
             candidate.symbol,
             (
                 f"{candidate.symbol}'s price feed has had no fresh snapshot (streaming or REST) "
@@ -3021,15 +3106,13 @@ class TradingLoop:
         return False
 
     def _manage_position(self, candidate: Candidate, snapshot: MarketSnapshot, now: datetime) -> None:
-        # Cache this tick's price for the dashboard's /api/positions to
-        # read (see get_last_known_price) -- costs nothing extra: `snapshot`
-        # here is already fetched (streaming, batch REST, or per-candidate
-        # fallback) for this position's own stop/target check below, this
-        # just also keeps a copy the dashboard can read without ever
-        # calling the broker itself. See get_last_known_price's docstring
-        # for why the dashboard was calling broker.get_snapshot() directly
-        # before (a real incident, 2026-08-12 -- 504s on /api/positions).
-        self._last_known_snapshots[candidate.symbol] = snapshot
+        # `snapshot` is already cached into self._last_known_snapshots (for
+        # the dashboard's /api/positions to read -- see get_last_known_price)
+        # and candidate.market_data_stale_alert_logged already reset by
+        # _process_candidate_inner just before this call, for every
+        # _STREAMING_ELIGIBLE_STATES candidate -- both used to happen here
+        # directly, centralized upstream (2026-08-21) so the same tick's
+        # snapshot is cached once for candidates and positions alike.
         pending = self._pending_exit_orders.get(candidate.symbol)
         if pending is not None:
             self._poll_pending_exit(candidate, snapshot, now)
@@ -3041,12 +3124,6 @@ class TradingLoop:
             transition(candidate, CandidateState.EXITED, now=now, reason="position tracking lost")
             transition(candidate, CandidateState.COOLDOWN, now=now, reason="post-trade cooldown")
             return
-
-        # This tick just cached a fresh snapshot above, so any prior dead-
-        # feed episode is over -- reset so a LATER stretch without live
-        # data raises its own fresh RiskEventType.POSITION_MARKET_DATA_STALE
-        # alert rather than staying suppressed by this one's flag.
-        position.market_data_stale_alert_logged = False
 
         if position.broker_stop_order_id is not None or position.broker_target_order_id is not None:
             if self._poll_broker_bracket(candidate, position, now):
@@ -3386,44 +3463,47 @@ class TradingLoop:
         return dict(self._positions)
 
     def get_last_known_price(self, symbol: str) -> Optional[float]:
-        """Dashboard-facing (see dashboard/app.py's /api/positions): the
-        most recent price _manage_position saw for `symbol`, already
-        fetched as part of that position's own tick processing (streaming,
-        batch REST, or a per-candidate fallback call) -- NEVER a new broker
-        call of its own. Real incident (2026-08-12): /api/positions used
-        to call broker.get_snapshot() directly, once per open position,
+        """Dashboard-facing (see dashboard/app.py's /api/positions AND
+        /api/candidates): the most recent price _process_candidate_inner
+        saw for `symbol`, for any _STREAMING_ELIGIBLE_STATES candidate --
+        open position or pre-entry -- already fetched as part of that
+        candidate's own tick processing (streaming, batch REST, or a
+        per-candidate fallback call) -- NEVER a new broker call of its
+        own. Real incident (2026-08-12): /api/positions used to call
+        broker.get_snapshot() directly, once per open position,
         sequentially, on every single HTTP request -- through the same
         shared, priority-queued, occasionally-exclusive (place_order/
         place_oco_bracket) webull_limiter order placement uses. Under real
         trading load that could queue behind CRITICAL trading traffic (or
         a whole exclusive() hold) for tens of seconds per position, well
         past nginx's proxy_read_timeout, producing 504s on a page that's
-        supposed to be a cheap read. Returns None if this position hasn't
-        had a tick processed yet (e.g. the instant after it was adopted/
-        opened) -- callers should treat that exactly like the old
-        get_snapshot()-failed case: no current price/unrealized P&L
-        available this refresh, nothing more alarming than that."""
+        supposed to be a cheap read. Returns None if this candidate hasn't
+        had a tick processed yet (e.g. the instant after discovery, or
+        after a position was adopted/opened) -- callers should treat that
+        exactly like the old get_snapshot()-failed case: no current
+        price/unrealized P&L available this refresh, nothing more
+        alarming than that."""
         snapshot = self._last_known_snapshots.get(symbol)
         return snapshot.last_price if snapshot is not None else None
 
     def get_last_known_price_age_seconds(self, symbol: str, now: datetime) -> Optional[float]:
         """Dashboard-facing companion to get_last_known_price (see that
-        method's docstring for why /api/positions reads a cache instead of
-        calling the broker directly): how old the cached snapshot backing
-        that price actually is. get_last_known_price itself has NO
-        staleness check -- unlike _get_streaming_snapshot, which already
-        compares age against streaming_staleness_seconds before trusting a
-        streamed snapshot for this loop's own tick processing, nothing
-        ever stopped /api/positions from presenting an arbitrarily old
-        cached price as if it were current (2026-08-19, real incident:
-        BTCT/BTOG showed a frozen price that no longer matched the
-        market -- the underlying per-tick fetch for that symbol had
-        started failing every cycle, per _process_candidate_inner's
-        early-return on a failed get_snapshot, and _last_known_snapshots
-        simply stops being written from that point on with nothing
-        flagging it). Returns None if this position hasn't had a tick
-        processed yet, same "nothing to report" contract as
-        get_last_known_price's own None case."""
+        method's docstring for why /api/positions and /api/candidates read
+        a cache instead of calling the broker directly): how old the
+        cached snapshot backing that price actually is. get_last_known_price
+        itself has NO staleness check -- unlike _get_streaming_snapshot,
+        which already compares age against streaming_staleness_seconds
+        before trusting a streamed snapshot for this loop's own tick
+        processing, nothing ever stopped a dashboard endpoint from
+        presenting an arbitrarily old cached price as if it were current
+        (2026-08-19, real incident: BTCT/BTOG showed a frozen price that
+        no longer matched the market -- the underlying per-tick fetch for
+        that symbol had started failing every cycle, per
+        _process_candidate_inner's early-return on a failed get_snapshot,
+        and _last_known_snapshots simply stops being written from that
+        point on with nothing flagging it). Returns None if this
+        candidate hasn't had a tick processed yet, same "nothing to
+        report" contract as get_last_known_price's own None case."""
         snapshot = self._last_known_snapshots.get(symbol)
         if snapshot is None:
             return None

@@ -199,21 +199,26 @@ class RiskEventType(str, Enum):
     # before the stuck order is cancelled and dropped from tracking so a
     # fresh check_exit/exit attempt can run the very next tick.
     PENDING_EXIT_ORDER_STUCK = "pending_exit_order_stuck"
-    # A MANAGING/ENTERED position's live market-data feed has gone
-    # TradingLoopConfig.stale_market_data_alert_seconds or longer with no
-    # fresh snapshot at all -- neither the streaming push nor the REST
-    # fallback in TradingLoop._process_candidate_inner has produced one,
-    # meaning get_last_known_price_age_seconds (already read by the
-    # dashboard's own /api/positions staleness badge) keeps climbing with
-    # nothing else surfacing why. Same "operational, not a signal
-    # rejection" shape as POSITION_UNPROTECTED_TOO_LONG above -- raised by
-    # TradingLoop via RiskEngine.record_operational_event, not
-    # RiskEngine.evaluate. Real incident (2026-08-20): a position's price
-    # silently froze for several minutes (Webull's snapshot endpoint
-    # returning no data for that symbol every cycle) with nothing beyond
-    # the passive dashboard badge to flag it -- see
+    # A tracked candidate's (open position or pre-entry -- any
+    # TradingLoop._STREAMING_ELIGIBLE_STATES member) live market-data feed
+    # has gone TradingLoopConfig.stale_market_data_alert_seconds or longer
+    # with no fresh snapshot at all -- neither the streaming push nor the
+    # REST fallback in TradingLoop._process_candidate_inner has produced
+    # one, meaning get_last_known_price_age_seconds (already read by the
+    # dashboard's own /api/positions AND /api/candidates staleness badges)
+    # keeps climbing with nothing else surfacing why. Same "operational,
+    # not a signal rejection" shape as POSITION_UNPROTECTED_TOO_LONG
+    # above -- raised by TradingLoop via RiskEngine.record_operational_event,
+    # not RiskEngine.evaluate. Real incident (2026-08-20, positions only):
+    # a position's price silently froze for several minutes (Webull's
+    # snapshot endpoint returning no data for that symbol every cycle)
+    # with nothing beyond the passive dashboard badge to flag it.
+    # Broadened (2026-08-21) to cover pre-entry candidates too, at the
+    # user's explicit request ("ensure the data is live and accurate for
+    # all candidates and open positions") -- the exact same silent
+    # failure mode existed there and was simply never surfaced. See
     # TradingLoop._maybe_raise_stale_market_data_alert.
-    POSITION_MARKET_DATA_STALE = "position_market_data_stale"
+    MARKET_DATA_STALE = "market_data_stale"
     # Entry-selectivity rework (2026-08-13, see docs/ARCHITECTURE.md):
     # raised by TradingLoop._poll_confirmation, not RiskEngine.evaluate,
     # when a CONFIRMING candidate fails to hold through

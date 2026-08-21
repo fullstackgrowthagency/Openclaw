@@ -287,14 +287,28 @@ def create_app(
     @app.get("/api/candidates")
     def get_candidates(request: Request):
         loop = _resolve_loop(request)
+        now = datetime.utcnow()
         rows = []
         for candidate in loop.get_candidates().values():
             last_reason = _last_transition_reason(candidate.notes)
+            # Same staleness computation /api/positions already does (see
+            # get_last_known_price_age_seconds' docstring) -- now
+            # meaningful for candidates too (2026-08-21) since
+            # _process_candidate_inner caches every
+            # _STREAMING_ELIGIBLE_STATES symbol's snapshot, not just
+            # open positions.
+            price_age_seconds = loop.get_last_known_price_age_seconds(candidate.symbol, now)
+            price_stale = (
+                price_age_seconds is not None
+                and price_age_seconds > loop.config.last_known_price_stale_after_seconds
+            )
             rows.append({
                 "symbol": candidate.symbol,
                 "state": candidate.state.value,
                 "score": candidate.latest_score.score if candidate.latest_score else None,
                 "price": candidate.last_price,
+                "price_age_seconds": price_age_seconds,
+                "price_stale": price_stale,
                 "resistance_level": candidate.resistance_level,
                 "discovered_at": candidate.discovered_at.isoformat(),
                 "last_updated_at": candidate.last_updated_at.isoformat(),

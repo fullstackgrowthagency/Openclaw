@@ -433,6 +433,19 @@ function momentumCellHtml(c, minReturn5mPct) {
   return `<td class="${cls}" title="${reasonTitle}">${fmtNum(value, 2)}%${floorText}</td>`;
 }
 
+function candidatePriceCellHtml(c) {
+  // Mirrors positionPriceCellHtml -- candidates now carry the same
+  // price_stale/price_age_seconds fields (2026-08-21, see
+  // dashboard/app.py's /api/candidates), since _process_candidate_inner
+  // caches every _STREAMING_ELIGIBLE_STATES symbol's snapshot, not just
+  // open positions.
+  if (!c.price_stale) return `<td>${fmtNum(c.price)}</td>`;
+  const ageText = c.price_age_seconds !== null && c.price_age_seconds !== undefined
+    ? `${Math.round(c.price_age_seconds)}s old`
+    : "stale";
+  return `<td class="stale-price" title="Price is ${ageText} -- may not reflect the current market">${fmtNum(c.price)} ⚠</td>`;
+}
+
 async function refreshCandidates() {
   const body = document.getElementById("candidates-body");
   try {
@@ -445,7 +458,7 @@ async function refreshCandidates() {
           <td>${c.symbol}</td>
           <td><span class="state-pill state-${c.state}">${c.state.replace("_", " ")}</span></td>
           <td>${fmtNum(c.score, 1)}</td>
-          <td>${fmtNum(c.price)}</td>
+          ${candidatePriceCellHtml(c)}
           <td>${fmtNum(c.resistance_level)}</td>
           <td class="muted">${c.momentum_phase ? c.momentum_phase.replace("_", " ") : "--"}</td>
           <td>${fmtNum(c.rtms, 1)}</td>

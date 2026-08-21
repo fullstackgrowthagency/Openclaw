@@ -121,6 +121,36 @@ def test_candidates_reflects_live_loop_state(loop, client):
     assert rows[0]["state"] == "watching"
     assert rows[0]["reason"] is None  # no transition reason was given above
     assert rows[0]["price"] is None  # CandidateWatcher.update() hasn't ticked yet
+    # No tick has ever been cached for this symbol yet -- same "nothing
+    # to report" contract as /api/positions' own no-cache-yet case.
+    assert rows[0]["price_age_seconds"] is None
+    assert rows[0]["price_stale"] is False
+
+
+def test_candidates_flags_a_stale_cached_price(loop, client):
+    # Symmetric with test_positions_flags_a_stale_cached_price (2026-08-21,
+    # at the user's explicit request: "ensure the data is live and
+    # accurate for all candidates and open positions") -- the exact same
+    # silent-freeze failure mode as BTCT/BTOG (2026-08-19) can happen to a
+    # pre-entry candidate just as easily as an open position.
+    from datetime import timedelta
+
+    candidate = new_candidate("TEST")
+    transition(candidate, CandidateState.WATCHING)
+    candidate.last_price = 7.42
+    loop.candidates["TEST"] = candidate
+
+    stale_timestamp = datetime.utcnow() - timedelta(seconds=60)
+    loop._last_known_snapshots["TEST"] = MarketSnapshot(
+        symbol="TEST", timestamp=stale_timestamp, last_price=7.42, bid=7.4, ask=7.44,
+        bid_size=100, ask_size=100, cumulative_volume=100_000, vwap=7.3, high_of_day=7.5,
+        low_of_day=7.0, open_price=7.1,
+    )
+    resp = client.get("/api/candidates")
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["price_stale"] is True
+    assert rows[0]["price_age_seconds"] >= 60.0
 
 
 def test_candidates_exposes_the_latest_price(loop, client):
