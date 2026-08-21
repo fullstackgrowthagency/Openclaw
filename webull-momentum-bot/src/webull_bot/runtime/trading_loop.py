@@ -439,21 +439,24 @@ class TradingLoopConfig:
     # suspected class of bug is worth an active recovery attempt, not
     # just a louder alert.
     stream_stale_resubscribe_seconds: float = 30.0
-    # How old a tracked candidate's (open position or pre-entry) cached
-    # _last_known_snapshots entry can be before dashboard/app.py's
-    # /api/positions AND /api/candidates should flag its displayed price
-    # as stale rather than presenting it as live (2026-08-19, real
-    # incident: BTCT/BTOG showed a frozen price that no longer matched
-    # the market). get_last_known_price itself has no staleness check at
-    # all -- see get_last_known_price_age_seconds' docstring -- this is
-    # deliberately looser than streaming_staleness_seconds (10s), which
-    # governs whether THIS loop trusts a streamed snapshot enough to use
-    # it for its own tick processing; this value instead governs whether
-    # the DASHBOARD should keep presenting an old cached number as if
-    # it's current.
+    # How long since THIS PROCESS last successfully cached a snapshot for
+    # a tracked candidate (open position or pre-entry) -- i.e. age against
+    # _last_known_snapshots' own received_at, NOT the cached snapshot's
+    # quote_time -- before dashboard/app.py's /api/positions AND
+    # /api/candidates should flag its displayed price as stale rather
+    # than presenting it as live (2026-08-19, real incident: BTCT/BTOG
+    # showed a frozen price that no longer matched the market).
+    # get_last_known_price itself has no staleness check at all -- see
+    # get_last_known_price_age_seconds' docstring, including its
+    # 2026-08-21 correction, for why received_at (not quote_time) is the
+    # right clock here -- this is deliberately looser than
+    # streaming_staleness_seconds (10s), which governs whether THIS loop
+    # trusts a streamed snapshot enough to use it for its own tick
+    # processing; this value instead governs whether the DASHBOARD should
+    # keep presenting an old cached number as if it's current.
     last_known_price_stale_after_seconds: float = 30.0
-    # How old a tracked candidate's (open position or pre-entry) cached
-    # _last_known_snapshots entry can get before
+    # How long since THIS PROCESS last successfully cached a snapshot for
+    # a tracked candidate (open position or pre-entry) can get before
     # _maybe_raise_stale_market_data_alert raises a
     # RiskEventType.MARKET_DATA_STALE event -- turning
     # last_known_price_stale_after_seconds' passive dashboard badge above
@@ -825,13 +828,28 @@ class TradingLoop:
         # self._positions; cleared the moment a symbol reappears in a
         # broker response or is actually declared closed.
         self._missing_from_broker_counts: dict[str, int] = {}
-        # symbol -> the most recent MarketSnapshot _manage_position saw for
-        # a MANAGING/ENTERED position -- see get_last_known_price's
-        # docstring. Deliberately never cleared when a position closes (a
-        # harmless, small, bounded-by-universe-size dict entry left behind
-        # -- simpler than adding cleanup for a value nothing reads once its
-        # position is gone).
-        self._last_known_snapshots: dict[str, MarketSnapshot] = {}
+        # symbol -> (most recent MarketSnapshot _process_candidate_inner
+        # saw for this symbol, the wall-clock `now` at which THIS PROCESS
+        # cached it) -- see get_last_known_price's docstring. The second
+        # element is deliberately this process's own receipt/fetch time,
+        # NOT snapshot.timestamp (Webull's reported quote_time) -- same
+        # "received_at, not the payload's own timestamp" idea as
+        # _live_snapshots below, and for the same reason: quote_time only
+        # advances when the symbol actually prints a new trade/quote, so a
+        # genuinely quiet-but-still-being-fetched-every-tick WATCHING/
+        # HEATING_UP candidate would look falsely "stale" for tens of
+        # seconds at a stretch if staleness were measured against it
+        # instead (real incident, 2026-08-21: nearly every non-actively-
+        # trading candidate on the dashboard showed the stale-price
+        # warning, even though _process_all_candidates was successfully
+        # refreshing every one of them on every single tick -- the metric
+        # was measuring "how long since this symbol last traded," not
+        # "how long since this process last fetched it"). Deliberately
+        # never cleared when a position closes/a candidate stops being
+        # tracked (a harmless, small, bounded-by-universe-size dict entry
+        # left behind -- simpler than adding cleanup for a value nothing
+        # reads once its symbol is gone).
+        self._last_known_snapshots: dict[str, tuple[MarketSnapshot, datetime]] = {}
         # symbol -> (cumulative_pv, last_seen_cumulative_volume, last_seen_price),
         # this process's own running approximation of REAL session VWAP --
         # see _update_session_vwap's docstring for the 2026-08-14 ONFO
@@ -1615,7 +1633,7 @@ class TradingLoop:
             # proved the feed is live again -- so a LATER stretch without
             # live data raises its own fresh alert instead of staying
             # suppressed.
-            self._last_known_snapshots[candidate.symbol] = snapshot
+            self._last_known_snapshots[candidate.symbol] = (snapshot, now)
             candidate.market_data_stale_alert_logged = False
 
         if self.momentum_event_tracker is not None:
@@ -3483,31 +3501,50 @@ class TradingLoop:
         exactly like the old get_snapshot()-failed case: no current
         price/unrealized P&L available this refresh, nothing more
         alarming than that."""
-        snapshot = self._last_known_snapshots.get(symbol)
-        return snapshot.last_price if snapshot is not None else None
+        entry = self._last_known_snapshots.get(symbol)
+        if entry is None:
+            return None
+        snapshot, _ = entry
+        return snapshot.last_price
 
     def get_last_known_price_age_seconds(self, symbol: str, now: datetime) -> Optional[float]:
         """Dashboard-facing companion to get_last_known_price (see that
         method's docstring for why /api/positions and /api/candidates read
-        a cache instead of calling the broker directly): how old the
-        cached snapshot backing that price actually is. get_last_known_price
-        itself has NO staleness check -- unlike _get_streaming_snapshot,
-        which already compares age against streaming_staleness_seconds
-        before trusting a streamed snapshot for this loop's own tick
-        processing, nothing ever stopped a dashboard endpoint from
-        presenting an arbitrarily old cached price as if it were current
-        (2026-08-19, real incident: BTCT/BTOG showed a frozen price that
-        no longer matched the market -- the underlying per-tick fetch for
-        that symbol had started failing every cycle, per
-        _process_candidate_inner's early-return on a failed get_snapshot,
-        and _last_known_snapshots simply stops being written from that
-        point on with nothing flagging it). Returns None if this
-        candidate hasn't had a tick processed yet, same "nothing to
-        report" contract as get_last_known_price's own None case."""
-        snapshot = self._last_known_snapshots.get(symbol)
-        if snapshot is None:
+        a cache instead of calling the broker directly): how long ago THIS
+        PROCESS last successfully cached a snapshot for `symbol` -- i.e.
+        `now` minus `_last_known_snapshots[symbol]`'s own `received_at`,
+        NOT the cached snapshot's `timestamp` field (Webull's reported
+        quote_time). get_last_known_price itself has NO staleness check --
+        unlike _get_streaming_snapshot, which already compares age against
+        streaming_staleness_seconds before trusting a streamed snapshot
+        for this loop's own tick processing, nothing ever stopped a
+        dashboard endpoint from presenting an arbitrarily old cached price
+        as if it were current (2026-08-19, real incident: BTCT/BTOG showed
+        a frozen price that no longer matched the market -- the underlying
+        per-tick fetch for that symbol had started failing every cycle,
+        per _process_candidate_inner's early-return on a failed
+        get_snapshot, and _last_known_snapshots simply stops being written
+        from that point on with nothing flagging it).
+
+        Deliberately measures against `received_at`, not `snapshot.timestamp`
+        (2026-08-21, real incident: after broadening this cache to cover
+        every tracked candidate, not just open positions, nearly every
+        WATCHING/HEATING_UP row on the dashboard showed a false "stale"
+        warning even though _process_all_candidates was successfully
+        refreshing every one of them on every single tick -- comparing
+        against quote_time was measuring "how long since this symbol last
+        actually traded," which is routinely 30+ seconds for a genuinely
+        quiet-but-still-being-fetched candidate, not "how long since this
+        process last fetched it." Same fix `_live_snapshots`' own
+        `received_at` field already applied to the streaming path -- see
+        that dict's docstring). Returns None if this candidate hasn't had
+        a tick processed yet, same "nothing to report" contract as
+        get_last_known_price's own None case."""
+        entry = self._last_known_snapshots.get(symbol)
+        if entry is None:
             return None
-        return (now - snapshot.timestamp).total_seconds()
+        _, received_at = entry
+        return (now - received_at).total_seconds()
 
     def get_account_summary(self) -> dict:
         """Dashboard-facing (see dashboard/app.py's /api/status): cached

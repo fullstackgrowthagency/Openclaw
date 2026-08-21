@@ -2109,15 +2109,27 @@ def test_get_last_known_price_age_seconds_reports_the_elapsed_time():
     # _managing_candidate_with_position) so the elapsed time is exact and
     # deterministic against the fixed _IN_HOURS_NOW clock this file uses
     # everywhere else.
+    #
+    # Second real incident (2026-08-21): nearly every quiet WATCHING/
+    # HEATING_UP candidate on the dashboard showed the stale-price warning
+    # even though this process was successfully re-fetching its price
+    # every tick. The bug was measuring age against the snapshot's own
+    # quote_time (Webull's "when this symbol last actually traded") instead
+    # of this process's own fetch/receipt time. The snapshot's `timestamp`
+    # below is deliberately set to something much older than `received_at`
+    # to prove the computed age tracks `received_at`, not `timestamp`.
     broker = PaperBrokerClient()
     broker.connect()
     loop = _build_loop(broker)
-    loop._last_known_snapshots["TEST"] = MarketSnapshot(
-        symbol="TEST", timestamp=_IN_HOURS_NOW, last_price=12.0, bid=11.99, ask=12.01,
+    stale_quote_time = _IN_HOURS_NOW - timedelta(minutes=10)
+    received_at = _IN_HOURS_NOW
+    snapshot = MarketSnapshot(
+        symbol="TEST", timestamp=stale_quote_time, last_price=12.0, bid=11.99, ask=12.01,
         bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=12.0, high_of_day=12.0,
         low_of_day=12.0, open_price=12.0,
     )
-    later = _IN_HOURS_NOW + timedelta(seconds=45)
+    loop._last_known_snapshots["TEST"] = (snapshot, received_at)
+    later = received_at + timedelta(seconds=45)
 
     age = loop.get_last_known_price_age_seconds("TEST", later)
     assert age == pytest.approx(45.0)
@@ -2305,7 +2317,7 @@ def test_maybe_raise_stale_market_data_alert_fires_after_the_threshold():
     loop = _build_loop(broker)
     candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
     stale_at = _IN_HOURS_NOW
-    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    loop._last_known_snapshots["TEST"] = (_snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0), stale_at)
 
     loop._maybe_raise_stale_market_data_alert(candidate, stale_at)
     assert loop.risk_engine.events == []
@@ -2328,7 +2340,7 @@ def test_maybe_raise_stale_market_data_alert_only_fires_once_per_episode():
     loop = _build_loop(broker)
     candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
     stale_at = _IN_HOURS_NOW
-    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    loop._last_known_snapshots["TEST"] = (_snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0), stale_at)
     past_threshold = stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1)
 
     loop._maybe_raise_stale_market_data_alert(candidate, past_threshold)
@@ -2365,7 +2377,7 @@ def test_process_candidate_inner_wires_the_stale_market_data_alert_on_snapshot_f
     loop = _build_loop(broker)
     candidate = _managing_candidate_with_position(loop, broker, symbol="TEST", price=10.0)
     stale_at = _IN_HOURS_NOW
-    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    loop._last_known_snapshots["TEST"] = (_snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0), stale_at)
 
     def _boom(symbol):
         raise RuntimeError("Webull returned no snapshot for TEST")
@@ -2425,7 +2437,7 @@ def test_maybe_raise_stale_market_data_alert_fires_after_the_threshold_for_a_can
     loop = _build_loop(broker)
     candidate = _armed_candidate(loop, broker, symbol="TEST", price=10.0)
     stale_at = _IN_HOURS_NOW
-    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    loop._last_known_snapshots["TEST"] = (_snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0), stale_at)
 
     loop._maybe_raise_stale_market_data_alert(candidate, stale_at)
     assert loop.risk_engine.events == []
@@ -2448,7 +2460,7 @@ def test_maybe_raise_stale_market_data_alert_only_fires_once_per_episode_for_a_c
     loop = _build_loop(broker)
     candidate = _armed_candidate(loop, broker, symbol="TEST", price=10.0)
     stale_at = _IN_HOURS_NOW
-    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    loop._last_known_snapshots["TEST"] = (_snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0), stale_at)
     past_threshold = stale_at + timedelta(seconds=loop.config.stale_market_data_alert_seconds + 1)
 
     loop._maybe_raise_stale_market_data_alert(candidate, past_threshold)
@@ -2481,7 +2493,7 @@ def test_process_candidate_inner_wires_the_stale_market_data_alert_on_snapshot_f
     loop = _build_loop(broker)
     candidate = _armed_candidate(loop, broker, symbol="TEST", price=10.0)
     stale_at = _IN_HOURS_NOW
-    loop._last_known_snapshots["TEST"] = _snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0)
+    loop._last_known_snapshots["TEST"] = (_snapshot(stale_at, 10.0, 10.0, 200_000, 9.99, 10.01, 10.0), stale_at)
 
     def _boom(symbol):
         raise RuntimeError("Webull returned no snapshot for TEST")

@@ -2534,6 +2534,32 @@ listed above (suffixed `_for_a_candidate`), plus
 and `test_reconcile_streaming_subscriptions_does_not_resubscribe_a_symbol_that_never_streamed_anything`,
 and `tests/test_dashboard.py`'s `test_candidates_flags_a_stale_cached_price`.
 
+**Correction, same day (2026-08-21):** once this shipped, the user
+reported the dashboard's Candidates table now showed nearly every row
+flagged "⚠ stale" -- only actively-trading ARMED rows looked clean.
+`get_last_known_price_age_seconds` was computing `now -
+snapshot.timestamp`, where `snapshot.timestamp` is Webull's own reported
+quote_time (when that symbol last actually printed a trade/quote), not
+when this process last fetched it. That distinction barely matters for
+an open position -- if it's ENTERED/MANAGING it's trading, so quote_time
+tracks wall-clock closely -- but it's the common case for a quiet
+WATCHING/HEATING_UP candidate, which by definition hasn't broken out
+yet and can go tens of seconds between prints even though
+`_process_all_candidates` successfully re-fetches its (unchanged) price
+every single 5-second tick. The metric was measuring the wrong clock,
+not detecting a real throughput or connection problem (batching and
+`streaming_subscription_budget` were both independently confirmed to
+comfortably cover the full candidate list).
+
+Fixed by mirroring `_live_snapshots`' own already-correct pattern:
+`_last_known_snapshots` now stores `(snapshot, received_at)` tuples,
+where `received_at` is this process's own wall-clock time at the
+successful fetch (the tick's own `now`, threaded through
+`_process_candidate_inner`), and `get_last_known_price_age_seconds`
+measures age against `received_at` instead of `snapshot.timestamp`. No
+threshold changed -- 30s/60s are fine once compared against the right
+clock.
+
 ## Atomic bracket entry (2026-08-13)
 
 **Reverses the prior decision documented just above** (the "MASTER-anchored

@@ -141,11 +141,12 @@ def test_candidates_flags_a_stale_cached_price(loop, client):
     loop.candidates["TEST"] = candidate
 
     stale_timestamp = datetime.utcnow() - timedelta(seconds=60)
-    loop._last_known_snapshots["TEST"] = MarketSnapshot(
+    snapshot = MarketSnapshot(
         symbol="TEST", timestamp=stale_timestamp, last_price=7.42, bid=7.4, ask=7.44,
         bid_size=100, ask_size=100, cumulative_volume=100_000, vwap=7.3, high_of_day=7.5,
         low_of_day=7.0, open_price=7.1,
     )
+    loop._last_known_snapshots["TEST"] = (snapshot, stale_timestamp)
     resp = client.get("/api/candidates")
     rows = resp.json()
     assert len(rows) == 1
@@ -322,11 +323,13 @@ def test_positions_includes_unrealized_pnl_from_the_cached_price(loop, client):
     # cache is populated by _manage_position as a side effect of a real
     # tick, so this test sets it directly rather than driving one, the
     # same way it already sets loop._positions directly.
-    loop._last_known_snapshots["TEST"] = MarketSnapshot(
-        symbol="TEST", timestamp=datetime.utcnow(), last_price=12.0, bid=11.9, ask=12.1,
+    now = datetime.utcnow()
+    snapshot = MarketSnapshot(
+        symbol="TEST", timestamp=now, last_price=12.0, bid=11.9, ask=12.1,
         bid_size=100, ask_size=100, cumulative_volume=100_000, vwap=11.5, high_of_day=12.5,
         low_of_day=10.0, open_price=10.5,
     )
+    loop._last_known_snapshots["TEST"] = (snapshot, now)
     loop._positions["TEST"] = Position(
         symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0, stop_price=9.0,
         target_price=13.0, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
@@ -369,11 +372,12 @@ def test_positions_flags_a_stale_cached_price(loop, client):
     from datetime import timedelta
 
     stale_timestamp = datetime.utcnow() - timedelta(seconds=60)
-    loop._last_known_snapshots["TEST"] = MarketSnapshot(
+    snapshot = MarketSnapshot(
         symbol="TEST", timestamp=stale_timestamp, last_price=12.0, bid=11.9, ask=12.1,
         bid_size=100, ask_size=100, cumulative_volume=100_000, vwap=11.5, high_of_day=12.5,
         low_of_day=10.0, open_price=10.5,
     )
+    loop._last_known_snapshots["TEST"] = (snapshot, stale_timestamp)
     loop._positions["TEST"] = Position(
         symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0, stop_price=9.0,
         target_price=13.0, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
