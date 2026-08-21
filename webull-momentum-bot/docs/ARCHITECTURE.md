@@ -2560,6 +2560,46 @@ measures age against `received_at` instead of `snapshot.timestamp`. No
 threshold changed -- 30s/60s are fine once compared against the right
 clock.
 
+### A malformed snapshot row could silently freeze an open position's take-profit check (2026-08-21)
+
+A more severe, distinct bug found the same day: a live position (PMI,
+target 4.63) never closed at its take-profit even though the market
+apparently reached it, and the dashboard showed a frozen price below
+target. This has nothing to do with the dashboard-badge fix just above
+-- `_manage_position`/`PositionManager.check_exit` never reads
+`_last_known_snapshots` at all; it only ever acts on the snapshot fetched
+THIS tick (`_process_candidate_inner` -> `_manage_position(candidate,
+snapshot, now)`), and `check_exit` compares unconditionally, with no
+staleness gate -- so "software saw a stale price and refused to act" was
+never the mechanism.
+
+The real mechanism: `WebullBrokerClient._snapshot_from_dict` used to hard-
+index `raw["price"]` with no fallback. A snapshot row missing that key
+(plausible for a halted/no-NBBO/thinly-traded symbol) raised `KeyError`
+on every call, forever, for that symbol. Worse, `get_snapshots` (the
+batched per-tick call `_process_all_candidates` uses for every tracked
+candidate) had no per-row isolation around that parse -- unlike
+`get_account_position`'s existing per-row try/except -- so one poisoned
+row anywhere in a 100-symbol chunk raised out of the *entire batch call*,
+discarding every other symbol's already-fetched snapshot in that chunk
+too. The per-symbol REST fallback (`get_snapshot`) hit the identical bug
+against the identical row. Net effect: `_process_candidate_inner`'s
+exception handler returned before `_manage_position` ever ran, tick after
+tick, so the position's take-profit was never evaluated -- correctly
+surfaced as a frozen price via the fix above, but silent on the far more
+consequential fact that the exit logic itself had gone dark.
+
+Fixed by making both layers tolerant of one bad row, mirroring
+`get_account_position`'s existing isolation pattern: `_snapshot_from_dict`
+now falls back from `price` to a bid/ask midpoint to `pre_close` before
+raising (only if truly nothing usable exists), and `get_snapshots` wraps
+each row's parse in try/except-and-log so one bad symbol is skipped, not
+fatal to the batch. See `tests/test_webull_broker_client.py`'s
+`test_snapshot_from_dict_falls_back_to_bid_ask_midpoint_without_price`,
+`test_snapshot_from_dict_falls_back_to_pre_close_without_price_bid_or_ask`,
+`test_snapshot_from_dict_raises_when_nothing_usable_is_present`, and
+`test_get_snapshots_skips_a_malformed_row_without_losing_the_rest_of_the_batch`.
+
 ## Atomic bracket entry (2026-08-13)
 
 **Reverses the prior decision documented just above** (the "MASTER-anchored

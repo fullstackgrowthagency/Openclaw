@@ -620,7 +620,32 @@ class WebullBrokerClient(BrokerClient):
     # -- market data ---------------------------------------------------------
 
     def _snapshot_from_dict(self, raw: dict, timestamp: Optional[datetime] = None) -> MarketSnapshot:
-        last_price = float(raw["price"])
+        # Real incident (2026-08-21, PMI): this used to hard-index
+        # raw["price"], so a snapshot row missing that key (plausible for a
+        # halted/no-NBBO/thinly-traded symbol) raised KeyError on every
+        # single call, forever -- and since get_snapshots (below) had no
+        # per-row isolation, one such row could silently freeze the whole
+        # batch tick, and PositionManager.check_exit never got a fresh
+        # snapshot to compare against target_price, so an open position's
+        # take-profit could never fire. Falls back through the next-best
+        # signal of "what this symbol is actually worth right now" instead
+        # of crashing; only raises if truly nothing usable is present, so a
+        # genuinely priceless row (not just this incident's shape) still
+        # surfaces loudly rather than being silently treated as $0.
+        price_raw = raw.get("price")
+        if price_raw not in (None, "", "0", 0, 0.0):
+            last_price = float(price_raw)
+        else:
+            bid_raw, ask_raw = raw.get("bid"), raw.get("ask")
+            if bid_raw not in (None, "", 0, 0.0) and ask_raw not in (None, "", 0, 0.0):
+                last_price = (float(bid_raw) + float(ask_raw)) / 2.0
+            elif raw.get("pre_close") not in (None, "", 0, 0.0):
+                last_price = float(raw["pre_close"])
+            else:
+                raise ValueError(
+                    f"Webull snapshot for {raw.get('symbol')!r} has no usable "
+                    f"price/bid+ask/pre_close field: {raw!r}"
+                )
         cumulative_volume = float(raw.get("volume", 0) or 0)
         quote_timestamp = timestamp or _epoch_ms_to_dt(raw.get("quote_time"))
 
@@ -769,7 +794,13 @@ class WebullBrokerClient(BrokerClient):
         A symbol Webull doesn't return a row for (delisted, momentarily
         unavailable, a bad ticker, etc.) is simply absent from the result
         dict rather than raising -- callers must treat a missing key the
-        same way they'd treat get_snapshot raising for that one symbol.
+        same way they'd treat get_snapshot raising for that one symbol. A
+        row that IS returned but fails to parse (see _snapshot_from_dict's
+        2026-08-21 PMI-incident comment) is handled identically -- logged
+        and skipped, not fatal to the rest of the batch. Before that fix,
+        one malformed row anywhere in a chunk raised out of this entire
+        method, discarding every other symbol's already-fetched snapshot
+        in the same chunk too.
 
         `priority` (2026-08-11, see retry.py's CallPriority docstring):
         this one method serves two very differently-urgent call sites --
@@ -794,7 +825,11 @@ class WebullBrokerClient(BrokerClient):
             )
             response.raise_for_status()
             for row in response.json():
-                snapshot = self._snapshot_from_dict(row)
+                try:
+                    snapshot = self._snapshot_from_dict(row)
+                except Exception:
+                    logger.exception("Failed to parse a snapshot row from get_snapshots; raw row: %r", row)
+                    continue
                 results[snapshot.symbol] = snapshot
         return results
 

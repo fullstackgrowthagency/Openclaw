@@ -350,6 +350,39 @@ def test_snapshot_from_dict_honors_ext_fields_during_premarket():
     assert snapshot.cumulative_volume == 999.0
 
 
+# -- _snapshot_from_dict tolerant price fallback (2026-08-21, real
+# incident: a live position, PMI, never got its take-profit exit checked
+# because Webull returned a snapshot row missing "price", which used to
+# raise KeyError on every single call for that symbol, forever -- and
+# because get_snapshots (below) had no per-row isolation, this could
+# silently freeze the whole batch tick, not just that one symbol) --------
+
+def test_snapshot_from_dict_falls_back_to_bid_ask_midpoint_without_price():
+    client = _client()
+    row = dict(_REAL_SNAPSHOT_ROW)
+    del row["price"]
+    snapshot = client._snapshot_from_dict(row)
+    assert snapshot.last_price == pytest.approx((311.19 + 313.50) / 2.0)
+
+
+def test_snapshot_from_dict_falls_back_to_pre_close_without_price_bid_or_ask():
+    client = _client()
+    row = dict(_REAL_SNAPSHOT_ROW)
+    for key in ("price", "bid", "ask"):
+        del row[key]
+    snapshot = client._snapshot_from_dict(row)
+    assert snapshot.last_price == 312.41
+
+
+def test_snapshot_from_dict_raises_when_nothing_usable_is_present():
+    client = _client()
+    row = dict(_REAL_SNAPSHOT_ROW)
+    for key in ("price", "bid", "ask", "pre_close"):
+        del row[key]
+    with pytest.raises(ValueError, match="no usable price"):
+        client._snapshot_from_dict(row)
+
+
 def test_is_outside_regular_session_boundaries():
     from webull_bot.brokers.webull.client import _is_outside_regular_session
 
@@ -513,6 +546,29 @@ def test_get_snapshots_omits_symbols_webull_did_not_return():
     results = client.get_snapshots(["AAPL", "GME"])
 
     assert set(results.keys()) == {"AAPL"}
+
+
+def test_get_snapshots_skips_a_malformed_row_without_losing_the_rest_of_the_batch():
+    # Real incident (2026-08-21, PMI): before this fix, one row that failed
+    # to parse (e.g. missing price/bid/ask/pre_close) raised out of the
+    # whole get_snapshots call, discarding every other symbol's snapshot in
+    # the same chunk too -- not just the bad symbol's.
+    client = _client()
+
+    class _FakeMarketData:
+        def get_snapshot(self, symbols, category, **kwargs):
+            good = dict(_REAL_SNAPSHOT_ROW, symbol="AAPL")
+            bad = {"symbol": "PMI"}  # no price, bid, ask, or pre_close
+            return _FakeResponse([good, bad])
+
+    class _FakeDataClient:
+        market_data = _FakeMarketData()
+
+    client._require_data_client = lambda: _FakeDataClient()
+    results = client.get_snapshots(["AAPL", "PMI"])
+
+    assert set(results.keys()) == {"AAPL"}
+    assert results["AAPL"].last_price == 313.33
 
 
 def test_get_snapshots_chunks_requests_at_the_batch_size_cap():
