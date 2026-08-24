@@ -1061,6 +1061,7 @@ class TradingLoop:
                 continue
             candidate = self.candidates.get(symbol)
             if candidate is None:
+                logger.warning("No candidate found for %s while force-closing (%s); skipping this tick.", symbol, exit_reason.value)
                 continue
             try:
                 snapshot = self.broker.get_snapshot(symbol)
@@ -3479,6 +3480,21 @@ class TradingLoop:
 
     def get_open_positions(self) -> dict[str, Position]:
         return dict(self._positions)
+
+    def get_pending_manual_closes(self) -> frozenset[str]:
+        """Symbols with an in-flight `request_manual_close` -- dashboard-
+        facing (see dashboard/app.py's /api/positions `close_pending`
+        field). Real incident (2026-08-21): the per-position "Close"
+        button looked broken because the close it requests is fulfilled
+        asynchronously (retried every poll tick by
+        `_process_all_candidates` -> `_close_all_positions_now`), but the
+        dashboard's next `refreshPositions()` re-render had no way to know
+        a close was still pending, so it silently replaced the button's
+        own transient "Closing..." state with a fresh, plain, enabled
+        button -- indistinguishable from the click never having happened.
+        Exposing this set lets the frontend render the true pending state
+        instead of guessing from its own in-memory click-handler flag."""
+        return frozenset(self._manual_close_requests)
 
     def get_last_known_price(self, symbol: str) -> Optional[float]:
         """Dashboard-facing (see dashboard/app.py's /api/positions AND

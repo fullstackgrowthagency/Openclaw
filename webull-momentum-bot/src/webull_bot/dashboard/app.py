@@ -545,6 +545,13 @@ def create_app(
                 "max_adverse_excursion": position.max_adverse_excursion,
                 "opened_at": position.opened_at.isoformat(),
                 "strategy_name": position.strategy_name,
+                # Real incident (2026-08-21): the "Close" button looked
+                # broken because the close it requests is fulfilled
+                # asynchronously (see request_manual_close's docstring),
+                # and the frontend's own re-render after the POST had no
+                # way to know a close was still pending -- see
+                # get_pending_manual_closes' docstring.
+                "close_pending": symbol in loop.get_pending_manual_closes(),
             })
         return rows
 

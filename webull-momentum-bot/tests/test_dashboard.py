@@ -694,6 +694,28 @@ def test_close_position_requests_a_close_for_an_open_position(loop, client):
     assert loop.risk_engine._entries_paused_until is not None
 
 
+def test_positions_exposes_close_pending_once_a_close_is_requested(loop, client):
+    # Real incident (2026-08-21): the "Close" button looked broken because
+    # the close it requests is fulfilled asynchronously (see
+    # TradingLoop.request_manual_close's docstring), and the dashboard's
+    # own re-render after the POST had no way to distinguish "still
+    # pending" from "never happened" -- see get_pending_manual_closes'
+    # docstring. close_pending closes that gap.
+    loop._positions["TEST"] = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0, stop_price=9.0,
+        target_price=13.0, trailing_stop_pct=None, opened_at=datetime.utcnow(), strategy_name="test",
+    )
+
+    before = client.get("/api/positions").json()
+    assert before[0]["close_pending"] is False
+
+    resp = client.post("/api/positions/TEST/close")
+    assert resp.status_code == 200
+
+    after = client.get("/api/positions").json()
+    assert after[0]["close_pending"] is True
+
+
 def test_close_position_lowercases_and_strips_the_symbol(loop, client):
     loop._positions["TEST"] = Position(
         symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=10.0, stop_price=9.0,

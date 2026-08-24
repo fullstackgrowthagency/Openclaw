@@ -4621,6 +4621,32 @@ extends the end time rather than stacking. This doesn't guarantee the
 requested close wins its very next rate-limiter slot, but it removes the
 single biggest source of competing CRITICAL-tier load while it's active.
 
+**The Close button looked broken (2026-08-21).** The user reported
+clicking "Close" appeared to do nothing. The mechanism above was already
+correct and fully test-covered end to end -- the bug was purely in how
+the dashboard represented the (deliberately async) in-flight request:
+`refreshPositions()` re-renders the whole `<tbody>` from `GET
+/api/positions` right after the `POST` resolves, and since the actual
+close is still pending on the trading loop's own processing thread at
+that point, the freshly-rendered row got a brand-new, plain, enabled
+"Close" button -- silently discarding the click handler's own
+"Closing..."/disabled state within about one network round-trip. To the
+user this looked identical to the click never having registered at all.
+
+Fixed by making the pending state itself visible to the API instead of
+only living transiently in the frontend's click handler:
+`TradingLoop.get_pending_manual_closes()` exposes
+`self._manual_close_requests` (read-only copy, same pattern as
+`get_open_positions`); `GET /api/positions` adds a `close_pending` field
+per row; `refreshPositions()`'s row template renders a disabled
+"Closing..." button whenever `close_pending` is true instead of a fresh
+"Close" button, so the state survives every subsequent poll re-render
+until the position actually disappears once the close fills. While in
+this code, also added a `logger.warning` to
+`_close_all_positions_now`'s `candidate is None: continue` branch --
+previously the one skip-and-continue path in that loop with no log at
+all, unlike the `get_snapshot`-failure branch right next to it.
+
 **End-of-day auto-flatten** (distinct from the kill switch above, added
 at the same time as the core trading hours entry gate in "Risk sizing"):
 `_process_all_candidates` checks, every tick, whether

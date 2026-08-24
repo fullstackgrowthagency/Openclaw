@@ -12,6 +12,7 @@ Two styles here, deliberately:
     returns SUBMITTED first (confirmed live), so that path needs its own
     coverage independent of a real network connection.
 """
+import logging
 import threading
 import time as time_module
 from dataclasses import dataclass, field
@@ -2635,6 +2636,43 @@ def test_manual_close_request_self_prunes_once_the_position_is_gone():
     # _process_all_candidates' "self._manual_close_requests &=
     # set(self._positions)" step.
     assert loop._manual_close_requests == set()
+
+
+def test_get_pending_manual_closes_reflects_a_recorded_request():
+    # Real incident (2026-08-21): the dashboard's "Close" button looked
+    # broken because the close it requests is fulfilled asynchronously,
+    # and the dashboard had no way to tell a close was still pending --
+    # see dashboard/app.py's /api/positions "close_pending" field, which
+    # reads this accessor.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+
+    assert loop.get_pending_manual_closes() == frozenset()
+
+    loop.request_manual_close("TEST", now=_IN_HOURS_NOW)
+
+    assert loop.get_pending_manual_closes() == frozenset({"TEST"})
+
+
+def test_close_all_positions_now_logs_a_warning_when_no_candidate_exists_for_a_symbol(caplog):
+    # A position with no matching candidate is a case that should never
+    # happen (see reconcile_positions_from_broker), but if it ever did,
+    # this loop's own "skip and continue" branch used to do so completely
+    # silently -- unlike every other skip branch right next to it (e.g.
+    # a get_snapshot failure), leaving a manual close request stalled
+    # forever with zero diagnostic trail.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    _managing_candidate_with_position(loop, broker)
+    del loop.candidates["TEST"]
+
+    with caplog.at_level(logging.WARNING):
+        loop._close_all_positions_now("test", _IN_HOURS_NOW, exit_reason=ExitReason.MANUAL, symbols={"TEST"})
+
+    assert any("No candidate found for TEST" in record.message for record in caplog.records)
 
 
 def test_kill_switch_flatten_leaves_pending_when_broker_does_not_fill_synchronously():

@@ -628,7 +628,9 @@ async function refreshPositions() {
           <td>${fmtNum(p.stop_price)}</td>
           <td>${fmtNum(p.target_price)}</td>
           <td>${p.broker_managed ? "Broker" : "Software"}</td>
-          <td><button class="close-position-btn" data-symbol="${p.symbol}">Close</button></td>
+          <td>${p.close_pending
+            ? `<button class="close-position-btn" disabled>Closing...</button>`
+            : `<button class="close-position-btn" data-symbol="${p.symbol}">Close</button>`}</td>
         </tr>`).join("")
       : emptyRow(10, "No open positions");
   } catch (e) {
