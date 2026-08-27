@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
 
+from webull_bot.config import DatabaseSettings, Settings
 from webull_bot.db.models import Base, TradeRecord
 from webull_bot.enums import ExitReason, OrderSide
 
@@ -72,6 +73,44 @@ def test_get_engine_enables_pre_ping_and_recycle(monkeypatch):
 
     assert engine.pool._pre_ping is True
     assert engine.pool._recycle == 1800
+
+
+def test_get_engine_enables_wal_and_busy_timeout_for_sqlite(tmp_path):
+    # Real incident (2026-08-27): the VPS's actual DATABASE_URL is sqlite,
+    # not the coded Postgres default -- pool_pre_ping/pool_recycle (tested
+    # above) do nothing for it. The dashboard's own request handlers and
+    # this process's background thread (persisting momentum
+    # scores/scanner events on every tick) both open sessions against the
+    # same file, and SQLite's default rollback-journal mode blocks a
+    # reader for the duration of a writer's commit and fails fast rather
+    # than waiting -- confirmed live via a real
+    # `sqlite3.OperationalError: database is locked` traceback that took
+    # down /api/score-breakdown. WAL mode lets readers proceed without
+    # blocking on a writer's commit; busy_timeout is the remaining
+    # safety net for genuine writer-vs-writer contention (SQLite only
+    # ever allows one writer at a time, WAL or not).
+    # WAL mode requires a real file -- an in-memory database always
+    # reports journal_mode "memory" regardless of what's requested, since
+    # WAL needs a separate on-disk "-wal" file alongside the main one.
+    db_path = tmp_path / "test.db"
+    engine = db_session.get_engine(Settings(database=DatabaseSettings(url=f"sqlite:///{db_path}")))
+
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+        assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 30000
+
+
+def test_get_engine_constructs_cleanly_for_a_non_sqlite_dialect():
+    # The PRAGMA statements above are sqlite-specific syntax -- this
+    # confirms building a Postgres-backed engine (create_engine() is lazy,
+    # so no real server is needed) doesn't raise, i.e. the dialect gate in
+    # get_engine is what protects a real Postgres deployment from ever
+    # having "PRAGMA ..." executed against it on connect.
+    engine = db_session.get_engine(Settings(database=DatabaseSettings(
+        url="postgresql+psycopg://webull_bot:webull_bot@localhost:5432/webull_bot",
+    )))
+
+    assert engine.dialect.name == "postgresql"
 
 
 def test_sync_schema_adds_missing_columns_to_an_existing_table(monkeypatch):

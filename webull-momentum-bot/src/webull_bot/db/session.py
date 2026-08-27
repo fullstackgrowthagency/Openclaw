@@ -4,7 +4,7 @@ import logging
 from contextlib import contextmanager
 from typing import Iterator
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..config import Settings, get_settings
@@ -23,23 +23,45 @@ def get_engine(settings: Settings | None = None):
         # Real incident (2026-08-26): the dashboard intermittently 500'd on
         # /api/performance, /api/candidates, /api/status, /api/trades, and
         # /api/score-breakdown -- data would load, then one poll cycle would
-        # 500, then it would come back. Every one of those endpoints opens a
-        # session here on every request (auth/dependencies.py's
-        # get_current_user checks the logged-in user even on routes that
-        # don't otherwise touch the DB), so a single pooled connection that
-        # the database (or an intermediary connection pooler, e.g. a managed
-        # Postgres/Supabase setup's PgBouncer -- see README.md) silently
-        # closed while idle would fail on its next checkout with something
-        # like "server closed the connection unexpectedly", then get
-        # discarded, then the very next request would get a fresh connection
-        # and succeed -- exactly the fail-once-then-recover pattern
-        # reported, surfacing on whichever endpoint happened to draw the
-        # dead connection. pool_pre_ping issues a cheap "SELECT 1" before
-        # handing out a pooled connection and transparently reconnects if
-        # it's dead, so this is never visible to a caller; pool_recycle is a
-        # second line of defense that proactively retires connections before
-        # a pooler's own idle-close window can hit them.
+        # 500, then it would come back. pool_pre_ping/pool_recycle below were
+        # a first attempt at this, reasoning from this project's coded
+        # DATABASE_URL default (Postgres) that a silently-dropped pooled
+        # connection was the cause -- harmless, but wrong for THIS
+        # deployment: the VPS's actual DATABASE_URL points at a local
+        # SQLite file (confirmed via a real traceback:
+        # `sqlite3.OperationalError: database is locked`), which pool
+        # settings do nothing for. The real mechanism, specific to SQLite:
+        # this one process's background thread commits a write (a momentum
+        # score/scanner event, persisted on every tick via
+        # scripts/run_dashboard.py's on_score_computed/on_state_transition)
+        # at the same moment a dashboard request opens its own session
+        # (every /api/* route does, via auth/dependencies.py's
+        # get_current_user) -- SQLite's default rollback-journal mode
+        # blocks a reader for the duration of a writer's commit and fails
+        # fast rather than waiting, which is exactly the
+        # fail-once-then-recover pattern reported. See the sqlite-specific
+        # PRAGMAs registered below for the actual fix.
         _engine = create_engine(settings.database.url, future=True, pool_pre_ping=True, pool_recycle=1800)
+        if _engine.dialect.name == "sqlite":
+            # WAL (write-ahead log) journal mode lets readers proceed
+            # without blocking on a concurrent writer's commit (the
+            # opposite of the default rollback-journal mode's behavior
+            # that caused the incident above) -- readers and the one
+            # active writer no longer contend for the same lock. Writers
+            # still serialize against each other (SQLite only ever allows
+            # one writer at a time, WAL or not), so busy_timeout is a
+            # second line of defense: any connection that still can't get
+            # the lock it needs waits and retries for up to 30s instead of
+            # raising "database is locked" immediately. Applied via a
+            # `connect` event (not a `connect_args={"timeout": ...}`
+            # kwarg) so it also covers journal_mode, which has no
+            # equivalent sqlite3.connect() parameter.
+            @event.listens_for(_engine, "connect")
+            def _set_sqlite_pragmas(dbapi_connection, connection_record):
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+                cursor.close()
     return _engine
 
 

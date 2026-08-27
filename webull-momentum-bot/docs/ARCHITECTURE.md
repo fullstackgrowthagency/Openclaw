@@ -4512,6 +4512,44 @@ concurrent-mutation concern -- a real inconsistency, but CPython's dict
 copy is atomic under the GIL, so it doesn't produce a demonstrable crash
 the way the missing DB reconnect strategy does.
 
+**Correction, next day (2026-08-27): the 500s kept happening after the
+fix above.** The `pool_pre_ping`/`pool_recycle` fix was reasoned from
+this project's coded `DATABASE_URL` default (Postgres) -- wrong for this
+particular VPS, whose actual `DATABASE_URL` points at a local SQLite
+file (confirmed by finally getting a real traceback via `journalctl`,
+after two rounds of guessing from code alone: `sqlite3.OperationalError:
+database is locked`, raised from `record_momentum_score`'s
+`session.commit()` in `scripts/run_dashboard.py`'s `on_score_computed`
+background-thread callback, immediately followed by `/api/score-breakdown`
+500ing). Pool settings are meaningless for SQLite -- there's no separate
+server or connection pooler to drop a connection.
+
+The real mechanism: this one process's background thread persists a
+momentum score or scanner event on every tick (`on_score_computed`/
+`on_state_transition`), while every `/api/*` request opens its own
+session via auth (`get_current_user`). SQLite's default rollback-journal
+mode gives exactly one writer exclusive access to the *entire* database
+file for the duration of its commit, and blocks -- or, without a
+configured busy timeout, immediately fails -- any reader trying to start
+a transaction at the same moment. That's exactly the reported
+fail-once-then-recover pattern, and explains why a read-only endpoint
+like `/api/score-breakdown` could 500 with no read-side bug at all: it
+simply lost a race against the background thread's own write commit.
+
+Fixed in `get_engine()` (`db/session.py`) with a dialect-gated `connect`
+event, applied only when `engine.dialect.name == "sqlite"`: `PRAGMA
+journal_mode=WAL` (lets readers proceed without blocking on a writer's
+commit -- the actual fix for this incident) and `PRAGMA
+busy_timeout=30000` (a 30s wait-and-retry safety net for the writer-vs-
+writer contention that WAL still serializes, since SQLite only ever
+allows one writer at a time regardless of journal mode). The
+`pool_pre_ping`/`pool_recycle` settings from the day before are left in
+place -- harmless for SQLite, and still correct if this project is ever
+actually deployed against Postgres, which its coded default assumes.
+See `tests/test_db_session.py`'s
+`test_get_engine_enables_wal_and_busy_timeout_for_sqlite` and
+`test_get_engine_constructs_cleanly_for_a_non_sqlite_dialect`.
+
 ## Backtesting
 
 `backtest/engine.py` reuses the live `Strategy` / `RiskEngine` /
