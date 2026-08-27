@@ -4484,6 +4484,34 @@ rows), a cheap patch for this one failure mode, not a substitute for
 Alembic once real migrations (dropped columns, backfills, renames) are
 needed.
 
+**Intermittent 500s across unrelated dashboard endpoints (2026-08-26).**
+The user reported `/api/performance`, `/api/candidates`, `/api/status`,
+`/api/trades`, and `/api/score-breakdown` all occasionally 500ing --
+data would load, one poll cycle would fail, the next would succeed.
+Investigation found the shared cause despite these endpoints touching
+completely disjoint data (in-memory `TradingLoop` state for two of them,
+DB-backed trade/performance history for the other three): **every
+authenticated `/api/*` route opens a DB session on every request**, via
+`_resolve_loop`/`_current_user_id` (`dashboard/app.py`) ->
+`get_current_user` (`auth/dependencies.py`), which looks up the logged-in
+user regardless of whether the route itself needs the DB for anything
+else. `get_engine()` (`db/session.py`) used SQLAlchemy's default pool
+with no `pool_pre_ping`/`pool_recycle`, so any pooled connection the
+database (or an intermediary pooler, e.g. Supabase's PgBouncer) silently
+closed while idle would fail on its very next checkout, get discarded,
+and succeed again on the request right after -- exactly the reported
+pattern, capable of surfacing on ANY `/api/*` endpoint since all of them
+share this one DB-session-per-request path through auth. Fixed with
+`pool_pre_ping=True` (transparently detects and replaces a dead
+connection before handing it to a caller) and `pool_recycle=1800`
+(proactively retires connections before a pooler's own idle-close window
+can hit them). Ruled out, not fixed: `TradingLoop.get_open_positions()`
+returns `dict(self._positions)` without the `_candidates_lock`
+protection `get_candidates()` uses right above it for the same
+concurrent-mutation concern -- a real inconsistency, but CPython's dict
+copy is atomic under the GIL, so it doesn't produce a demonstrable crash
+the way the missing DB reconnect strategy does.
+
 ## Backtesting
 
 `backtest/engine.py` reuses the live `Strategy` / `RiskEngine` /

@@ -57,6 +57,23 @@ def _create_pre_2026_08_11_trades_table(engine):
         ))
 
 
+def test_get_engine_enables_pre_ping_and_recycle(monkeypatch):
+    # Real incident (2026-08-26): the dashboard intermittently 500'd across
+    # several unrelated endpoints because a pooled connection the database
+    # (or an intermediary pooler) silently closed while idle would fail on
+    # its next checkout, self-healing on the very next request once
+    # SQLAlchemy discarded it. pool_pre_ping/pool_recycle prevent that
+    # failure from ever reaching a caller -- see get_engine's own comment.
+    # Monkeypatches the module's settings-derived URL indirectly by letting
+    # get_engine build against the real (sqlite) default from get_settings,
+    # since only the constructed engine's pool config is under test here,
+    # not connectivity.
+    engine = db_session.get_engine()
+
+    assert engine.pool._pre_ping is True
+    assert engine.pool._recycle == 1800
+
+
 def test_sync_schema_adds_missing_columns_to_an_existing_table(monkeypatch):
     engine = _sqlite_engine()
     _create_pre_2026_08_11_trades_table(engine)

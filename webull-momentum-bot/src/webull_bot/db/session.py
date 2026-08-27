@@ -20,7 +20,26 @@ def get_engine(settings: Settings | None = None):
     global _engine
     if _engine is None:
         settings = settings or get_settings()
-        _engine = create_engine(settings.database.url, future=True)
+        # Real incident (2026-08-26): the dashboard intermittently 500'd on
+        # /api/performance, /api/candidates, /api/status, /api/trades, and
+        # /api/score-breakdown -- data would load, then one poll cycle would
+        # 500, then it would come back. Every one of those endpoints opens a
+        # session here on every request (auth/dependencies.py's
+        # get_current_user checks the logged-in user even on routes that
+        # don't otherwise touch the DB), so a single pooled connection that
+        # the database (or an intermediary connection pooler, e.g. a managed
+        # Postgres/Supabase setup's PgBouncer -- see README.md) silently
+        # closed while idle would fail on its next checkout with something
+        # like "server closed the connection unexpectedly", then get
+        # discarded, then the very next request would get a fresh connection
+        # and succeed -- exactly the fail-once-then-recover pattern
+        # reported, surfacing on whichever endpoint happened to draw the
+        # dead connection. pool_pre_ping issues a cheap "SELECT 1" before
+        # handing out a pooled connection and transparently reconnects if
+        # it's dead, so this is never visible to a caller; pool_recycle is a
+        # second line of defense that proactively retires connections before
+        # a pooler's own idle-close window can hit them.
+        _engine = create_engine(settings.database.url, future=True, pool_pre_ping=True, pool_recycle=1800)
     return _engine
 
 
