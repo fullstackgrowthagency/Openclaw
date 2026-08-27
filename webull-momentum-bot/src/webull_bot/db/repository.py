@@ -467,10 +467,24 @@ def get_momentum_score_component_summary(
 
 
 def _metrics_to_json(metrics) -> Optional[dict]:
+    """Real incident (2026-08-27): this used to hard-code
+    `data["timestamp"] = metrics.timestamp.isoformat()` as the only
+    datetime conversion, missing MomentumMetrics.recent_high_15s_time
+    (added later, Optional[datetime], only populated once the tick
+    buffer has a print in the trailing 15s -- so this only failed
+    intermittently, whenever that field happened to be set) --
+    `sqlalchemy.exc.StatementError: (builtins.TypeError) Object of type
+    datetime is not JSON serializable` on every record_momentum_event()
+    call where it was. Converts every top-level datetime field generically
+    instead, mirroring TradingLoop._momentum_qualification_snapshot's own
+    (already-correct) pattern, so a future datetime field added to
+    MomentumMetrics can't silently reintroduce this same bug."""
     if metrics is None:
         return None
     data = asdict(metrics)
-    data["timestamp"] = metrics.timestamp.isoformat()  # datetime isn't JSON-serializable as-is
+    for key, value in data.items():
+        if isinstance(value, datetime):
+            data[key] = value.isoformat()
     return data
 
 

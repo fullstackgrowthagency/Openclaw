@@ -457,6 +457,26 @@ def test_record_momentum_event_serializes_metrics_with_isoformat_timestamp(sessi
     assert row.outcome_label == "unknown"
 
 
+def test_record_momentum_event_serializes_a_second_datetime_field_on_metrics(session):
+    # Real incident (2026-08-27): _metrics_to_json only ever isoformat'd
+    # `timestamp` by name, so MomentumMetrics.recent_high_15s_time (a
+    # second, independently-Optional datetime field, only populated once
+    # the tick buffer has a print in the trailing 15s) leaked through as a
+    # raw datetime whenever it was set -- SQLAlchemy's JSON serializer
+    # raised sqlalchemy.exc.StatementError: (builtins.TypeError) Object of
+    # type datetime is not JSON serializable at session.commit() time, not
+    # at construction, which is why this needs a real commit to catch
+    # rather than just inspecting the dict in memory.
+    metrics = _metrics()
+    metrics.recent_high_15s_time = datetime(2026, 1, 1, 9, 31, 30)
+
+    record_momentum_event(session, _momentum_event(metrics_at_event=metrics))
+    session.commit()  # must not raise
+
+    row = session.query(MomentumEventRecord).one()
+    assert row.metrics_at_event["recent_high_15s_time"] == "2026-01-01T09:31:30"
+
+
 def test_record_momentum_event_upserts_by_existing_id_not_duplicating_rows(session):
     row1 = record_momentum_event(session, _momentum_event())
     session.commit()

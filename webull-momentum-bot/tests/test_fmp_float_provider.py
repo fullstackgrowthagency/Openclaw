@@ -92,6 +92,21 @@ def test_get_float_data_raises_on_empty_response():
         provider.get_float_data("NOSYMBOL")
 
 
+def test_get_float_data_raises_a_value_error_on_null_float_shares():
+    # Real incident (2026-08-27): FMP can return a non-empty row for a
+    # symbol with floatShares/outstandingShares present but null (small/
+    # illiquid/newly-listed names) -- float(None) used to raise a raw
+    # TypeError here instead of this method's documented ValueError "no
+    # data" contract.
+    fake_http = _FakeHttp(
+        {"shares-float": [{"symbol": "CGCF", "floatShares": None, "outstandingShares": None}]},
+    )
+    provider = FMPFloatProvider(_credentials(), http_get=fake_http)
+
+    with pytest.raises(ValueError, match="incomplete shares-float data"):
+        provider.get_float_data("CGCF")
+
+
 def test_get_float_data_survives_profile_failure():
     """Market cap is a nice-to-have; a broken /profile call must not block float data."""
     import requests

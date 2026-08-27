@@ -81,6 +81,18 @@ class FMPFloatProvider(FloatDataProvider):
             raise ValueError(f"FMP returned no shares-float data for {symbol}")
         row = rows[0]
 
+        # Real incident (2026-08-27): FMP can return a non-empty row for a
+        # symbol it otherwise has *some* shares-float coverage for, but with
+        # floatShares/outstandingShares present-but-null (small/illiquid/
+        # newly-listed names) -- float(None) raised TypeError here, not the
+        # ValueError above, so callers built around this method's documented
+        # "no data" contract got a confusing, differently-shaped failure. In
+        # practice FallbackFloatProvider's broad `except Exception` already
+        # caught it and fell through to yfinance either way -- this just
+        # makes the actual failure legible instead of a bare TypeError.
+        if row.get("floatShares") is None or row.get("outstandingShares") is None:
+            raise ValueError(f"FMP returned incomplete shares-float data for {symbol}: {row!r}")
+
         free_float_shares = float(row["floatShares"])
         shares_outstanding = float(row["outstandingShares"])
         free_float_pct_field = row.get("freeFloat")

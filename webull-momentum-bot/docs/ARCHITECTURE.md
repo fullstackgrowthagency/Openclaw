@@ -4581,15 +4581,36 @@ checkpoints. Safe here (durable against this process crashing; only
 risks losing the most recent commit(s) on an actual OS crash/power
 loss, an acceptable tradeoff for scanner-event/momentum-score
 telemetry, not the trades/orders tables that matter for reconciliation).
-Two smaller, separate, real bugs surfaced in the same exception count
-but were left unfixed as out of scope for this pass: `TypeError: Object
-of type datetime is not JSON serializable` (13x in the hour -- checked
-the obvious call sites, `_metrics_to_json`/`_momentum_qualification_snapshot`/
-`event_recorder.py`'s outcome builders, all already correctly
-`.isoformat()` their datetime fields, so the actual culprit wasn't
-pinned down) and `TypeError: float() argument must be ... not
-'NoneType'` (3x, likely float-provider-adjacent given its log
-co-occurrence with FMP lookup failures for the same symbols).
+Two smaller, separate, real bugs surfaced in the same exception count,
+initially left unfixed as out of scope for this pass, then traced and
+fixed in a follow-up right after:
+
+- `TypeError: Object of type datetime is not JSON serializable` (13x in
+  the hour) -- `_metrics_to_json` (`db/repository.py`) only ever
+  isoformat'd `timestamp` by name: `data["timestamp"] =
+  metrics.timestamp.isoformat()`. `MomentumMetrics` gained a *second*
+  independently-`Optional[datetime]` field later,
+  `recent_high_15s_time` (only populated once the tick buffer has a
+  print in the trailing 15s -- explaining why this failed
+  intermittently, not on every call), which `asdict()` leaves as a raw
+  `datetime` with nothing to convert it. Fixed by converting every
+  top-level datetime field generically instead of naming one, mirroring
+  `TradingLoop._momentum_qualification_snapshot`'s own already-correct
+  pattern -- immune to a third datetime field doing the same thing
+  again later. See `tests/test_repository.py`'s
+  `test_record_momentum_event_serializes_a_second_datetime_field_on_metrics`.
+- `TypeError: float() argument must be ... not 'NoneType'` (3x) --
+  `FMPFloatProvider.get_float_data` (`data/float_providers/fmp.py`)
+  guarded against an empty `shares-float` response but not a non-empty
+  one with `floatShares`/`outstandingShares` present-but-`null` (real
+  for small/illiquid/newly-listed symbols) -- `float(None)` raised a raw
+  `TypeError` instead of this method's documented `ValueError` "no
+  data" contract. `FallbackFloatProvider`'s broad `except Exception`
+  was already catching it and falling through to yfinance either way,
+  so this was never an unhandled crash -- just a confusing log signal.
+  Fixed by raising the same `ValueError` shape the empty-response case
+  already uses. See `tests/test_fmp_float_provider.py`'s
+  `test_get_float_data_raises_a_value_error_on_null_float_shares`.
 
 See `tests/test_db_session.py`'s
 `test_get_engine_enables_wal_busy_timeout_and_normal_sync_for_sqlite` and
