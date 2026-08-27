@@ -4546,8 +4546,53 @@ allows one writer at a time regardless of journal mode). The
 `pool_pre_ping`/`pool_recycle` settings from the day before are left in
 place -- harmless for SQLite, and still correct if this project is ever
 actually deployed against Postgres, which its coded default assumes.
+
+**Still not enough, same day: write volume, not just missing WAL.**
+The user (correctly skeptical) suspected the Webull `429
+TOO_MANY_REQUESTS` rate limit instead, since the 500s kept recurring
+after the WAL fix deployed. A hard count of every exception type across
+an hour of `journalctl`
+(`grep -oE "[A-Za-z_.]+(Error|Exception): .*" | sort | uniq -c | sort -rn`
+-- the earlier per-traceback greps had all been silently truncated
+before reaching the real exception line, since FastAPI's middleware
+stack is ~25 frames deep) ruled the rate limit out (confirmed none of
+the 5 affected endpoints call the broker) and found the real number:
+**300** `database is locked` plus **168**
+`QueuePool limit of size 5 overflow 10 reached, connection timed out`
+in a single hour, with the WAL fix (commit `40c5cf6`) confirmed already
+deployed. Root cause: this process persists a momentum score or scanner
+event with its own `session.commit()` for every tracked candidate on
+every 5s tick (`scripts/run_dashboard.py`'s
+`on_score_computed`/`on_state_transition`, one commit per call, no
+batching) -- with 100+ tracked candidates that's dozens of individual
+commits every 5 seconds, and SQLite's default `synchronous=FULL` fsyncs
+the WAL on every single one of them. Under real disk I/O contention,
+that fsync cost directly extends how long each commit holds SQLite's one
+writer lock -- exactly what turns "occasional contention" into hundreds
+of failures an hour, and once contention is bad enough for long enough,
+readers and writers alike pile up on the connection pool (5 + 10
+overflow = 15) faster than it can drain, producing the `QueuePool`
+timeouts too.
+
+Fixed with one more PRAGMA in the same `connect` event handler:
+`PRAGMA synchronous=NORMAL` -- SQLite's own documented WAL companion
+setting, skipping the fsync-per-commit in favor of syncing only at WAL
+checkpoints. Safe here (durable against this process crashing; only
+risks losing the most recent commit(s) on an actual OS crash/power
+loss, an acceptable tradeoff for scanner-event/momentum-score
+telemetry, not the trades/orders tables that matter for reconciliation).
+Two smaller, separate, real bugs surfaced in the same exception count
+but were left unfixed as out of scope for this pass: `TypeError: Object
+of type datetime is not JSON serializable` (13x in the hour -- checked
+the obvious call sites, `_metrics_to_json`/`_momentum_qualification_snapshot`/
+`event_recorder.py`'s outcome builders, all already correctly
+`.isoformat()` their datetime fields, so the actual culprit wasn't
+pinned down) and `TypeError: float() argument must be ... not
+'NoneType'` (3x, likely float-provider-adjacent given its log
+co-occurrence with FMP lookup failures for the same symbols).
+
 See `tests/test_db_session.py`'s
-`test_get_engine_enables_wal_and_busy_timeout_for_sqlite` and
+`test_get_engine_enables_wal_busy_timeout_and_normal_sync_for_sqlite` and
 `test_get_engine_constructs_cleanly_for_a_non_sqlite_dialect`.
 
 ## Backtesting

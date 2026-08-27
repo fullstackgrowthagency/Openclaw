@@ -56,11 +56,34 @@ def get_engine(settings: Settings | None = None):
             # `connect` event (not a `connect_args={"timeout": ...}`
             # kwarg) so it also covers journal_mode, which has no
             # equivalent sqlite3.connect() parameter.
+            #
+            # Real incident (2026-08-27, same day): WAL + busy_timeout
+            # alone didn't stop the lock errors -- 300 "database is
+            # locked" plus 168 connection-pool-timeout errors in a single
+            # hour, still dwarfing every other exception type in
+            # journalctl. Root cause: this process persists a momentum
+            # score or scanner event with its own commit for every tracked
+            # candidate on every 5s tick (scripts/run_dashboard.py's
+            # on_score_computed/on_state_transition, one commit per call,
+            # no batching) -- with 100+ tracked candidates that's dozens
+            # of commits every 5 seconds, and SQLite's default
+            # synchronous=FULL fsyncs the WAL on every single one of them.
+            # Under real disk contention that fsync cost directly extends
+            # how long each commit holds SQLite's one writer lock, which
+            # is what turns "occasional contention" into hundreds of
+            # failures an hour. synchronous=NORMAL is SQLite's own
+            # documented companion setting for WAL mode: safe (durable
+            # against this process crashing; only risks losing the most
+            # recent commit(s) on an actual OS crash/power loss, an
+            # acceptable tradeoff for scanner-event/momentum-score
+            # telemetry) and skips that fsync, syncing only at WAL
+            # checkpoints instead of every commit.
             @event.listens_for(_engine, "connect")
             def _set_sqlite_pragmas(dbapi_connection, connection_record):
                 cursor = dbapi_connection.cursor()
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA busy_timeout=30000")
+                cursor.execute("PRAGMA synchronous=NORMAL")
                 cursor.close()
     return _engine
 

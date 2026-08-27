@@ -75,7 +75,7 @@ def test_get_engine_enables_pre_ping_and_recycle(monkeypatch):
     assert engine.pool._recycle == 1800
 
 
-def test_get_engine_enables_wal_and_busy_timeout_for_sqlite(tmp_path):
+def test_get_engine_enables_wal_busy_timeout_and_normal_sync_for_sqlite(tmp_path):
     # Real incident (2026-08-27): the VPS's actual DATABASE_URL is sqlite,
     # not the coded Postgres default -- pool_pre_ping/pool_recycle (tested
     # above) do nothing for it. The dashboard's own request handlers and
@@ -89,6 +89,15 @@ def test_get_engine_enables_wal_and_busy_timeout_for_sqlite(tmp_path):
     # blocking on a writer's commit; busy_timeout is the remaining
     # safety net for genuine writer-vs-writer contention (SQLite only
     # ever allows one writer at a time, WAL or not).
+    #
+    # Second real incident (same day): WAL + busy_timeout alone weren't
+    # enough -- 300 "database is locked" plus 168 connection-pool-timeout
+    # errors in one hour, driven by dozens of individual commits every
+    # 5s tick (one per tracked candidate) each paying SQLite's default
+    # synchronous=FULL fsync cost. synchronous=NORMAL is SQLite's own
+    # documented WAL companion setting -- skips the fsync-per-commit,
+    # syncing only at WAL checkpoints instead.
+    #
     # WAL mode requires a real file -- an in-memory database always
     # reports journal_mode "memory" regardless of what's requested, since
     # WAL needs a separate on-disk "-wal" file alongside the main one.
@@ -98,6 +107,8 @@ def test_get_engine_enables_wal_and_busy_timeout_for_sqlite(tmp_path):
     with engine.connect() as conn:
         assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
         assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 30000
+        # PRAGMA synchronous reports an integer: 0=OFF, 1=NORMAL, 2=FULL.
+        assert conn.exec_driver_sql("PRAGMA synchronous").scalar() == 1
 
 
 def test_get_engine_constructs_cleanly_for_a_non_sqlite_dialect():
