@@ -100,6 +100,15 @@ def test_status_reflects_kill_switch(loop, client):
     assert resp.json()["kill_switch_active"] is True
 
 
+def test_status_reflects_bot_enabled(loop, client):
+    resp = client.get("/api/status")
+    assert resp.json()["bot_enabled"] is True
+
+    loop.disable_bot("test toggle")
+    resp = client.get("/api/status")
+    assert resp.json()["bot_enabled"] is False
+
+
 def test_responses_disable_caching(client):
     # Regression for a real bug: a browser kept a stale cached app.js after
     # a deploy added a table column, silently shifting every value after it
@@ -675,6 +684,63 @@ def test_kill_switch_disengage_stops_the_flatten_retry(loop, client):
     client.post("/api/kill-switch", json={"active": False})
 
     assert loop.risk_engine.kill_switch_active is False
+
+
+def test_bot_toggle_disable_via_dashboard(loop, client, session_factory):
+    resp = client.post("/api/bot-toggle", json={"enabled": False})
+    assert resp.status_code == 200
+    assert resp.json()["bot_enabled"] is False
+    # Takes effect immediately -- no need to wait for a trading-loop tick.
+    assert loop.risk_engine.bot_enabled is False
+
+    with session_factory() as session:
+        row = session.query(BotSettings).one()
+        assert row.bot_enabled is False
+
+
+def test_bot_toggle_enable_via_dashboard(loop, client, session_factory):
+    loop.disable_bot("manual test")
+
+    resp = client.post("/api/bot-toggle", json={"enabled": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["bot_enabled"] is True
+    assert loop.risk_engine.bot_enabled is True
+
+    with session_factory() as session:
+        row = session.query(BotSettings).one()
+        assert row.bot_enabled is True
+
+
+def test_bot_toggle_disable_flattens_open_positions_on_next_tick(loop, client):
+    # Unlike the kill switch, disabling the bot is meant to stop the loop
+    # from doing anything else once positions are handled -- see
+    # TradingLoop.disable_bot's docstring. This just confirms the
+    # dashboard's endpoint actually drives that TradingLoop method rather
+    # than only flipping risk_engine.bot_enabled.
+    loop.broker.feed_snapshot(MarketSnapshot(
+        symbol="TEST", timestamp=datetime.utcnow(), last_price=10.0, bid=9.99, ask=10.01,
+        bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=10.0, high_of_day=10.0,
+        low_of_day=10.0, open_price=10.0,
+    ))
+    candidate = new_candidate("TEST")
+    for state in (CandidateState.WATCHING, CandidateState.HEATING_UP, CandidateState.ARMED,
+                  CandidateState.CONFIRMING, CandidateState.TRIGGERED, CandidateState.ENTERED, CandidateState.MANAGING):
+        transition(candidate, state)
+    loop.candidates["TEST"] = candidate
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=9.0,
+        stop_price=8.0, target_price=15.0, trailing_stop_pct=None,
+        opened_at=datetime.utcnow(), strategy_name="test",
+    )
+    loop._positions["TEST"] = position
+    if hasattr(loop.broker, "_state"):
+        loop.broker._state.positions["TEST"] = position
+
+    client.post("/api/bot-toggle", json={"enabled": False})
+    loop._process_all_candidates(datetime.utcnow())
+
+    assert "TEST" not in loop._positions
 
 
 def test_close_position_requests_a_close_for_an_open_position(loop, client):

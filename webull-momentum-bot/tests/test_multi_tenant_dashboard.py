@@ -157,6 +157,36 @@ def test_kill_switch_on_one_users_loop_does_not_affect_the_others(session_factor
     registry.stop_all()
 
 
+def test_bot_toggle_on_one_users_loop_does_not_affect_the_others(session_factory, settings):
+    loops = {}
+
+    def factory(user_id, s):
+        loop = _make_loop()
+        loops[user_id] = loop
+        return loop
+
+    registry = LoopRegistry(factory)
+    app = create_app(None, session_factory, "paper", settings=settings, loop_registry=registry)
+
+    alice = _signed_up_client(app, "alice3@example.com")
+    alice_id = alice.get("/api/auth/me").json()["id"]
+    registry.start_for_user(alice_id, settings)
+
+    bob = _signed_up_client(app, "bob3@example.com")
+    bob_id = bob.get("/api/auth/me").json()["id"]
+    registry.start_for_user(bob_id, settings)
+
+    resp = alice.post("/api/bot-toggle", json={"enabled": False})
+    assert resp.status_code == 200
+    assert resp.json()["bot_enabled"] is False
+
+    assert loops[alice_id].risk_engine.bot_enabled is False
+    assert loops[bob_id].risk_engine.bot_enabled is True
+    assert bob.get("/api/status").json()["bot_enabled"] is True
+
+    registry.stop_all()
+
+
 def test_trades_are_scoped_per_user(session_factory, settings):
     registry = LoopRegistry(lambda user_id, s: _make_loop())
     app = create_app(None, session_factory, "paper", settings=settings, loop_registry=registry)

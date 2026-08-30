@@ -4838,6 +4838,46 @@ auto-flatten check that follows finds nothing left to do -- a closed
 position is never attributed to the wrong `ExitReason` by a second flatten
 attempt re-processing it.
 
+**Bot ON/OFF toggle, from the dashboard.** The user asked for a real
+run/pause control for the bot itself, distinct from the kill switch: a
+sliding toggle switch in the header status bar (visually different from
+the kill switch's badge-button, since it's a different kind of control),
+`POST /api/bot-toggle` with `{"enabled": true|false}`.
+
+Deliberately a **separate** flag (`RiskEngine.bot_enabled`), not a reuse
+of `kill_switch_active` under the hood -- the two controls stay
+independently readable/settable: engaging the kill switch doesn't flip
+this, and vice versa. It differs from the kill switch in two ways:
+
+1. **Stops everything, not just entries.** The kill switch keeps
+   `_process_all_candidates` doing everything except entries every tick
+   (scanning, streaming reconciliation, snapshot fetches, account-summary
+   refresh). Turning the bot off instead makes that method `return` right
+   after the flatten-retry check -- no scanning, no candidate processing,
+   no account-summary refresh, nothing -- until it's turned back on. The
+   broker position-reconcile just above that check is the one thing left
+   to run regardless (see point 3 below).
+2. **Also force-closes every open position**, same as engaging the kill
+   switch (`_close_all_positions_now`, `ExitReason.BOT_DISABLED`) --
+   confirmed via a modal before the request is sent, same reasoning as
+   the kill switch's engage confirmation. Turning it back ON needs no
+   confirmation (resuming trading is low-risk) and takes effect on the
+   very next tick.
+3. **Persists across a restart**, unlike the kill switch (which is pure
+   in-memory and always comes back up disengaged). `BotSettings.bot_enabled`
+   (NULL = default/on, same NULL convention as every other column on that
+   table) is written on every toggle and read back in
+   `scripts/run_dashboard.py`'s `_build_loop_for_user` at loop-construction
+   time. This means a process that restarts (deploy, crash, VPS reboot)
+   while the bot was off comes back up still off -- and still needs to
+   flatten anything the broker shows as open, even though `self._positions`
+   starts out empty on a fresh process. That's exactly why the disabled
+   check runs *after* `reconcile_positions_from_broker` in
+   `_process_all_candidates`, not before it: the reconcile call adopts any
+   broker-reported position this fresh process doesn't know about yet
+   (see "Zero-trades incident" above for that mechanism), and only then
+   does the disabled check see it and flatten it, all on the same tick.
+
 ## Multi-tenant auth (2026-08-15)
 
 **Motivation.** Originally single-tenant: one `.env` file's Webull app

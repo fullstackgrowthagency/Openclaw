@@ -2580,6 +2580,122 @@ def test_disengage_kill_switch_does_not_touch_open_positions():
     assert "TEST" in loop._positions  # untouched -- disengaging never flattens
 
 
+# -- bot ON/OFF toggle: halt + flatten + stop ticking entirely -------------
+
+def test_disable_bot_blocks_new_entries_immediately():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+
+    loop.disable_bot("test toggle")
+
+    # Takes effect the instant it's called -- no tick needs to run first,
+    # same contract as engage_kill_switch_and_flatten.
+    assert loop.risk_engine.bot_enabled is False
+
+
+def test_disable_bot_flattens_open_positions():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    candidate = _managing_candidate_with_position(loop, broker)
+
+    loop.disable_bot("test toggle")
+    assert "TEST" in loop._positions  # not closed synchronously by the call itself
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert "TEST" not in loop._positions
+    assert candidate.state.value == "cooldown"
+    assert len(loop._trades) == 1
+    assert loop._trades[0].exit_reason == ExitReason.BOT_DISABLED
+
+
+def test_disable_bot_stops_the_rest_of_the_tick():
+    # Unlike the kill switch (which keeps refreshing the cached account
+    # summary every tick even while just blocking entries/flattening),
+    # disabling the bot must skip EVERYTHING past the flatten check --
+    # no account-summary refresh, no candidate scanning, no new entries.
+    # Reuses the same before/after assertion
+    # test_get_account_summary_is_populated_by_the_periodic_background_
+    # refresh already makes for the enabled case, just proving the
+    # opposite: staying None while disabled.
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    loop.disable_bot("test toggle")
+
+    summary = loop.get_account_summary()
+    assert summary == {"equity": None, "buying_power": None, "equity_error": None}
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    summary = loop.get_account_summary()
+    assert summary == {"equity": None, "buying_power": None, "equity_error": None}
+
+
+def test_disable_bot_still_reconciles_positions_from_broker_before_flattening():
+    # Covers a restart-while-disabled: bot_enabled=False is restored at
+    # loop-construction time (see scripts/run_dashboard.py's
+    # _build_loop_for_user), so self._positions starts out empty even
+    # though the broker still shows a real open position from before the
+    # restart. The flatten check must not skip straight past that --
+    # reconcile_positions_from_broker (called just above the disabled
+    # check in _process_all_candidates) has to run first so the adopted
+    # position is actually seen and force-closed on this same tick.
+    broker = PaperBrokerClient()
+    broker.connect()
+    broker.feed_snapshot(MarketSnapshot(
+        symbol="TEST", timestamp=_IN_HOURS_NOW, last_price=10.0, bid=9.99, ask=10.01,
+        bid_size=100, ask_size=100, cumulative_volume=200_000, vwap=10.0, high_of_day=10.0,
+        low_of_day=10.0, open_price=10.0,
+    ))
+    position = Position(
+        symbol="TEST", side=OrderSide.BUY, quantity=100, avg_entry_price=9.0,
+        stop_price=8.0, target_price=15.0, trailing_stop_pct=None,
+        opened_at=_IN_HOURS_NOW, strategy_name="test",
+    )
+    broker._state.positions["TEST"] = position  # broker knows; loop doesn't yet
+    loop = _build_loop(broker)
+    loop.disable_bot("test toggle")
+    assert "TEST" not in loop._positions  # not adopted yet
+
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert "TEST" not in loop._positions  # adopted, then immediately flattened
+    assert len(loop._trades) == 1
+    assert loop._trades[0].exit_reason == ExitReason.BOT_DISABLED
+
+
+def test_enable_bot_resumes_normal_ticking():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+    loop.disable_bot("test toggle")
+
+    loop.enable_bot()
+    loop._process_all_candidates(_IN_HOURS_NOW)
+
+    assert loop.risk_engine.bot_enabled is True
+    summary = loop.get_account_summary()
+    assert summary["equity"] == pytest.approx(broker.get_account_equity())
+
+
+def test_disable_bot_is_independent_of_kill_switch():
+    broker = PaperBrokerClient()
+    broker.connect()
+    loop = _build_loop(broker)
+
+    loop.engage_kill_switch_and_flatten("test halt")
+    loop.disable_bot("test toggle")
+    assert loop.risk_engine.kill_switch_active is True
+    assert loop.risk_engine.bot_enabled is False
+
+    loop.risk_engine.release_kill_switch()
+    assert loop.risk_engine.kill_switch_active is False
+    assert loop.risk_engine.bot_enabled is False  # untouched by disengaging the kill switch
+
+
 def test_request_manual_close_returns_false_for_a_symbol_with_no_open_position():
     broker = PaperBrokerClient()
     broker.connect()

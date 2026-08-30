@@ -231,6 +231,24 @@
   </div>
 </div>
 
+<!-- Bot ON/OFF toggle (header status bar). Only shown when turning the
+     bot OFF -- turning it back ON needs no confirmation since resuming
+     trading is low-risk, unlike the force-close-everything OFF action. -->
+<div class="info-modal-overlay" id="bot-toggle-modal-overlay">
+  <div class="info-modal-card" role="dialog" aria-modal="true">
+    <div class="info-modal-header">
+      <h3>Turn Bot Off?</h3>
+      <button class="info-modal-close" id="bot-toggle-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <p>This immediately blocks all new trades AND force-closes every open position at the current market price, then stops the bot from scanning entirely until you turn it back on. Closing happens within a few seconds, not instantly, and cannot be undone once positions start closing. Are you sure?</p>
+    <div class="status-bar" id="bot-toggle-result"></div>
+    <div class="settings-actions">
+      <button type="button" class="secondary" id="bot-toggle-cancel">Cancel</button>
+      <button type="button" class="danger" id="bot-toggle-confirm">Turn Off & Close All Positions</button>
+    </div>
+  </div>
+</div>
+
 <!-- Entry-selectivity rework (2026-08-13): pops up automatically the
      moment a fresh RiskEventType.BRACKET_ENTRY_REJECTED event is seen on
      the polled /api/risk-events feed -- see refreshRiskEvents/

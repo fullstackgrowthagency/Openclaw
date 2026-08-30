@@ -120,6 +120,12 @@ class RiskEngine:
     def __init__(self, config: Optional[RiskConfig] = None):
         self.config = config or RiskConfig()
         self.kill_switch_active: bool = False
+        # Dashboard's bot ON/OFF toggle -- see disable_bot/enable_bot
+        # below. Deliberately a separate flag from kill_switch_active
+        # (not reused under the hood) so the two controls stay
+        # independently readable/settable: engaging the kill switch must
+        # not silently flip this, and vice versa.
+        self.bot_enabled: bool = True
         self._daily = _DailyState(day=datetime.utcnow().date())
         # Cooldown is a rolling time window (cooldown_minutes_after_loss),
         # not a calendar-day concept -- unlike _DailyState's counters, it
@@ -206,6 +212,18 @@ class RiskEngine:
     def release_kill_switch(self) -> None:
         self.kill_switch_active = False
 
+    def disable_bot(self, reason: str, now: Optional[datetime] = None) -> None:
+        """Dashboard's bot ON/OFF toggle, turned off. Blocks all new
+        entries immediately (evaluate() below checks this every call,
+        same as kill_switch_active) -- the actual force-close of open
+        positions happens on TradingLoop's own processing thread (see
+        TradingLoop.disable_bot/_process_all_candidates), not here."""
+        self.bot_enabled = False
+        self._log_event(RiskEventType.BOT_DISABLED, None, reason, now)
+
+    def enable_bot(self) -> None:
+        self.bot_enabled = True
+
     def _log_event(self, event_type: RiskEventType, symbol: Optional[str], reason: str, now: Optional[datetime]) -> None:
         self.events.append(
             RiskEvent(event_type=event_type.value, symbol=symbol, timestamp=now or datetime.utcnow(), reason=reason)
@@ -244,6 +262,9 @@ class RiskEngine:
 
         if self.kill_switch_active:
             return reject(RiskEventType.KILL_SWITCH_ENGAGED, "Kill switch is active; no new trades.")
+
+        if not self.bot_enabled:
+            return reject(RiskEventType.BOT_DISABLED, "Bot is turned off; no new trades.")
 
         # Short, self-expiring pause (see pause_new_entries) -- distinct
         # from kill_switch_active above: this clears itself and exists

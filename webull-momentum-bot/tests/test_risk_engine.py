@@ -144,6 +144,38 @@ def test_rejects_when_kill_switch_active():
     assert not decision.approved
 
 
+def test_disable_bot_blocks_new_entries_immediately():
+    engine = RiskEngine()
+    engine.disable_bot("bot toggle test")
+    decision = _evaluate(engine)
+    assert not decision.approved
+    assert "off" in decision.reason.lower()
+
+
+def test_enable_bot_reallows_entries():
+    engine = RiskEngine()
+    engine.disable_bot("bot toggle test")
+    engine.enable_bot()
+    decision = _evaluate(engine)
+    assert decision.approved
+
+
+def test_disable_bot_is_independent_of_kill_switch():
+    # Disabling the bot must not touch kill_switch_active, and disengaging
+    # the kill switch must not re-enable the bot -- the two controls stay
+    # independently readable/settable (see RiskEngine.__init__'s docstring
+    # on bot_enabled).
+    engine = RiskEngine()
+    engine.engage_kill_switch("manual test halt")
+    engine.disable_bot("bot toggle test")
+    assert engine.kill_switch_active is True
+    assert engine.bot_enabled is False
+
+    engine.release_kill_switch()
+    assert engine.kill_switch_active is False
+    assert engine.bot_enabled is False
+
+
 def test_record_operational_event_surfaces_on_the_shared_events_list():
     # Public counterpart to _log_event, for callers outside RiskEngine
     # (TradingLoop) that need to raise something onto the same events

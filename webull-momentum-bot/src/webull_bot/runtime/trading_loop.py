@@ -947,6 +947,30 @@ class TradingLoop:
         # is (see _process_all_candidates), so a rate-limited/failed
         # attempt self-heals instead of silently doing nothing.
         self._manual_close_requests: set[str] = set()
+        # Set alongside risk_engine.disable_bot -- see that method and
+        # disable_bot/enable_bot below.
+        self._bot_disabled_reason = ""
+
+    # -- bot on/off toggle: halt + flatten, but ALSO stop ticking ------------
+
+    def disable_bot(self, reason: str) -> None:
+        """Dashboard's bot ON/OFF toggle, turned off (see POST
+        /api/bot-toggle). Unlike engage_kill_switch_and_flatten, this
+        doesn't just block entries and flatten while everything else
+        keeps ticking -- _process_all_candidates skips scanning/streaming/
+        candidate-processing/entries entirely while risk_engine.bot_enabled
+        is False (see that method's own docstring/comment), only still
+        reconciling positions from the broker and retrying the flatten
+        every tick until self._positions is empty. Safe to call from any
+        thread, same contract as engage_kill_switch_and_flatten: this only
+        flips state; the actual position-closing work always runs on the
+        main processing thread regardless of which thread called this."""
+        self.risk_engine.disable_bot(reason)
+        self._bot_disabled_reason = reason
+
+    def enable_bot(self) -> None:
+        self.risk_engine.enable_bot()
+        self._bot_disabled_reason = ""
 
     # -- kill switch: halt + flatten ------------------------------------------
 
@@ -3970,6 +3994,32 @@ class TradingLoop:
                 self.reconcile_positions_from_broker(now)
             except Exception:
                 logger.exception("Unhandled error reconciling positions against the broker.")
+
+        # Bot ON/OFF toggle (dashboard header switch, see disable_bot
+        # above): unlike the kill switch, this stops the loop from doing
+        # ANYTHING else this tick once positions are handled -- no
+        # scanning, no streaming upkeep, no candidate processing, no new
+        # entries (evaluate() also independently blocks entries, but
+        # returning here means the work is never even attempted). Placed
+        # AFTER the broker reconcile above (not before) so a process
+        # restarted with bot_enabled already False (see
+        # scripts/run_dashboard.py's _build_loop_for_user) still discovers
+        # and flattens any position the broker shows as open, rather than
+        # only ever looking at whatever self._positions happened to hold
+        # in memory at that moment. Naturally becomes a cheap no-op once
+        # self._positions is empty, same self-healing retry-every-tick
+        # contract as the kill switch's own flatten above.
+        if not self.risk_engine.bot_enabled:
+            if self._positions:
+                try:
+                    self._close_all_positions_now(
+                        self._bot_disabled_reason or "Bot turned off",
+                        now,
+                        exit_reason=ExitReason.BOT_DISABLED,
+                    )
+                except Exception:
+                    logger.exception("Unhandled error force-closing all positions while bot is disabled.")
+            return
 
         if (
             self._last_account_summary_refresh is None

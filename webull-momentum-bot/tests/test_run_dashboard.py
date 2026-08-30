@@ -99,3 +99,40 @@ def test_build_loop_for_user_rebuild_picks_up_settings_saved_after_first_build(m
 
     second_loop = _build_loop(session_factory)
     assert second_loop.risk_engine.config.stop_loss_pct == 1.5
+
+
+def test_build_loop_for_user_applies_saved_bot_enabled_false(monkeypatch):
+    # The dashboard's bot ON/OFF toggle must survive a restart/rebuild --
+    # a bot left off should come back up off, not silently re-enabled.
+    monkeypatch.setattr(main_module, "get_broker_client", lambda settings: PaperBrokerClient())
+    session_factory = _session_factory()
+    with session_factory() as session:
+        update_bot_settings(session, user_id=1, bot_id=1, bot_enabled=False)
+        session.commit()
+
+    loop = _build_loop(session_factory)
+
+    assert loop.risk_engine.bot_enabled is False
+
+
+def test_build_loop_for_user_with_no_saved_bot_enabled_defaults_to_on(monkeypatch):
+    monkeypatch.setattr(main_module, "get_broker_client", lambda settings: PaperBrokerClient())
+    session_factory = _session_factory()
+
+    loop = _build_loop(session_factory)
+
+    assert loop.risk_engine.bot_enabled is True
+
+
+def test_build_loop_for_user_applies_saved_bot_enabled_true(monkeypatch):
+    # An explicit True (re-enabled after a prior off) must also survive a
+    # rebuild, same as False -- not just left at the loop's own default.
+    monkeypatch.setattr(main_module, "get_broker_client", lambda settings: PaperBrokerClient())
+    session_factory = _session_factory()
+    with session_factory() as session:
+        update_bot_settings(session, user_id=1, bot_id=1, bot_enabled=True)
+        session.commit()
+
+    loop = _build_loop(session_factory)
+
+    assert loop.risk_engine.bot_enabled is True

@@ -322,16 +322,26 @@ async function fetchJSON(path) {
 }
 
 let currentKillSwitchActive = false;
+let currentBotEnabled = true;
 
 async function refreshStatus() {
   const bar = document.getElementById("status-bar");
   try {
     const s = await fetchJSON("/api/status");
     currentKillSwitchActive = !!s.kill_switch_active;
+    currentBotEnabled = s.bot_enabled !== false;
     const modeBadge = `<span class="badge ${s.trading_mode}">${s.trading_mode}</span>`;
     const killBadge = currentKillSwitchActive
       ? `<button class="badge kill-active kill-switch-btn" id="kill-switch-btn" title="Click to disengage">Kill Switch ON</button>`
       : `<button class="badge kill-inactive kill-switch-btn" id="kill-switch-btn" title="Click to engage">Kill Switch off</button>`;
+    const botToggle = `
+      <label class="toggle-switch-wrap ${currentBotEnabled ? "bot-on" : "bot-off"}" id="bot-toggle-wrap" title="${currentBotEnabled ? "Click to turn off" : "Click to turn on"}">
+        <span class="toggle-switch">
+          <input type="checkbox" id="bot-toggle-input" ${currentBotEnabled ? "checked" : ""}>
+          <span class="toggle-switch-track"></span>
+        </span>
+        <span class="toggle-switch-label">${currentBotEnabled ? "Bot ON" : "Bot OFF"}</span>
+      </label>`;
     bar.innerHTML = `
       <div class="stat"><span class="label">Mode</span><span class="value">${modeBadge}</span></div>
       <div class="stat"><span class="label">Equity</span><span class="value">${fmtMoney(s.equity)}</span></div>
@@ -339,11 +349,88 @@ async function refreshStatus() {
       <div class="stat"><span class="label">Candidates</span><span class="value">${s.candidate_count}</span></div>
       <div class="stat"><span class="label">Open Positions</span><span class="value">${s.open_position_count}</span></div>
       <div class="stat"><span class="label">Safety</span><span class="value">${killBadge}</span></div>
+      <div class="stat"><span class="label">Bot</span><span class="value">${botToggle}</span></div>
     `;
     document.getElementById("kill-switch-btn")?.addEventListener("click", openKillSwitchModal);
+    document.getElementById("bot-toggle-input")?.addEventListener("click", onBotToggleClick);
   } catch (e) {
     bar.innerHTML = `<span class="neg">Failed to load status: ${e.message}</span>`;
   }
+}
+
+async function setBotEnabled(enabled, resultBar) {
+  const res = await fetch("/api/bot-toggle", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
+  if (resultBar) resultBar.innerHTML = `<span class="pos">Done.</span>`;
+  await refreshStatus();
+  await refreshPositions();
+}
+
+function onBotToggleClick(e) {
+  // Click fires before the checkbox's own state flips visually, so
+  // e.target.checked here already reflects the state the user is asking
+  // for (true = turning on, false = turning off) -- see MDN's click vs.
+  // change event ordering on checkboxes.
+  const turningOn = e.target.checked;
+  if (turningOn) {
+    setBotEnabled(true).catch((err) => {
+      // Revert the checkbox and re-render from the server's actual state
+      // if the request failed, so the switch never lies about live state.
+      refreshStatus();
+      alert(`Failed to turn bot on: ${err.message}`);
+    });
+    return;
+  }
+  // Turning OFF force-closes every open position -- same disruptive,
+  // confirm-first treatment as engaging the kill switch. Revert the
+  // visual toggle immediately; the modal's own confirm re-applies it.
+  e.target.checked = true;
+  openBotToggleModal();
+}
+
+function openBotToggleModal() {
+  const overlay = document.getElementById("bot-toggle-modal-overlay");
+  const resultBar = document.getElementById("bot-toggle-result");
+  if (!overlay) return;
+  resultBar.innerHTML = "";
+  overlay.classList.add("open");
+}
+
+function closeBotToggleModal() {
+  document.getElementById("bot-toggle-modal-overlay")?.classList.remove("open");
+}
+
+function initBotToggleModal() {
+  const overlay = document.getElementById("bot-toggle-modal-overlay");
+  const closeBtn = document.getElementById("bot-toggle-modal-close");
+  const cancelBtn = document.getElementById("bot-toggle-cancel");
+  const confirmBtn = document.getElementById("bot-toggle-confirm");
+  if (!overlay || !confirmBtn) return;
+
+  closeBtn.addEventListener("click", closeBotToggleModal);
+  cancelBtn.addEventListener("click", closeBotToggleModal);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeBotToggleModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeBotToggleModal();
+  });
+
+  confirmBtn.addEventListener("click", async () => {
+    const resultBar = document.getElementById("bot-toggle-result");
+    resultBar.innerHTML = `<span class="muted">Turning off and closing positions...</span>`;
+    try {
+      await setBotEnabled(false, resultBar);
+      setTimeout(closeBotToggleModal, 600);
+    } catch (err) {
+      resultBar.innerHTML = `<span class="neg">${err.message}</span>`;
+    }
+  });
 }
 
 function openKillSwitchModal() {
@@ -995,6 +1082,7 @@ async function refreshAll() {
 initInfoModal();
 initSettingsModal();
 initKillSwitchModal();
+initBotToggleModal();
 initBracketRejectedModal();
 initPositionsTable();
 initScoreHistoryForm();

@@ -229,6 +229,69 @@ header h1 {
 .badge.kill-active { background: var(--red); color: #fff; }
 .badge.kill-inactive { background: #1c2530; color: var(--muted); }
 
+/* Bot ON/OFF switch (header status bar) -- a real sliding toggle,
+   deliberately distinct from the kill switch's badge-button above, since
+   this is the bot's own run/pause control rather than an emergency stop. */
+.toggle-switch-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.toggle-switch-wrap .toggle-switch-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.toggle-switch-wrap.bot-on .toggle-switch-label { color: var(--green); }
+.toggle-switch-wrap.bot-off .toggle-switch-label { color: var(--muted); }
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  flex: none;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-switch .toggle-switch-track {
+  position: absolute;
+  inset: 0;
+  background: #1c2530;
+  border: 1px solid var(--muted);
+  border-radius: 999px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.toggle-switch .toggle-switch-track::before {
+  content: "";
+  position: absolute;
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  top: 2px;
+  background: var(--muted);
+  border-radius: 50%;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.toggle-switch input:checked + .toggle-switch-track {
+  background: var(--green);
+  border-color: var(--green);
+}
+
+.toggle-switch input:checked + .toggle-switch-track::before {
+  transform: translateX(18px);
+  background: #fff;
+}
+
 main {
   padding: 20px 24px 60px;
   display: grid;

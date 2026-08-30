@@ -442,6 +442,16 @@ class BotSettings(Base):
     max_simultaneous_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     allow_extended_hours_trading: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
+    # Bot ON/OFF toggle (dashboard header switch) -- NOT part of
+    # RiskConfig/PositionManagementConfig like the fields above (it's
+    # RiskEngine.bot_enabled runtime state, not a tunable), but stored
+    # here anyway since this is already the one row-per-(user_id, bot_id)
+    # settings table every dashboard control persists through. Same NULL
+    # convention as the rest of this table: NULL means "use the in-code
+    # default" (True/running); only an explicit False means the bot was
+    # turned off and should come back up off after a restart.
+    bot_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
     # PositionManagementConfig subset (db/repository.py's ADJUSTABLE_POSITION_FIELDS)
     trailing_stop_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     breakeven_trigger_pct: Mapped[float | None] = mapped_column(Float, nullable=True)

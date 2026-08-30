@@ -195,12 +195,13 @@ def _build_loop_for_user(user_id: Optional[int], user_settings: Settings, sessio
         settings_row = get_or_create_bot_settings(session, user_id, bot_id)
         risk_config = build_risk_config_from_settings(settings_row)
         position_config = build_position_config_from_settings(settings_row)
+        bot_enabled = settings_row.bot_enabled
         session.commit()
 
     momentum_event_tracker = MomentumEventTracker(
         DBBackedEventRecorder(session_factory, user_id=user_id, bot_id=bot_id)
     )
-    return build_trading_loop(
+    loop = build_trading_loop(
         settings=user_settings,
         risk_config=risk_config,
         position_config=position_config,
@@ -213,6 +214,13 @@ def _build_loop_for_user(user_id: Optional[int], user_settings: Settings, sessio
         load_position_snapshot=_make_position_snapshot_loader(session_factory, user_id, bot_id),
         momentum_event_tracker=momentum_event_tracker,
     )
+    # Bot ON/OFF toggle (dashboard header switch) -- restore an explicit
+    # False across a restart/rebuild so a bot left off stays off (see
+    # BotSettings.bot_enabled's docstring for the NULL convention).
+    # None/True leave the loop's own default (bot_enabled=True) alone.
+    if bot_enabled is False:
+        loop.disable_bot("Bot was off before restart.")
+    return loop
 
 
 def _start_multi_tenant(settings: Settings, session_factory):

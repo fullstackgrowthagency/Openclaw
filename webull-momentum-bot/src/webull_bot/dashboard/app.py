@@ -168,6 +168,10 @@ class KillSwitchUpdate(BaseModel):
     active: bool
 
 
+class BotToggleUpdate(BaseModel):
+    enabled: bool
+
+
 def create_app(
     trading_loop: Optional[TradingLoop],
     session_factory: Callable[[], Session],
@@ -282,6 +286,7 @@ def create_app(
             "candidate_count": len(loop.get_candidates()),
             "open_position_count": len(loop.get_open_positions()),
             "kill_switch_active": loop.risk_engine.kill_switch_active,
+            "bot_enabled": loop.risk_engine.bot_enabled,
         }
 
     @app.get("/api/candidates")
@@ -493,6 +498,41 @@ def create_app(
         else:
             loop.risk_engine.release_kill_switch()
         return {"kill_switch_active": loop.risk_engine.kill_switch_active}
+
+    @app.post("/api/bot-toggle")
+    def update_bot_toggle(update: BotToggleUpdate, request: Request):
+        """Toggles the bot ON/OFF from the dashboard's header switch.
+
+        Turning it off (`enabled=false`) calls TradingLoop.disable_bot,
+        which blocks all new entries immediately (RiskEngine checks this
+        on every signal) and stops the loop from scanning/processing
+        candidates at all -- unlike the kill switch, which keeps ticking
+        everything except entries. The actual force-close of any open
+        positions happens on the trading loop's own processing thread, not
+        synchronously in this request (see that method's docstring).
+        Turning it back on (`enabled=true`) resumes normal ticking on the
+        very next cycle.
+
+        Also writes through to the BotSettings DB row (same pattern as
+        POST /api/risk-settings) so this survives a process restart --
+        see scripts/run_dashboard.py's _build_loop_for_user, which reads
+        it back at loop-construction time. The live toggle above still
+        happens unconditionally and first; a persistence hiccup here is
+        logged, not raised as a 500."""
+        loop = _resolve_loop(request)
+        if update.enabled:
+            loop.enable_bot()
+        else:
+            loop.disable_bot("Bot turned off from dashboard")
+        user_id = _current_user_id(request)
+        bot_id = _current_bot_id(request)
+        try:
+            with session_factory() as session:
+                update_bot_settings(session, user_id, bot_id, bot_enabled=update.enabled)
+                session.commit()
+        except Exception:
+            logger.exception("Failed to persist bot_enabled for user_id=%s bot_id=%s", user_id, bot_id)
+        return {"bot_enabled": loop.risk_engine.bot_enabled}
 
     @app.get("/api/positions")
     def get_positions(request: Request):

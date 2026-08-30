@@ -181,6 +181,23 @@ def test_update_bot_settings_upserts_when_no_row_exists(session):
     assert row.breakeven_trigger_pct == 7.5
 
 
+def test_update_bot_settings_persists_bot_enabled_false(session):
+    update_bot_settings(session, user_id=1, bot_id=1, bot_enabled=False)
+    session.commit()
+
+    row = get_or_create_bot_settings(session, user_id=1, bot_id=1)
+    assert row.bot_enabled is False
+
+
+def test_get_or_create_bot_settings_defaults_bot_enabled_to_none(session):
+    # NULL means "use the in-code default" (True/running) -- see
+    # BotSettings.bot_enabled's docstring. A fresh row must not default to
+    # False, which would silently start every new bot turned off.
+    row = get_or_create_bot_settings(session, user_id=1, bot_id=1)
+    session.commit()
+    assert row.bot_enabled is None
+
+
 def test_build_risk_config_from_settings_overrides_only_saved_fields(session):
     row = get_or_create_bot_settings(session, user_id=1, bot_id=1)
     row.stop_loss_pct = 3.0

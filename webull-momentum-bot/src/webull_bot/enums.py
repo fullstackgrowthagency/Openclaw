@@ -144,6 +144,12 @@ class ExitReason(str, Enum):
     MANUAL = "manual"
     RISK_KILL_SWITCH = "risk_kill_switch"
     END_OF_CORE_HOURS = "end_of_core_hours"
+    # The dashboard's bot ON/OFF toggle was switched off -- see
+    # RiskEngine.disable_bot/TradingLoop.disable_bot. Distinct from
+    # RISK_KILL_SWITCH: that one is a manual emergency halt requiring
+    # re-arming; this one is the bot's own run/pause state and persists
+    # across restarts (see BotSettings.bot_enabled).
+    BOT_DISABLED = "bot_disabled"
     # A position vanished from broker.get_positions() -- confirmed missing
     # across TradingLoopConfig.position_missing_confirmations_required
     # consecutive reconcile_positions_from_broker passes -- without this
@@ -170,6 +176,11 @@ class RiskEventType(str, Enum):
     SLIPPAGE_PROTECTION_TRIGGERED = "slippage_protection_triggered"
     COOLDOWN_ACTIVE = "cooldown_active"
     KILL_SWITCH_ENGAGED = "kill_switch_engaged"
+    # The dashboard's bot ON/OFF toggle is off -- see
+    # RiskEngine.bot_enabled/disable_bot. Distinct from
+    # KILL_SWITCH_ENGAGED for the same reason ExitReason.BOT_DISABLED is
+    # distinct from RISK_KILL_SWITCH (see that member's docstring).
+    BOT_DISABLED = "bot_disabled"
     MIN_RISK_REWARD_NOT_MET = "min_risk_reward_not_met"
     OUTSIDE_CORE_TRADING_HOURS = "outside_core_trading_hours"
     ENTRIES_TEMPORARILY_PAUSED = "entries_temporarily_paused"
