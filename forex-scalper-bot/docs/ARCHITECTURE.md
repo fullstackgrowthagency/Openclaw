@@ -69,9 +69,55 @@ added later, once there's a user/auth system for it to belong to
 (multi-tenant hardening phase), exactly the same two-phase order the
 equities bot built these in.
 
+## Phase 2 -- paper broker + backtest skeleton (done)
+
+Proves the full `Strategy -> RiskEngine -> OrderManager -> BrokerClient`
+pipeline runs end to end, the same architectural guarantee the equities
+bot's own backtest engine gives (a strategy that only works in a
+bespoke test-only path proves nothing about live behavior). Since
+`RiskEngine`/`OrderManager` didn't exist before this phase, it also
+introduced deliberately minimal versions of both -- NOT the full field
+set the approved plan describes for Phase 4 ("forex risk engine +
+position management"); designing that now would mean building for
+parameters nothing yet sets.
+
+- `risk/risk_engine.py`: `RiskConfig` has exactly three fields
+  (`stop_loss_required`, `max_simultaneous_positions`,
+  `default_quantity` -- a flat per-trade unit size, not yet the real
+  risk-%-of-equity/stop-distance lot sizing the plan calls for).
+  `RiskEngine.evaluate()` only ever gates ENTER_LONG/ENTER_SHORT signals;
+  everything else (EXIT, SCALE_IN/OUT) returns an explicit "not gated
+  here" rejection if called directly -- callers must not route those
+  through it. `OrderManager` doesn't.
+- `execution/order_manager.py`: `OrderManager.submit_signal` routes
+  entries through `RiskEngine.evaluate` (building a MARKET order with
+  the signal's stop/target attached as MT4/5-style bracket-on-open
+  fields) and exits straight to a closing order with NO risk check at
+  all -- an exit must never be blockable by risk logic, the same
+  reasoning the equities bot's own kill-switch/manual-close paths rely
+  on. `SCALE_IN`/`SCALE_OUT` (partial exits) return `None` -- not
+  implemented yet, matching how the equities bot itself deferred partial-
+  exit support until well after its own initial skeleton.
+- `brokers/paper/client.py`: `PaperBrokerClient` fills MARKET orders
+  synchronously by crossing the spread (buy at ask, sell at bid) plus an
+  optional configurable `slippage_pips` -- forex's spread-based
+  equivalent of the equities bot's bps-of-price paper-fill model. Only
+  MARKET orders and full (not partial) position closes are supported so
+  far. Every close is currently recorded as `ExitReason.MANUAL`, which is
+  accurate today (there's no automatic stop-loss/target-triggering
+  machinery yet -- that's position management, a later phase) but will
+  need a real per-order exit-reason field once that exists.
+- `backtest/engine.py`: `BacktestEngine.run(bars)` feeds a chronologically
+  sorted bar list through the pipeline one snapshot at a time and returns
+  the resulting `Trade` list. No cross-symbol no-lookahead guarantees yet
+  (the equities bot only needed that once it tracked multiple symbols
+  concurrently) -- add it here once this bot does too.
+
 ## What's next
 
-Phase 2 (paper broker + backtest skeleton) is the next planned increment
--- see the approved plan for the full phase list and the deployment-
-model/broker-bridge decision (hybrid local MT4/5 connector +
-centrally-hosted dashboard/strategy engine/AI assistant).
+Phase 3 (indicators + rule-builder schema + compiler) is the next planned
+increment, including the open question of whether a state-machine/
+Candidate-equivalent is actually needed for scalping -- see the approved
+plan for the full phase list and the deployment-model/broker-bridge
+decision (hybrid local MT4/5 connector + centrally-hosted dashboard/
+strategy engine/AI assistant).
