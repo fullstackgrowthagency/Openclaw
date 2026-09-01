@@ -298,13 +298,92 @@ the same shared `.venv` `fx_bot` uses; the two test suites run
 independently (`pytest relay_protocol/tests`, `pytest tests`) and neither
 depends on the other.
 
+## Phase 5b -- cloud-side relay server + `LocalConnectorBroker` (done)
+
+The second `BrokerClient` implementation, alongside `PaperBrokerClient`
+-- talks to a user's local MT4/5 connector over the relay protocol built
+in Phase 5a. Scope is exactly sub-phase 5b: no auth/pairing yet (that's
+5c) and no real MT5 (5d+); a `RelayConnection` is assumed to already have
+a connected socket, a plain localhost one in every test here.
+
+- **Concurrency model**: async internals (asyncio + the `websockets`
+  library) behind a fully synchronous, blocking facade, so
+  `LocalConnectorBroker` stays a drop-in `BrokerClient` for entirely
+  synchronous callers (`RiskEngine`, `OrderManager`, `BacktestEngine`).
+  One shared background event-loop thread per process
+  (`brokers/local_connector/relay_server.py`'s `RelayServer`) hosts every
+  accepted connector socket as one `RelayConnection`
+  (`relay_connection.py`), scaling to many simultaneous connectors later
+  (Phase 10) with no rewrite. `LocalConnectorBroker`'s public methods
+  block the *calling* thread on `send_request(...)`, which schedules a
+  coroutine onto the shared loop and waits on its result.
+- **Three exceptions, no more** (`exceptions.py`): `ConnectorOfflineError`
+  (socket not connected, or dropped mid-request -- fail fast),
+  `ConnectorTimeoutError` (socket fine, no response within the per-call
+  deadline), `BrokerRejectedError(error_type, message)` (a genuine MT5
+  trading rejection off an `error`-kind envelope -- a real business
+  outcome, not a connectivity fault). A malformed wire enum value raises
+  a bare `ValueError` instead of a fourth wrapped type, deliberately --
+  see `exceptions.py`'s docstring.
+- **`wire_convert.py`**: conversion functions between `relay_protocol`'s
+  `Wire*` Pydantic models and `fx_bot.models`' dataclasses, living here
+  rather than in `relay_protocol` -- validating a wire string against a
+  real `fx_bot` enum (`OrderSide(wire.side)`, raising on garbage) is this
+  project's job specifically, so `relay_protocol` never needs `fx_bot`'s
+  enum vocabulary kept in sync as it grows.
+- **`get_last_known_positions()`**: a deliberately minimal display/
+  alerting accessor -- set on every successful `get_positions()` call,
+  raises `RuntimeError` before the first one succeeds. Never consumed by
+  `RiskEngine`/`PositionManager` (both only ever see a live read or an
+  explicit failure). The full two-tier staleness-alerting system is
+  Phase 5f; this is just the cache half of it, proven by test now so 5f
+  has something to build alerting logic on top of.
+- **`is_live`** is a plain constructor flag today, proven-by-test to not
+  be hardcoded -- `relay_protocol` has no `hello`/auth-ack frame yet
+  carrying MT5's real account-type field, so wiring it to a real
+  handshake value is deferred to Phase 5c, not guessed at now.
+- **Testing, no real MT5 needed**: `tests/fakes/fake_relay_peer.py`'s
+  `FakeRelayPeer` is a real `websockets` client dialing a real
+  `RelayServer` over localhost TCP, playing the connector role -- an
+  in-process mock was considered and rejected, since it would leave
+  `RelayServer` itself unexercised and defeat the point of catching real
+  framing bugs. Scripted per method: `script_response`/`script_delay`/
+  `script_drop`/`script_error`, covering the three exception types plus
+  normal round trips. `tests/test_relay_connection.py` (transport-level,
+  8 tests) and `tests/test_local_connector_broker.py` (connector-specific
+  behavior -- quote dispatch, `get_last_known_positions`, `is_live`, the
+  three exceptions surfaced through real `BrokerClient` methods, 9 tests)
+  cover it directly. `tests/test_broker_client_contract.py` is the new
+  shared ABC-contract suite: the same 7 behavioral cases (order placement
+  shape, `get_positions`/`poll_fills` reflecting a fill, snapshot/equity/
+  order-status reads, `is_live`'s type) run against both
+  `PaperBrokerClient` and `LocalConnectorBroker` via a parametrized
+  fixture, proving the two backends are actually interchangeable, not
+  just independently self-consistent. `poll_fills(since=...)`'s
+  time-filtering behavior stays paper-only (already covered in
+  `test_paper_broker_client.py`) -- real time-based filtering for a
+  connector will live on the MT5/connector side itself once that's built
+  (5d+), not something worth faking here.
+- 31 new tests, full suite (191 across `fx_bot` + `relay_protocol`) green
+  and fast (~1.5s) -- an early version of the test double had a teardown
+  race (closing a peer's own event loop before a concurrently-scheduled
+  shutdown coroutine could report back) that added a spurious 5-second
+  hang per test; fixed by giving `FakeRelayPeer` the same
+  `run_forever`-until-explicitly-stopped loop lifecycle `RelayServer`
+  already used, plus idempotent `stop()` on both.
+
+New dependency: `websockets>=13.0,<15.0` added to this project's
+`pyproject.toml` (not `relay_protocol`'s, which stays pydantic+stdlib
+only). `relay-protocol` itself is a required companion `pip install -e`
+step, documented in `README.md`, rather than an inline path dependency
+inside `pyproject.toml` -- see that section for why.
+
 ## What's next
 
-Phase 5b (cloud-side relay server + `LocalConnectorBroker` against a fake
-relay peer + a new shared `BrokerClient`-contract test suite run against
-both `PaperBrokerClient` and `LocalConnectorBroker`) is next -- fully
-buildable and testable in this environment, no real MT5 access needed.
-See the approved plan's Phase 5 design for the full sub-phase list
-(5c pairing routes, 5d connector skeleton, 5e PyInstaller packaging, 5f
-health/staleness wiring, 5g manual verification checkpoint once real
-Windows/MT5 access exists).
+Phase 5c (pairing flow backend routes -- the minimal standalone HTTP
+flow that issues a pairing code and exchanges it for a long-lived bearer
+token, since this lands before Phase 10's real multi-tenant auth exists)
+is next. See the approved plan's Phase 5 design for the full sub-phase
+list (5d connector skeleton, 5e PyInstaller packaging, 5f health/
+staleness wiring, 5g manual verification checkpoint once real Windows/
+MT5 access exists).
