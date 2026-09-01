@@ -4,12 +4,11 @@ in shape where the concept transfers directly. Forex-specific differences:
 
 - OrderSide is just BUY/SELL -- forex has no equities-style short-selling
   mechanic (borrowing shares); going short a pair is simply selling it.
-- No CandidateState/state-machine here yet -- whether a scalping bot needs
-  one at all (vs. straight per-tick rule evaluation) is an open question
-  for the rule-builder phase (see the approved plan), not decided here.
-- No RiskEventType yet -- that belongs to the risk-engine phase, once
-  something actually raises those events; adding it now would be
-  designing for logic that doesn't exist.
+- No CandidateState/state-machine -- resolved in Phase 3 (see
+  interfaces/strategy.py's docstring): a StrategyConfig names exactly one
+  pair, so there's no broad-universe discovery problem to filter noise
+  from, unlike the equities bot's scanner. Strategy.on_snapshot takes an
+  explicit Optional[Position] instead.
 """
 from __future__ import annotations
 
@@ -70,3 +69,24 @@ class ExitReason(str, Enum):
     # manual close in the MT5 terminal, an out-of-band close). Mirrors
     # webull_bot's identically-named, identically-reasoned member.
     EXTERNAL_CLOSE = "external_close"
+
+
+class RiskEventType(str, Enum):
+    """Every rejection/halt reason RiskEngine.evaluate can log, mirroring
+    webull_bot's RiskEventType where the concept transfers -- see
+    risk/risk_engine.py for what actually raises each one. Renamed/added
+    members reflect forex-specific checks that have no equities-bot
+    equivalent (per-pair and correlated-currency exposure caps, session
+    windows instead of a single core-hours window)."""
+    TRADE_REJECTED = "trade_rejected"
+    DAILY_LOSS_LIMIT_HIT = "daily_loss_limit_hit"
+    MAX_TOTAL_RISK_HIT = "max_total_risk_hit"
+    MAX_POSITIONS_HIT = "max_positions_hit"
+    MAX_POSITIONS_PER_PAIR_HIT = "max_positions_per_pair_hit"
+    MAX_CORRELATED_EXPOSURE_HIT = "max_correlated_exposure_hit"
+    MAX_TRADES_PER_DAY_HIT = "max_trades_per_day_hit"
+    MAX_TRADES_PER_PAIR_HIT = "max_trades_per_pair_hit"
+    SPREAD_TOO_WIDE = "spread_too_wide"
+    COOLDOWN_ACTIVE = "cooldown_active"
+    MIN_RISK_REWARD_NOT_MET = "min_risk_reward_not_met"
+    OUTSIDE_ALLOWED_SESSION = "outside_allowed_session"

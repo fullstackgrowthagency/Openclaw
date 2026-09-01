@@ -184,13 +184,71 @@ replaying 2020 data would have recorded trades as happening today. Fixed
 to use `snapshot.timestamp`; regression test in
 `tests/test_paper_broker_client.py`.
 
+## Phase 4 -- forex risk engine + position management (done)
+
+`RiskConfig`/`RiskEngine` expanded from the Phase 2 skeleton (3 fields) to
+the real field set from the approved plan's forex risk mapping, with two
+documented simplifications spelled out in `risk/risk_engine.py`'s module
+docstring:
+
+1. **Position sizing assumes the account's currency equals the pair's
+   quote currency** (e.g. a USD account trading EUR/USD). `risk_percent`
+   sizing (`max_units = risk_amount / stop_distance`) needs no currency
+   conversion under that assumption; a pair whose quote currency differs
+   from the account currency isn't handled correctly yet.
+2. **Correlated-pair exposure is approximated by shared currency**, not a
+   real historical correlation coefficient -- EUR/USD and GBP/USD both
+   count as "correlated" because they share USD exposure. The standard
+   practical proxy, not a substitute for real correlation data this bot
+   doesn't fetch/store.
+
+New checks in `evaluate()`: session-window filtering (replaces the
+equities bot's single core-hours window -- forex has several named
+liquidity windows instead, see `market_hours.py`'s `SESSION_WINDOWS` plus
+the tighter `"london_new_york_overlap"` special case), daily-loss limit,
+max trades per day/per pair, post-loss cooldown (mirrors `webull_bot`'s
+`_DailyState`/`_last_loss_at` pattern), per-pair and correlated-currency
+exposure caps (in addition to the existing overall
+`max_simultaneous_positions`), max spread in pips, and min risk:reward
+ratio. Two sizing methods: `fixed_units` (flat, from Phase 2) or
+`risk_percent` (real risk-%-of-equity/stop-distance sizing).
+`record_trade_closed` feeds a position's realized pnl back in once it
+closes -- called from `OrderManager._submit_exit`, which finds the
+matching `Fill` via the `BrokerClient` ABC's own `poll_fills()` (by
+`broker_order_id`, not a broker-specific attribute) rather than reaching
+into `PaperBrokerClient` internals.
+
+**Position management, built for the first time this phase**: nothing
+before Phase 4 auto-enforced a position's stop/target at all -- only an
+explicit strategy `EXIT` signal ever closed anything (documented as a gap
+since Phase 2). `position/position_manager.py`'s `PositionManager.manage`
+now runs every tick, for every open position, BEFORE the strategy gets a
+say: it applies breakeven (moves the stop to entry once triggered, never
+backward) and trailing-stop (only ever tightens) adjustments, then checks
+the position's current (possibly just-adjusted) stop/target against the
+price it would actually exit at right now (bid for a long, ask for a
+short -- not an optimistic mid). `BacktestEngine` wires this in ahead of
+`strategy.on_snapshot`, and re-fetches open positions afterward so the
+strategy always sees the POST-auto-close reality that same tick, never a
+stale about-to-be-closed position.
+
+**Exit-reason tagging, fixed at the source.** Every close used to be
+recorded as `ExitReason.MANUAL` regardless of why it actually happened
+(documented as a known gap needing "a real per-order exit-reason field"
+once auto-triggering existed -- see the Phase 3 write-up above). `Order`
+now carries an `exit_reason` field; `OrderManager._submit_exit` reads it
+from `Signal.metadata["exit_reason"]` (set by `BacktestEngine`'s
+position-management path to `STOP_LOSS`/`PROFIT_TARGET`, absent/defaulted
+to `MANUAL` for a strategy's own rule-based `EXIT` signal -- same
+metadata-key convention `webull_bot` uses for its own exit-tagged
+Signals), and `PaperBrokerClient` tags the resulting `Trade` with it
+instead of hardcoding `MANUAL`.
+
 ## What's next
 
-Phase 4 (forex-specific risk engine + position management) is the next
-planned increment -- expanding `RiskConfig` to the full pip/lot-based
-field set from the approved plan (real risk-%-of-equity/stop-distance
-sizing, max_spread_pips, session_windows, correlated-pair exposure caps)
-now that there's a rule-builder driving real strategy parameters for it
-to act on. See the approved plan for the full phase list and the
-deployment-model/broker-bridge decision (hybrid local MT4/5 connector +
-centrally-hosted dashboard/strategy engine/AI assistant).
+Phase 5 (local MT4/5 connector + relay protocol) is the next planned
+increment -- the broker/bridge integration itself, per the approved
+plan's hybrid deployment-model decision (a thin local connector talking
+to the user's own MT5 terminal, relayed to the centrally-hosted dashboard/
+strategy engine/AI assistant over an outbound-only connection). See the
+approved plan for the full phase list.

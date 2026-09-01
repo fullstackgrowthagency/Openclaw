@@ -113,7 +113,7 @@ class PaperBrokerClient(BrokerClient):
                 trailing_stop_pips=None, opened_at=order.updated_at, strategy_name=order.strategy_name or "",
             )
         elif existing.side != order.side and existing.quantity == order.quantity:
-            self._close_position(existing, fill_price, order.updated_at)
+            self._close_position(existing, fill_price, order.updated_at, order.exit_reason or ExitReason.MANUAL)
         else:
             # Same-side add (pyramiding) or a partial close -- not
             # supported yet; OrderManager doesn't submit either of these
@@ -126,7 +126,9 @@ class PaperBrokerClient(BrokerClient):
 
         return order
 
-    def _close_position(self, position: Position, exit_price: float, closed_at: datetime) -> None:
+    def _close_position(
+        self, position: Position, exit_price: float, closed_at: datetime, exit_reason: ExitReason,
+    ) -> None:
         del self._positions[position.symbol]
         direction = 1.0 if position.side == OrderSide.BUY else -1.0
         pnl = (exit_price - position.avg_entry_price) * position.quantity * direction
@@ -135,7 +137,7 @@ class PaperBrokerClient(BrokerClient):
         self.trades.append(Trade(
             symbol=position.symbol, strategy_name=position.strategy_name, side=position.side,
             entry_price=position.avg_entry_price, exit_price=exit_price, quantity=position.quantity,
-            opened_at=position.opened_at, closed_at=closed_at, exit_reason=ExitReason.MANUAL,
+            opened_at=position.opened_at, closed_at=closed_at, exit_reason=exit_reason,
             pnl=pnl, pnl_pct=(pnl / notional) if notional else 0.0,
             max_favorable_excursion=0.0, max_adverse_excursion=0.0,
         ))

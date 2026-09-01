@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Callable, Optional
 
+from fx_bot.brokers.paper.client import PaperBrokerClient
 from fx_bot.enums import OrderSide, OrderStatus, OrderType, SignalAction
 from fx_bot.execution.order_manager import OrderManager
 from fx_bot.interfaces.broker import BrokerClient
@@ -132,3 +133,30 @@ def test_scale_in_and_scale_out_are_not_yet_implemented():
         )
         assert manager.submit_signal(signal, snapshot=_snapshot(), open_positions=[]) is None
     assert broker.placed_orders == []
+
+
+def test_exit_feeds_the_realized_pnl_back_to_the_risk_engine():
+    # Uses PaperBrokerClient (not _RecordingBroker) because this needs a
+    # real Fill to match against -- _record_realized_pnl looks one up via
+    # poll_fills(), which _RecordingBroker always returns empty.
+    broker = PaperBrokerClient(initial_equity=10_000.0)
+    risk_engine = RiskEngine()
+    manager = OrderManager(broker, risk_engine)
+
+    entry_time = datetime(2026, 1, 1, 0, 0, 0)
+    broker.feed_snapshot(MarketSnapshot(symbol="EUR/USD", timestamp=entry_time, bid=1.0999, ask=1.1001))
+    broker.place_order(Order(symbol="EUR/USD", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=10_000))
+    position = broker.get_positions()[0]
+
+    exit_time = datetime(2026, 1, 1, 0, 5, 0)
+    broker.feed_snapshot(MarketSnapshot(symbol="EUR/USD", timestamp=exit_time, bid=1.0949, ask=1.0951))  # a loss
+    signal = Signal(
+        symbol="EUR/USD", action=SignalAction.EXIT, generated_at=exit_time,
+        strategy_name="test", strategy_version="v1", reference_price=1.0950,
+    )
+
+    manager.submit_signal(signal, snapshot=broker.get_snapshot("EUR/USD"), open_positions=[position])
+
+    assert risk_engine._daily.realized_pnl < 0  # the loss was recorded...
+    assert "EUR/USD" in risk_engine._last_loss_at  # ...and triggered the cooldown tracker
+    assert risk_engine._last_loss_at["EUR/USD"] == exit_time

@@ -83,6 +83,12 @@ class Order:
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
     trailing_pips: Optional[float] = None
+    # Set only on a CLOSING order (see execution/order_manager.py's
+    # _submit_exit), read by PaperBrokerClient to tag the resulting Trade
+    # record correctly (STOP_LOSS/PROFIT_TARGET from automatic position
+    # management, vs. MANUAL for a strategy's own rule-based EXIT signal).
+    # None on an entry order, where it's meaningless.
+    exit_reason: Optional[ExitReason] = None
     status: OrderStatus = OrderStatus.PENDING
     client_order_id: Optional[str] = None
     broker_order_id: Optional[str] = None
