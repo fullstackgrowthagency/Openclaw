@@ -244,11 +244,67 @@ metadata-key convention `webull_bot` uses for its own exit-tagged
 Signals), and `PaperBrokerClient` tags the resulting `Trade` with it
 instead of hardcoding `MANUAL`.
 
+## Phase 5a -- shared `relay_protocol` package (done)
+
+The first slice of the local-connector/relay-protocol work (see the
+approved Phase 5 design for the full picture): a brand-new, standalone
+top-level package at `forex-scalper-bot/relay_protocol/` (its own
+`pyproject.toml`, its own `src/relay_protocol/`, its own `tests/`) --
+**not** a subpackage of `fx_bot`. This is deliberate: `relay_protocol` is
+imported by both sides of the relay, including the Windows-only connector
+process (built in a later sub-phase), which must never need `fx_bot`'s
+dependency closure (or `fx_bot` itself) just to speak the wire format its
+own process uses. Its only dependency is `pydantic>=2.0`.
+
+- **`envelope.py`**: the one frame shape every message on the connector's
+  WebSocket takes -- `Envelope{v, id, kind, method, payload, sent_at}`,
+  JSON-encoded via `to_wire()`/`from_wire()`. `kind` is one of
+  `request`/`response`/`error`/`event`/`auth` (`EnvelopeKind`).
+  `request`/`response`/`error` correlate via `id`; `event` frames are
+  one-way (connector-pushed) and carry no `id`. Convenience constructors
+  (`Envelope.make_request/make_response/make_error/make_event/make_auth`)
+  exist so callers never hand-assemble a frame and risk a malformed one
+  reaching the wire. `v` is a schema version for detecting a mismatched
+  connector build early, distinct from ordinary payload growth.
+- **`methods.py`**: `RequestMethod`/`EventMethod` string-constant classes
+  -- one name per non-streaming `BrokerClient` method
+  (`get_account_equity`, `get_positions`, `place_order`, etc.) plus the
+  connector-pushed event names (`quote`, `heartbeat`,
+  `mt5_disconnected`/`mt5_reconnected`, ...). A single source of truth so
+  a typo on one side of the relay can't silently create a request the
+  other side never recognizes.
+- **`wire_models.py`**: `WireMarketSnapshot`/`WireOrder`/`WireFill`/
+  `WirePosition` -- Pydantic mirrors of `fx_bot.models`' dataclasses,
+  field-for-field. Enum-valued fields (`side`, `order_type`, `status`,
+  `exit_reason`) are plain `str` holding exactly the `.value` a matching
+  `fx_bot` enum member would produce (`"buy"`, never `"OrderSide.BUY"`),
+  **not** `fx_bot`'s actual Enum classes -- keeping this package
+  independent of `fx_bot` means its whitelist of legal values never has
+  to be kept in sync with `fx_bot`'s as those enums grow. Validating a
+  wire string against the real enum (`OrderSide(wire_order.side)`, which
+  raises `ValueError` on garbage) is left to the Phase 5b conversion code
+  in `fx_bot/brokers/local_connector/`, not to this package.
+
+**Deliberately out of scope for 5a** (left for 5b): the actual
+`RelayConnection`/`LocalConnectorBroker` that sends these envelopes over
+a real socket, the fake-relay-peer test double, and the `Wire* <->`
+`fx_bot.models` conversion functions. This phase only proves the wire
+format itself is sound -- both directions of every `Envelope` kind and
+every `Wire*` model round-trip through real JSON (`model_dump_json`/
+`model_validate_json`) with no data loss, verified in
+`relay_protocol/tests/test_envelope.py` and `test_wire_models.py` (16
+tests). Installed editable (`pip install -e ./relay_protocol[dev]`) into
+the same shared `.venv` `fx_bot` uses; the two test suites run
+independently (`pytest relay_protocol/tests`, `pytest tests`) and neither
+depends on the other.
+
 ## What's next
 
-Phase 5 (local MT4/5 connector + relay protocol) is the next planned
-increment -- the broker/bridge integration itself, per the approved
-plan's hybrid deployment-model decision (a thin local connector talking
-to the user's own MT5 terminal, relayed to the centrally-hosted dashboard/
-strategy engine/AI assistant over an outbound-only connection). See the
-approved plan for the full phase list.
+Phase 5b (cloud-side relay server + `LocalConnectorBroker` against a fake
+relay peer + a new shared `BrokerClient`-contract test suite run against
+both `PaperBrokerClient` and `LocalConnectorBroker`) is next -- fully
+buildable and testable in this environment, no real MT5 access needed.
+See the approved plan's Phase 5 design for the full sub-phase list
+(5c pairing routes, 5d connector skeleton, 5e PyInstaller packaging, 5f
+health/staleness wiring, 5g manual verification checkpoint once real
+Windows/MT5 access exists).
