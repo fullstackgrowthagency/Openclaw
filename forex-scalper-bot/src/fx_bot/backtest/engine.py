@@ -32,7 +32,8 @@ class BacktestEngine:
             self.broker.feed_snapshot(snapshot)
             history = self.broker.get_bars(snapshot.symbol, "1m", lookback=self.history_lookback)
             open_positions = self.broker.get_positions()
-            signal = self.strategy.on_snapshot(snapshot.symbol, snapshot, history)
+            position = next((p for p in open_positions if p.symbol == snapshot.symbol), None)
+            signal = self.strategy.on_snapshot(snapshot.symbol, snapshot, history, position)
             if signal is not None:
                 self.order_manager.submit_signal(signal, snapshot=snapshot, open_positions=open_positions)
         return self.broker.trades

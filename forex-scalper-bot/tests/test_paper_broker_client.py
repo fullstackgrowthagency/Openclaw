@@ -57,6 +57,22 @@ def test_slippage_pips_widens_the_effective_fill_price():
     assert broker.get_positions()[0].avg_entry_price == pytest.approx(1.1001 + 0.0002)
 
 
+def test_fill_and_position_timestamps_use_simulated_time_not_wall_clock():
+    # A backtest replaying 2026-01-01 data must produce 2026-01-01 trade
+    # records, not "whenever this process happened to run in real time" --
+    # real incident caught by test_rule_builder_parity.py's parity proof,
+    # where two backtest runs a few milliseconds apart in wall-clock time
+    # produced non-identical timestamps despite identical simulated data.
+    broker = PaperBrokerClient()
+    simulated_time = datetime(2020, 1, 1, 9, 30, 0)
+    broker.feed_snapshot(MarketSnapshot(symbol="EUR/USD", timestamp=simulated_time, bid=1.0999, ask=1.1001))
+
+    filled = broker.place_order(Order(symbol="EUR/USD", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=10_000))
+
+    assert filled.updated_at == simulated_time
+    assert broker.get_positions()[0].opened_at == simulated_time
+
+
 def test_opposite_side_order_closes_the_position_and_records_a_trade():
     broker = PaperBrokerClient(initial_equity=10_000.0)
     broker.feed_snapshot(_snapshot(bid=1.0999, ask=1.1001))

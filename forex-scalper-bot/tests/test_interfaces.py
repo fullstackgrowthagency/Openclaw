@@ -23,7 +23,7 @@ class _AlwaysLongStrategy(Strategy):
     name = "always_long"
     version = "v1"
 
-    def on_snapshot(self, symbol, snapshot, history):
+    def on_snapshot(self, symbol, snapshot, history, position):
         return Signal(
             symbol=symbol, action=SignalAction.ENTER_LONG, generated_at=snapshot.timestamp,
             strategy_name=self.name, strategy_version=self.version, reference_price=snapshot.mid,
@@ -33,7 +33,7 @@ class _AlwaysLongStrategy(Strategy):
 def test_a_concrete_strategy_emits_a_signal():
     strategy = _AlwaysLongStrategy()
     snapshot = MarketSnapshot(symbol="EUR/USD", timestamp=datetime.utcnow(), bid=1.1000, ask=1.1002)
-    signal = strategy.on_snapshot("EUR/USD", snapshot, history=[])
+    signal = strategy.on_snapshot("EUR/USD", snapshot, history=[], position=None)
     assert signal.action == SignalAction.ENTER_LONG
     assert signal.symbol == "EUR/USD"
 

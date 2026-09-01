@@ -22,7 +22,7 @@ class _EntryThenExitStrategy(Strategy):
     def __init__(self):
         self.calls = 0
 
-    def on_snapshot(self, symbol, snapshot, history):
+    def on_snapshot(self, symbol, snapshot, history, position):
         self.calls += 1
         if self.calls == 1:
             return Signal(
@@ -82,7 +82,7 @@ def test_backtest_produces_no_trade_when_the_entry_never_fires():
     class _NeverEntersStrategy(Strategy):
         name = "never_enters"
         version = "v1"
-        def on_snapshot(self, symbol, snapshot, history):
+        def on_snapshot(self, symbol, snapshot, history, position):
             return None
 
     broker = PaperBrokerClient()

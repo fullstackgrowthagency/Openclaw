@@ -5,6 +5,7 @@ description = "Multi-tenant forex scalping bot with a user-buildable, AI-assiste
 requires-python = ">=3.11"
 dependencies = [
     "python-dotenv>=1.0",
+    "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]

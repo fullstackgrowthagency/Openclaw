@@ -90,7 +90,14 @@ class PaperBrokerClient(BrokerClient):
         self._next_order_id += 1
         order.broker_order_id = f"paper-{self._next_order_id}"
         order.status = OrderStatus.FILLED
-        order.updated_at = datetime.utcnow()
+        # Simulated time (the snapshot's own timestamp), NOT wall-clock
+        # datetime.utcnow() -- this fill happens "at" whatever moment the
+        # backtest/paper-trading loop is currently replaying, which matters
+        # for both live paper trading (fine either way) and, critically,
+        # backtesting historical data: a 2026-01-01 bar must produce a
+        # 2026-01-01 trade record, not "whenever this process happened to
+        # run in real time."
+        order.updated_at = snapshot.timestamp
         self._orders[order.broker_order_id] = order
 
         self._fills.append(Fill(

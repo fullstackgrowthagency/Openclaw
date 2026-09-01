@@ -113,11 +113,84 @@ parameters nothing yet sets.
   (the equities bot only needed that once it tracked multiple symbols
   concurrently) -- add it here once this bot does too.
 
+## Phase 3 -- indicators + rule-builder schema + compiler (done)
+
+**State-machine question, resolved.** The equities bot's multi-state
+discovery pipeline (WATCHING -> ... -> COOLDOWN) exists to filter noise
+while scanning thousands of constantly-changing tickers. This bot has no
+such discovery problem -- a `StrategyConfig` names exactly one pair, so
+there's nothing to scan or narrow down. `Strategy.on_snapshot`'s signature
+changed instead to take an explicit `position: Optional[Position]`
+parameter (the currently-open position on that pair, or None) -- the one
+piece of state a strategy genuinely needs (am I looking for an entry, or
+managing an exit?) without a separate Candidate/state-machine object.
+`BacktestEngine` now looks this up from `broker.get_positions()` each
+tick and passes it through.
+
+- `indicators/`: `sma`/`ema`/`rsi`, each returning a series the same
+  length as its input price list (leading `None`s where there isn't
+  enough history yet) -- this is what lets crossover conditions compare
+  "current vs previous" uniformly for any indicator. `registry.py` is the
+  single whitelist every layer reads from (validator, compiler, and
+  eventually the AI assistant's tool-use schema). ATR/Bollinger/MACD/
+  Stochastic are deliberately NOT here yet -- they need true OHLC bars
+  (high/low/close per period), which don't exist: `MarketSnapshot` is a
+  single bid/ask point, not an aggregated bar. Faking them off inadequate
+  data would produce numbers that look plausible but aren't the real
+  indicator; add them once a bar-aggregation module exists.
+- `strategy_builder/schema.py`: a Pydantic `StrategyConfig` -- pair,
+  named `IndicatorRef`s, an entry `ConditionGroup` (AND/OR/NOT tree of
+  `gt`/`lt`/`gte`/`lte`/`eq`/`crosses_above`/`crosses_below` comparisons
+  between indicator values/price/constants), an optional rule-based
+  `exit_conditions` group, and `stop_loss`/`take_profit` (fixed-pips only
+  for the stop; the target also supports `risk_reward_ratio`, scaling off
+  the stop distance). Trimmed to exactly what's real right now -- no
+  `timeframe` (meaningless without bar aggregation), no `position_sizing`
+  (RiskEngine.evaluate still decides `max_units`), no `filters` section
+  (max_spread_pips/session_windows/etc. are RiskEngine-level concerns per
+  the approved plan's field-mapping table, Phase 4). Add each back once
+  the infrastructure it depends on exists.
+- `strategy_builder/validator.py`: `validate_strategy_config` wraps BOTH
+  Pydantic's structural errors and semantic checks (unknown indicator
+  type, missing required params, a condition referencing an indicator_id
+  never declared in `indicators[]`) into one `StrategyConfigError` with a
+  flat message list -- the shape the approved plan's AI-assistant flow
+  needs (feed validation errors back to Claude for a repair attempt,
+  without the caller needing to handle two different exception types).
+- `strategy_builder/rule_based_strategy.py` + `compiler.py`: `compile()`
+  turns any validated `StrategyConfig` into a `RuleBasedStrategy` --
+  ONE `Strategy` ABC implementation every config becomes, whether
+  hand-authored, a built-in template, or (later) AI-authored. Indicator
+  series are recomputed fresh from `history` on every call (simple,
+  correct, revisit only if profiling ever shows it matters).
+
+**Parity proof** (`tests/test_rule_builder_parity.py`): a hand-coded
+EMA-crossover `Strategy` subclass and an equivalent compiled
+`StrategyConfig`, run through the identical `BacktestEngine` pipeline
+over identical bars, produce byte-for-byte identical `Trade` records
+(price, side, quantity, pnl, AND timestamps). This is the load-bearing
+guarantee for the whole rule-builder idea: if a declaratively-authored
+strategy behaved differently from its hand-coded equivalent, letting
+users (or the AI assistant) define strategies this way wouldn't be
+trustworthy.
+
+**Real bug found and fixed while writing that proof**: `PaperBrokerClient
+.place_order` was stamping fill/position timestamps with wall-clock
+`datetime.utcnow()` instead of the snapshot's own (simulated) timestamp
+-- harmless for live paper trading, but wrong for backtesting: two
+otherwise-identical backtest runs a few milliseconds apart in real time
+produced non-identical `Trade.opened_at`/`closed_at`, and a backtest
+replaying 2020 data would have recorded trades as happening today. Fixed
+to use `snapshot.timestamp`; regression test in
+`tests/test_paper_broker_client.py`.
+
 ## What's next
 
-Phase 3 (indicators + rule-builder schema + compiler) is the next planned
-increment, including the open question of whether a state-machine/
-Candidate-equivalent is actually needed for scalping -- see the approved
-plan for the full phase list and the deployment-model/broker-bridge
-decision (hybrid local MT4/5 connector + centrally-hosted dashboard/
-strategy engine/AI assistant).
+Phase 4 (forex-specific risk engine + position management) is the next
+planned increment -- expanding `RiskConfig` to the full pip/lot-based
+field set from the approved plan (real risk-%-of-equity/stop-distance
+sizing, max_spread_pips, session_windows, correlated-pair exposure caps)
+now that there's a rule-builder driving real strategy parameters for it
+to act on. See the approved plan for the full phase list and the
+deployment-model/broker-bridge decision (hybrid local MT4/5 connector +
+centrally-hosted dashboard/strategy engine/AI assistant).
