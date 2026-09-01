@@ -49,9 +49,29 @@ tracks what's actually built, phase by phase, as it lands.
   `BrokerClient.get_free_margin` replaces `get_buying_power` --
   forex/MT4-5 terminology, not a different concept.
 
+## Phase 1 -- live-trading safety gate (done)
+
+`config.py`'s `Settings` gained the deployment-wide half of the
+three-condition live-trading gate, verbatim in shape from `webull_bot`'s
+own (same confirmation phrase, same reasoning): `TRADING_MODE=live` AND
+`LIVE_TRADING_ENABLED=true` AND `LIVE_TRADING_CONFIRMATION` set to the
+exact phrase `is_live_trading_authorized()` checks for. All three are
+required so a single stray env var can never enable live trading by
+accident. `require_non_live_or_authorized()` raises at startup if a
+deployment claims `TRADING_MODE=live` without actually being authorized.
+
+Built now (not deferred to a late phase) per an explicit user decision:
+both demo and live accounts should be supported per-user from early on,
+not gated behind a "live" phase at the end. This is only the
+deployment-wide half of the gate, though -- a per-user opt-in toggle
+(mirroring `webull_bot`'s `BrokerCredential.live_trading_enabled`) is
+added later, once there's a user/auth system for it to belong to
+(multi-tenant hardening phase), exactly the same two-phase order the
+equities bot built these in.
+
 ## What's next
 
-Phase 1 (live-trading safety gate, built early) is the next planned
-increment -- see the approved plan for the full phase list and the
-deployment-model/broker-bridge decision (hybrid local MT4/5 connector +
+Phase 2 (paper broker + backtest skeleton) is the next planned increment
+-- see the approved plan for the full phase list and the deployment-
+model/broker-bridge decision (hybrid local MT4/5 connector +
 centrally-hosted dashboard/strategy engine/AI assistant).
