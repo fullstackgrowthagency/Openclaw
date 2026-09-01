@@ -1,16 +1,24 @@
 """
-RelayServer -- the minimal cloud-side WebSocket listener for Phase 5b's
-scope only: accepts inbound connector sockets and wraps each in a
-RelayConnection sharing this server's one background event loop. No
-auth/pairing or per-account routing yet -- that's Phase 5c, built on top
-of (not replacing) this. Used directly by tests today; once 5c lands, a
-thin per-account dispatch layer sits in front of `accept()`.
+RelayServer -- the cloud-side WebSocket listener: accepts inbound
+connector sockets and wraps each in a RelayConnection sharing this
+server's one background event loop. No per-account dispatch/routing
+layer in front of `accept()` yet -- production wiring of a real
+entrypoint (running this alongside the pairing HTTP app against the same
+PairingStore) is out of scope for Phase 5c, deferred to whenever the
+connector itself needs something real to dial (5d+); see the approved
+Phase 5c design's own note on this.
+
+Phase 5c: every accepted socket must authenticate (see
+RelayConnection._authenticate) BEFORE it is ever queued for `accept()`
+to pick up -- `accept()` therefore only ever returns an authenticated
+connection, never a bare one waiting to be authed later.
 """
 from __future__ import annotations
 
 import asyncio
 import queue
 import threading
+from typing import Callable, Optional
 
 import websockets.asyncio.server as ws_server
 
@@ -18,10 +26,17 @@ from .relay_connection import RelayConnection
 
 
 class RelayServer:
-    def __init__(self, host: str = "127.0.0.1", port: int = 0, *, default_timeout: float = 5.0):
+    def __init__(
+        self, host: str = "127.0.0.1", port: int = 0, *,
+        authenticator: Callable[[str], Optional[str]],
+        default_timeout: float = 5.0,
+        auth_grace_seconds: float = 10.0,
+    ):
         self._host = host
         self._requested_port = port
         self._default_timeout = default_timeout
+        self._authenticator = authenticator
+        self._auth_grace_seconds = auth_grace_seconds
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._server: ws_server.Server | None = None
@@ -45,6 +60,9 @@ class RelayServer:
 
     async def _handle_connection(self, websocket) -> None:
         conn = RelayConnection(self._loop, websocket, default_timeout=self._default_timeout)
+        authenticated = await conn._authenticate(self._authenticator, grace_seconds=self._auth_grace_seconds)
+        if not authenticated:
+            return  # _authenticate already closed the socket; nothing queued
         self._connections.put_nowait(conn)
         # `websockets` closes the socket the instant this handler
         # returns, so the handler's lifetime IS the connection's lifetime

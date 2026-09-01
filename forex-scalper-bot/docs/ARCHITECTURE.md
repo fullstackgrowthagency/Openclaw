@@ -378,12 +378,105 @@ only). `relay-protocol` itself is a required companion `pip install -e`
 step, documented in `README.md`, rather than an inline path dependency
 inside `pyproject.toml` -- see that section for why.
 
+## Phase 5c -- pairing flow backend routes (done)
+
+The minimal standalone auth flow a connector uses to pair itself to a
+cloud account, built specifically because it lands before Phase 10's
+real multi-tenant auth/database system exists -- not a preview of that
+system, a deliberately small, self-contained piece.
+
+- **New package `brokers/local_connector/pairing/`**: `codes.py`
+  (`generate_pairing_code()` -- 8 chars from a no-ambiguous-character
+  32-symbol alphabet, `"XXXX-XXXX"`, ~1.1x10^12 combinations),
+  `tokens.py` (`generate_token()` -- `secrets.token_urlsafe(32)`, 256
+  bits; `hash_token()` -- plain `hashlib.sha256`, deliberately NOT
+  `webull_bot`'s `Fernet`/reversible-encryption pattern, since a bearer
+  token is never read back in plaintext, and NOT bcrypt either, since
+  bcrypt's deliberate slow/salted hashing exists to resist brute-forcing
+  *low-entropy human-guessable* secrets -- a 256-bit token has no such
+  weakness for bcrypt to defend against, so it would only add latency to
+  every relay-connection handshake for nothing), `store.py`
+  (`PairingStore` -- bare stdlib `sqlite3`, WAL mode, `threading.Lock`
+  since it's called from both FastAPI's threadpool and `RelayServer`'s
+  event-loop thread; deliberately not SQLAlchemy, to avoid guessing at
+  Phase 10's real multi-tenant schema under no pressure to do so yet),
+  `routes.py` (`build_pairing_router(store, *, settings) -> APIRouter`,
+  the same DI-factory shape `webull_bot`'s own `auth/routes.py` uses, so
+  Phase 6's real dashboard just does `app.include_router(...)` with zero
+  rework), `app.py` (`create_pairing_app` -- thin, Phase-6-absorbable).
+  Both tables (`pairing_codes`, `connector_tokens`) carry an `account_id`
+  column from day one, mirroring how `relay_protocol`'s
+  `Envelope.make_auth` already carries one ahead of real multi-tenancy.
+- **Two routes**: `POST /connector/pairing-codes` (201) and
+  `POST /connector/pair` (200 with `{token, account_id}`; 404 unknown
+  code, 400 expired, 409 already used -- the same 404/400/409 convention
+  `webull_bot`'s own auth routes use). Re-pairing revokes the account's
+  previous token (single active token per account, v1's "old one
+  invalidated" rule). New dependency: `fastapi` (+ `httpx`/`uvicorn`,
+  dev-only for now) -- pulled in now rather than deferred to Phase 6
+  specifically so these two routes aren't thrown away and rebuilt later.
+- **AUTH wired end to end for the first time**: `RelayConnection` gains
+  `_authenticate(authenticator, grace_seconds)`, run by
+  `RelayServer._handle_connection` BEFORE a connection is ever queued for
+  `accept()` -- `accept()` therefore only ever returns an authenticated
+  connection, never a bare one waiting to be authed later. A connector
+  that sends nothing is caught by an `asyncio.wait_for` grace-period
+  timeout (default 10s, `connector_auth_grace_seconds`); a non-`auth`
+  first frame, a malformed frame, or an unrecognized token all close the
+  socket with a distinguishing WebSocket code (`4401`,
+  `AUTH_FAILURE_CLOSE_CODE`) so a real connector knows to stop
+  auto-reconnecting and prompt for re-pairing rather than hot-looping. A
+  late/duplicate `auth` frame arriving after a successful handshake is
+  logged and ignored (`_handle_frame`'s dead Phase-5b comment is now a
+  real branch) rather than silently vanished or mistaken for a
+  re-authentication attempt. `RelayServer.__init__` now takes a
+  **required** keyword-only `authenticator: Callable[[str],
+  Optional[str]]` (no silent-bypass default) --
+  `pairing.tokens.make_authenticator(store)` builds it, keeping
+  `relay_server.py`/`relay_connection.py` decoupled from `PairingStore`
+  and the hashing scheme entirely.
+- **Testing**: `tests/test_pairing_store.py` (store/codes/tokens, no
+  FastAPI, `tmp_path` sqlite, 10 tests) and `tests/test_pairing_routes.py`
+  (FastAPI `TestClient`, 6 tests) cover the HTTP flow and persistence in
+  isolation. `tests/test_relay_auth.py` (6 tests) deliberately bypasses
+  the now-auto-authenticating `relay_pair`/`local_connector_broker`
+  fixtures to exercise every failure path directly: valid token queued
+  with `account_id` set, invalid token closes with 4401, a non-auth first
+  frame closes with 4401, a malformed first frame closes with 4401, no
+  auth frame within the grace period times out and closes, and a late
+  duplicate auth frame is ignored without corrupting an otherwise-usable
+  connection. `FakeRelayPeer` gained `send_auth`/`send_raw`/
+  `wait_for_close` to support this. Both existing `RelayServer(...)`
+  construction sites (`tests/conftest.py`'s `relay_pair` fixture,
+  `tests/test_broker_client_contract.py`'s `_LocalConnectorHarness`) were
+  updated to authenticate before their first `accept()` call -- no other
+  existing test needed to change. Along the way, fixed a latent
+  `FakeRelayPeer` teardown race (its own `_connect_and_serve` task could
+  be torn down by the garbage collector mid-suspension if the event loop
+  stopped before that task finished unwinding, surfacing as an
+  intermittent `PytestUnraisableExceptionWarning` on an unrelated later
+  test) by waiting for that task to actually finish before stopping the
+  loop.
+- 22 new tests; full suite (`fx_bot` 182 + `relay_protocol` 16 = 198)
+  green, verified clean across 5 repeated runs (no flakiness).
+
+**Deliberately out of scope for 5c** (see the approved design's own
+flagged deferrals): per-IP/connection-count throttling of unauthenticated
+sockets and HTTP rate-limiting on the two pairing routes (both real
+multi-tenant infrastructure, Phase 10's job, and neither is needed yet --
+the pairing-code keyspace is already brute-force-infeasible unthrottled
+within its TTL); `is_live` still isn't wired to a real MT5 account-type
+value (`relay_protocol`'s `auth` payload carries no such field yet);
+production co-process wiring (one real entrypoint running both the
+pairing HTTP app and `RelayServer` against the same `PairingStore`) --
+`make_authenticator(store)` makes that a one-line closure whenever a real
+entrypoint is actually built (5d+).
+
 ## What's next
 
-Phase 5c (pairing flow backend routes -- the minimal standalone HTTP
-flow that issues a pairing code and exchanges it for a long-lived bearer
-token, since this lands before Phase 10's real multi-tenant auth exists)
-is next. See the approved plan's Phase 5 design for the full sub-phase
-list (5d connector skeleton, 5e PyInstaller packaging, 5f health/
-staleness wiring, 5g manual verification checkpoint once real Windows/
-MT5 access exists).
+Phase 5d (connector project skeleton -- the actual Windows-only Python
+process using MetaQuotes' `MetaTrader5` package, with the real `mt5.*`
+calls mocked at the module boundary for unit tests here) is next. See
+the approved plan's Phase 5 design for the full remaining sub-phase list
+(5e PyInstaller packaging, 5f health/staleness wiring, 5g manual
+verification checkpoint once real Windows/MT5 access exists).

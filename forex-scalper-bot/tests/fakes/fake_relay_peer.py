@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -52,6 +53,13 @@ class FakeRelayPeer:
         self._connected = threading.Event()
         self._ws = None
         self._stopped = False
+        self._serve_future: "Optional[concurrent.futures.Future]" = None
+        # Keyed by envelope id -- resolved by _handle_incoming when a
+        # RESPONSE/ERROR for that id arrives, so send_auth (the one place
+        # THIS peer sends a request-like frame and awaits a specific
+        # reply, rather than replying to the server's requests) doesn't
+        # race the main _connect_and_serve read loop for the same socket.
+        self._pending_replies: dict[str, asyncio.Future] = {}
 
     def script_response(self, method: str, payload: dict) -> None:
         self._scripts[method] = _ScriptedReply(kind="response", payload=payload)
@@ -80,6 +88,39 @@ class FakeRelayPeer:
 
         asyncio.run_coroutine_threadsafe(_send(), self._loop).result(timeout=5.0)
 
+    def send_auth(self, token: str, account_id: str) -> None:
+        """Sends a real `auth` envelope and blocks for its ack -- used by
+        fixtures/harnesses before their first server.accept() call now
+        that every connection must authenticate, and directly by 5c's own
+        auth-gating tests. Raises AssertionError if the server rejects it."""
+
+        async def _send() -> None:
+            envelope = Envelope.make_auth(token=token, account_id=account_id)
+            reply_future: asyncio.Future = self._loop.create_future()
+            self._pending_replies[envelope.id] = reply_future
+            await self._ws.send(envelope.to_wire())
+            reply = await asyncio.wait_for(reply_future, timeout=5.0)
+            if reply.kind == EnvelopeKind.ERROR:
+                raise AssertionError(f"Auth rejected: {reply.payload}")
+
+        asyncio.run_coroutine_threadsafe(_send(), self._loop).result(timeout=6.0)
+
+    def send_raw(self, raw: str) -> None:
+        """Sends arbitrary text verbatim -- including deliberately
+        malformed/non-envelope data -- for exercising the auth handshake's
+        failure paths directly."""
+        asyncio.run_coroutine_threadsafe(self._ws.send(raw), self._loop).result(timeout=5.0)
+
+    def wait_for_close(self, timeout: float = 5.0) -> int:
+        """Blocks until the server closes this peer's socket, returning
+        the close code (e.g. AUTH_FAILURE_CLOSE_CODE)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._ws is not None and self._ws.close_code is not None:
+                return self._ws.close_code
+            time.sleep(0.02)
+        raise AssertionError("Connection was not closed by the server within timeout.")
+
     def start(self, url: str) -> None:
         # Runs its loop via run_forever (matching RelayServer's own
         # pattern), NOT run_until_complete(self._serve(url)) -- tying the
@@ -94,7 +135,14 @@ class FakeRelayPeer:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        asyncio.run_coroutine_threadsafe(self._connect_and_serve(url), self._loop)
+        # Kept (not discarded) so stop() can wait for this task to
+        # actually finish unwinding before stopping the loop -- letting
+        # the loop stop while this coroutine is still suspended mid-
+        # iteration left it to be torn down by GC later (a GeneratorExit
+        # thrown into it with no running loop underneath, surfacing as a
+        # PytestUnraisableExceptionWarning attached to whatever unrelated
+        # test happened to trigger that garbage collection).
+        self._serve_future = asyncio.run_coroutine_threadsafe(self._connect_and_serve(url), self._loop)
         if not self._connected.wait(timeout=5.0):
             raise RuntimeError("FakeRelayPeer failed to connect within 5s.")
 
@@ -119,6 +167,11 @@ class FakeRelayPeer:
 
     async def _handle_incoming(self, ws, raw: str) -> bool:
         envelope = Envelope.from_wire(raw)
+        if envelope.kind in (EnvelopeKind.RESPONSE, EnvelopeKind.ERROR):
+            future = self._pending_replies.pop(envelope.id, None)
+            if future is not None and not future.done():
+                future.set_result(envelope)
+            return False
         if envelope.kind != EnvelopeKind.REQUEST:
             return False
         script = self._scripts.get(envelope.method)
@@ -163,6 +216,16 @@ class FakeRelayPeer:
             asyncio.run_coroutine_threadsafe(_close(), self._loop).result(timeout=5.0)
         except Exception:
             pass
+        # Wait for _connect_and_serve's own task to actually finish
+        # unwinding (it notices the close and exits its `async for` loop)
+        # BEFORE stopping the loop -- stopping first left that coroutine
+        # suspended mid-iteration, to be torn down later by GC with no
+        # running loop underneath (see start()'s comment on this future).
+        if self._serve_future is not None:
+            try:
+                self._serve_future.result(timeout=5.0)
+            except Exception:
+                pass
         self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread is not None:
             self._thread.join(timeout=5.0)

@@ -74,6 +74,17 @@ class Settings:
         default_factory=lambda: os.environ.get("LIVE_TRADING_CONFIRMATION", "")
     )
 
+    # --- Local-connector pairing (Phase 5c). ---
+    pairing_code_ttl_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("PAIRING_CODE_TTL_SECONDS", "600"))
+    )
+    pairing_db_path: str = field(
+        default_factory=lambda: os.environ.get("PAIRING_DB_PATH", str(PROJECT_ROOT / "data" / "pairing.db"))
+    )
+    connector_auth_grace_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("CONNECTOR_AUTH_GRACE_SECONDS", "10"))
+    )
+
     def is_live_trading_authorized(self) -> bool:
         """The single gate every code path must consult before an order
         can reach a real account. All three conditions are required:

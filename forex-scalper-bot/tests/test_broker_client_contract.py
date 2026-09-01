@@ -26,6 +26,7 @@ from fx_bot.brokers.local_connector.relay_server import RelayServer
 from fx_bot.brokers.paper.client import PaperBrokerClient
 from fx_bot.enums import OrderSide, OrderStatus, OrderType
 from fx_bot.models import MarketSnapshot, Order
+from tests.conftest import TEST_ACCOUNT_ID, TEST_TOKEN, _test_authenticator
 from tests.fakes.fake_relay_peer import FakeRelayPeer
 
 
@@ -50,10 +51,11 @@ class _PaperHarness:
 
 class _LocalConnectorHarness:
     def __init__(self):
-        self.server = RelayServer()
+        self.server = RelayServer(authenticator=_test_authenticator, auth_grace_seconds=5.0)
         self.server.start()
         self.peer = FakeRelayPeer()
         self.peer.start(f"ws://{self.server.host}:{self.server.port}")
+        self.peer.send_auth(TEST_TOKEN, TEST_ACCOUNT_ID)
         connection = self.server.accept(timeout=5.0)
         self.broker = LocalConnectorBroker(connection)
 
