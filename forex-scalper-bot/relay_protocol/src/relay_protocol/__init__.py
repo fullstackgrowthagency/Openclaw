@@ -11,13 +11,15 @@ Windows-only connector process, which must never need the cloud
 backend's dependency closure (FastAPI, SQLAlchemy, etc.) just to speak
 the protocol its own process uses.
 """
-from .envelope import Envelope, EnvelopeKind
+from .envelope import AUTH_FAILURE_CLOSE_CODE, Envelope, EnvelopeKind, WIRE_PROTOCOL_VERSION
 from .methods import EventMethod, RequestMethod
 from .wire_models import WireFill, WireMarketSnapshot, WireOrder, WirePosition
 
 __all__ = [
     "Envelope",
     "EnvelopeKind",
+    "WIRE_PROTOCOL_VERSION",
+    "AUTH_FAILURE_CLOSE_CODE",
     "RequestMethod",
     "EventMethod",
     "WireFill",

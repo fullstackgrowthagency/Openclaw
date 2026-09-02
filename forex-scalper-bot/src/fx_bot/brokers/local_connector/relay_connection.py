@@ -42,16 +42,16 @@ from typing import Any, Callable, Optional, Protocol
 
 from websockets.exceptions import ConnectionClosed
 
-from relay_protocol.envelope import Envelope, EnvelopeKind
+# Re-exported (not just imported for internal use) so existing callers of
+# `from fx_bot.brokers.local_connector.relay_connection import
+# AUTH_FAILURE_CLOSE_CODE` keep working -- the value itself now lives in
+# relay_protocol so the connector (which can't import fx_bot) reads the
+# exact same constant instead of an independently-maintained duplicate.
+from relay_protocol.envelope import AUTH_FAILURE_CLOSE_CODE, Envelope, EnvelopeKind
 
 from .exceptions import BrokerRejectedError, ConnectorOfflineError, ConnectorTimeoutError
 
 logger = logging.getLogger(__name__)
-
-# WebSocket close code used to tell a connector its auth attempt failed --
-# distinct from an ordinary close so the connector knows to stop
-# auto-reconnecting and prompt for re-pairing instead of hot-looping.
-AUTH_FAILURE_CLOSE_CODE = 4401
 
 
 class _Transport(Protocol):

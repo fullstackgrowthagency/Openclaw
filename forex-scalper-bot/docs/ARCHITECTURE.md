@@ -472,11 +472,111 @@ pairing HTTP app and `RelayServer` against the same `PairingStore`) --
 `make_authenticator(store)` makes that a one-line closure whenever a real
 entrypoint is actually built (5d+).
 
+## Phase 5d -- local connector project skeleton (done)
+
+The actual local MT4/5 connector program, as a **new standalone
+project** at `forex-scalper-bot/connector/` -- sharing only
+`relay_protocol` with `fx_bot` (never imports `fx_bot` itself), since
+this is the one piece of the monorepo meant to eventually run on an
+end-user's Windows machine (PyInstaller-packaged in Phase 5e). Grounded
+directly against MetaQuotes' official MQL5 docs for the real
+`MetaTrader5` Python package's API surface, not assumed.
+
+- **`AUTH_FAILURE_CLOSE_CODE` hoisted into `relay_protocol`** (next to
+  `WIRE_PROTOCOL_VERSION`) as a small addendum to Phase 5b/5c code,
+  decided at the start of this phase rather than left as two
+  independently-maintained `4401` literals -- the connector can't import
+  `fx_bot.brokers.local_connector.relay_connection` to get it, so both
+  sides now read one shared source of truth (`relay_connection.py`
+  re-exports it, so no existing test import broke).
+- **`symbols.py`**: `wire_pair_to_mt5_symbol`/`mt5_symbol_to_wire_pair`
+  translate between fx_bot's `"EUR/USD"` convention and MT5's confirmed
+  no-separator `"EURUSD"` format -- deliberately duplicated in miniature
+  rather than importing `fx_bot.pairs` (this project must never depend
+  on `fx_bot`). Per-broker suffixes threaded through but never
+  auto-detected, flagged for Phase 5g.
+- **`mt5_client.py`**: `MT5Client` takes the real-or-fake `mt5` module
+  via constructor injection (never a bare top-level `import
+  MetaTrader5`), translating between MT5's native shapes and
+  `relay_protocol`'s `Wire*` models. The tricky parts, each explicitly
+  stated rather than hand-waved: an in-memory `_order_registry` maps
+  MT5's order/position/deal ticket trio onto this project's
+  `broker_order_id`/`strategy_name` (falling back to `"external"` on a
+  miss, consistent with `fx_bot.ExitReason.EXTERNAL_CLOSE` already
+  anticipating exactly this gap) -- lost on a connector restart, a
+  stated limitation, not a bug; `order_send`'s retcode **raises**
+  `MT5OrderRejectedError` rather than ever returning a "rejected"-status
+  `WireOrder`, since the cloud's `BrokerRejectedError` only ever fires
+  off an `error`-kind envelope, never a normal response; `get_bars` maps
+  OHLC bars to synthetic zero-spread snapshots (no OHLC field exists on
+  `WireMarketSnapshot`); `poll_fills` synthesizes fills directly from
+  `order_send`'s own result rather than reaching for the unverified
+  `history_deals_get` API, so it only ever reflects fills this connector
+  itself produced within its current process lifetime.
+- **`mt5_executor.py`**: every blocking `mt5.*` call -- from both
+  `relay_client.py`'s request handlers and `main.py`'s polling loops --
+  routes through one shared **single-worker** executor
+  (`run_in_executor`, the same idiom already used cloud-side for the
+  pairing sqlite lookup during auth). `max_workers=1` deliberately:
+  whether MT5's IPC channel is safe under concurrent calls is
+  unverified, so serializing removes that risk regardless.
+- **`relay_client.py`**: the connector-side counterpart to
+  `RelayConnection`/`RelayServer`, as a WebSocket client with real MT5
+  dispatch instead of test scripting. Auth mirrors the **cloud's** own
+  ordering (connect -> send `auth` -> one direct `recv()` for the ack ->
+  only then start the read loop) rather than `FakeRelayPeer`'s
+  id-correlation pattern, since nothing else is reading the socket yet
+  at that point. `AuthFailure` (a rejected token, or a `4401` close)
+  propagates out of `run_forever()` rather than being retried --
+  retrying a rejected token can never succeed. Reconnect-with-backoff
+  (`backoff.py`) uses **proportional** jitter (not `webull_bot`'s flat
+  jitter, which does nothing to spread out many connectors reconnecting
+  at exactly the same cap after a shared outage) and only resets the
+  attempt counter after a connection has been authenticated and stable
+  for 10+ seconds, not on every successful auth.
+- **`pairing.py`**: the HTTP client side of Phase 5c's pairing routes --
+  `pair()`/`save_credentials()`/`load_credentials()`/`prompt_and_pair()`,
+  mapping 404/400/409 to a `PairingError` with a retry-with-fresh-code
+  message. Token file gets `chmod 0600` on POSIX; Windows ACL-based
+  protection is explicitly deferred to installer work (5e+).
+- **`main.py`**: wires it all together on one event loop
+  (`asyncio.gather` of the relay-with-re-pairing loop, the quote-polling
+  loop, and the heartbeat loop) -- `_import_real_mt5()` is the *only*
+  place `import MetaTrader5` ever executes anywhere in this project,
+  inside a function, never at module load time, which is what keeps the
+  whole package importable and testable on Linux.
+- **Testing, no real MT5 or real cloud server needed**:
+  `tests/fakes/fake_mt5_module.py` (a plain scriptable object exposing
+  exactly the `mt5.*` surface `MT5Client` calls) and
+  `tests/fakes/fake_cloud_peer.py` (a real `websockets` **server**, the
+  inverse of `fake_relay_peer.py`, playing the cloud's role for testing
+  `relay_client.py` end to end over a real socket). 52 tests across
+  `test_symbols.py`, `test_backoff.py`, `test_mt5_client.py` (21),
+  `test_relay_client.py` (10, including auth success/rejection/4401,
+  order-rejection -> `error`-not-`response`, reconnect backoff timing,
+  no-reconnect-after-auth-failure), `test_pairing.py`, and
+  `test_main_wiring.py` -- verified clean across repeated runs. Along
+  the way, fixed the same class of async-teardown race caught twice
+  already on the cloud side (a cancelled `run_forever` task needs a real
+  chance to unwind, including draining `websockets`' own internal
+  supporting tasks, before the test harness stops its event loop).
+
+**Deliberately out of scope for 5d** (see the approved design's own
+flagged deferrals): PyInstaller packaging (5e); the cloud-side
+consumption/alerting half of health/staleness (5f -- 5d only builds the
+connector-side event-*pushing* mechanism); any real-hardware/real-broker
+verification -- per-broker symbol suffixes, real `type_filling` support,
+real `ACCOUNT_TRADE_MODE_*` integer values, whether
+`history_deals_get`/`history_orders_get` behave as expected (5g); a
+GUI/installer config replacing the env-var `ConnectorSettings` shape and
+Windows ACL token protection (5e+); wiring `is_live_account()` through
+the wire protocol (no field exists yet, an already-flagged deferral).
+
 ## What's next
 
-Phase 5d (connector project skeleton -- the actual Windows-only Python
-process using MetaQuotes' `MetaTrader5` package, with the real `mt5.*`
-calls mocked at the module boundary for unit tests here) is next. See
-the approved plan's Phase 5 design for the full remaining sub-phase list
-(5e PyInstaller packaging, 5f health/staleness wiring, 5g manual
-verification checkpoint once real Windows/MT5 access exists).
+Phase 5e (PyInstaller packaging -- freezing `connector/` into a
+standalone signed `.exe` so end users don't need Python installed) is
+next. See the approved plan's Phase 5 design for the full remaining
+sub-phase list (5f health/staleness wiring on the cloud side, 5g manual
+verification checkpoint once real Windows/MT5 access exists, resolving
+every flagged assumption from Phase 5d).

@@ -26,6 +26,16 @@ from pydantic import BaseModel, Field
 
 WIRE_PROTOCOL_VERSION = 1
 
+# WebSocket close code a relay server sends when an `auth` frame is
+# missing, malformed, or carries an invalid/unrecognized token -- a
+# connector seeing this specific code must stop auto-reconnecting and
+# prompt for re-pairing rather than hot-looping, since retrying with the
+# same rejected token can never succeed. Lives here (not on the cloud
+# side alone) so both the cloud's RelayConnection and the connector's own
+# RelayClient read one shared source of truth instead of two
+# independently-maintained literals.
+AUTH_FAILURE_CLOSE_CODE = 4401
+
 
 class EnvelopeKind(str, Enum):
     REQUEST = "request"
