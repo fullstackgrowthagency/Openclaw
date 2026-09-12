@@ -572,11 +572,90 @@ GUI/installer config replacing the env-var `ConnectorSettings` shape and
 Windows ACL token protection (5e+); wiring `is_live_account()` through
 the wire protocol (no field exists yet, an already-flagged deferral).
 
+## Phase 5e -- PyInstaller packaging (done, within this environment's real limits)
+
+Two hard platform facts, confirmed by direct research (not assumed),
+shape what this phase could actually deliver here:
+
+1. **PyInstaller does not cross-compile.** Running it on Linux can only
+   ever produce a Linux binary -- confirmed by PyInstaller's own FAQ. A
+   real Windows `.exe` build of this connector **must** happen on an
+   actual Windows machine or a Windows CI runner; nothing about how the
+   spec file is written changes that. Wine was considered and rejected
+   as a workaround -- `MetaTrader5` is a compiled C-extension doing live
+   Windows IPC with a running terminal, a stack nobody documents working
+   under Wine.
+2. **Code signing is a separate, real-money, identity-verified,
+   Windows-native step** -- a purchased Authenticode certificate
+   (~$200-$600/year, OV vs EV) whose private key must now live on a
+   FIPS-140-2-Level-2+ hardware token or CA-hosted cloud HSM per current
+   CA/Browser Forum rules, signed via `signtool.exe`. Not attemptable
+   here at any price, and a distinct decision (which CA, whose identity)
+   from getting a working unsigned build.
+
+So this phase's real deliverable is the packaging **configuration**, a
+documented build/verification checklist for the eventual real Windows
+session, and a genuine (if partial) smoke test -- not a working signed
+`.exe`, which simply cannot be produced in this environment. Same
+honest-scoping discipline as 5d's MT5 mocking, applied to a hard
+platform wall instead of missing hardware.
+
+- **`connector/packaging/connector.spec`**: onedir, not onefile --
+  onefile's self-extract-to-temp-on-every-launch pattern is documented
+  to frequently trigger antivirus false positives and adds startup
+  latency; onedir (PyInstaller's own default) ships a static folder
+  instead. Points at a new `run_connector.py` bootstrap script, **not**
+  `main.py` directly -- confirmed the hard way, by actually running an
+  early build: `main.py`'s package-relative imports
+  (`from .config import ...`) raise `ImportError: attempted relative
+  import with no known parent package` when PyInstaller runs a script
+  directly as `__main__` rather than as an imported package's submodule.
+  `run_connector.py` has no relative imports of its own and does a
+  plain `from fx_connector.main import main` instead, which sidesteps
+  the problem entirely. Two defensive `hiddenimports` entries
+  (`MetaTrader5`, `websockets.legacy.client`) and a `certifi` data-files
+  inclusion for `httpx`'s TLS cert bundle -- each flagged as "verify and
+  possibly remove" on the real Windows build, not presented as settled.
+- **`connector/packaging/build.ps1`**: a thin PowerShell wrapper, written
+  and reviewable here but only ever runnable on the real build machine
+  this phase keeps deferring to.
+- **`connector/packaging/README.md`**: the build/verification checklist
+  for that real Windows session (what to check if `MetaTrader5` or
+  `websockets` fail to bundle, how to confirm the frozen exe actually
+  starts, the onedir-vs-installer-wrapper question) plus the code-signing
+  prerequisites written out in full, explicitly not attempted here.
+- **What was actually verified, on this Linux machine**: `pyinstaller`
+  itself is pure-Python and runs fine here even though it can't target
+  Windows. Running it against the real spec produced a genuine Linux
+  binary, catching a real bug (the relative-import issue above) that a
+  written-but-never-run spec would have shipped silently. Two smoke runs
+  of the frozen binary: with no saved credentials, it correctly loaded
+  config, found no token, and attempted the real pairing HTTP POST
+  (failing only on `Connection refused`, since nothing is listening in
+  this sandbox -- proof `httpx`/`asyncio`/config all froze and ran
+  correctly); with a pre-seeded fake credentials file, it skipped
+  pairing and reached `_import_real_mt5()`, failing there with a clean
+  `ModuleNotFoundError: No module named 'MetaTrader5'` -- exactly the
+  correct behavior for a non-Windows build (the package is genuinely
+  absent, per its `sys_platform == 'win32'` marker, not silently bundled
+  wrong), and proof the platform guard holds inside a frozen build too,
+  not just under `python main.py`. Final onedir output: ~31MB, no
+  unexpected missing-module warnings beyond the expected `MetaTrader5`
+  one and routine stdlib/pydantic-optional-extra noise.
+
+**Deliberately out of scope, confirmed impossible here rather than
+skipped by choice**: a real Windows `.exe` build; code signing; an
+installer wrapper (Inno Setup/NSIS) around the onedir output --
+mentioned as the eventual distribution answer, not built now. Phase 5g's
+real-MT5-hardware verification items remain exactly as flagged in
+Phases 5b-5d.
+
 ## What's next
 
-Phase 5e (PyInstaller packaging -- freezing `connector/` into a
-standalone signed `.exe` so end users don't need Python installed) is
-next. See the approved plan's Phase 5 design for the full remaining
-sub-phase list (5f health/staleness wiring on the cloud side, 5g manual
-verification checkpoint once real Windows/MT5 access exists, resolving
-every flagged assumption from Phase 5d).
+Phase 5f (health/staleness wiring on the cloud side -- the two-tier
+`_last_known_snapshots`-style system that actually *consumes* the
+`heartbeat`/`mt5_disconnected`/`mt5_reconnected` events Phase 5d's
+connector already pushes) is next. See the approved plan's Phase 5
+design for the full remaining sub-phase list (5g manual verification
+checkpoint once real Windows/MT5 access exists, resolving every flagged
+assumption from Phases 5b-5e).

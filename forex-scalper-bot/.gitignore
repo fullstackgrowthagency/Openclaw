@@ -6,3 +6,8 @@ __pycache__/
 *.log
 *.db
 .env
+
+# PyInstaller build output (connector/packaging/) -- generated, and the
+# real Windows build in particular should never be committed.
+connector/packaging/build/
+connector/packaging/dist/
