@@ -61,7 +61,15 @@ def test_submit_entry_places_a_market_order_with_the_signals_bracket():
     broker = _RecordingBroker()
     manager = OrderManager(broker, RiskEngine())
     signal = Signal(
-        symbol="EUR/USD", action=SignalAction.ENTER_LONG, generated_at=datetime.utcnow(),
+        symbol="EUR/USD", action=SignalAction.ENTER_LONG,
+        # A fixed weekday timestamp, not datetime.utcnow() -- this signal
+        # must clear RiskEngine.evaluate()'s real session/market-open
+        # check (see risk/risk_engine.py's _session_currently_allowed),
+        # and forex markets are closed on weekends: using the wall clock
+        # here made this test genuinely flaky depending on what day it
+        # happened to run (caught when a container restart landed on a
+        # Saturday). 2026-01-06 is a Tuesday.
+        generated_at=datetime(2026, 1, 6, 12, 0, 0),
         strategy_name="test", strategy_version="v1", reference_price=1.1000,
         suggested_stop=1.0980, suggested_target=1.1040,
     )
